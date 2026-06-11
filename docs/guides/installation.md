@@ -4,28 +4,38 @@
 
 - Python 3.8+ with `pip`
 - `pytest` and `coverage` Python packages
-- Linux (x86_64 or ARM64) — macOS support coming in v2
+- Linux x86_64
+- [Rust toolchain](https://rustup.rs) 1.75+ (to build from source)
 
-## Binary (Recommended)
+> **Pre-release:** riptide is not yet published to crates.io or GitHub Releases. Build from source with `cargo build --release` (binary at `target/release/riptide`). The download URLs below are placeholders for a future release.
 
-Download the pre-built binary from the [releases page](https://github.com/your-org/riptide/releases/latest):
+## From Source (Recommended)
+
+This is the working path today. With the [Rust toolchain](https://rustup.rs) 1.75+ installed:
 
 ```bash
-# Linux x86_64
-curl -sSfL https://github.com/your-org/riptide/releases/latest/download/riptide-linux-x86_64 \
-  -o /usr/local/bin/riptide && chmod +x /usr/local/bin/riptide
+cargo build --release
 
-# Linux ARM64
-curl -sSfL https://github.com/your-org/riptide/releases/latest/download/riptide-linux-arm64 \
-  -o /usr/local/bin/riptide && chmod +x /usr/local/bin/riptide
+# binary at target/release/riptide; copy it onto your PATH, e.g.
+install -m 0755 target/release/riptide /usr/local/bin/riptide
 
 # Verify
 riptide --version
 ```
 
-## From Source (Cargo)
+## Binary (Future / Illustrative)
 
-Requires [Rust toolchain](https://rustup.rs) 1.75+:
+Once releases are published, you will be able to download a pre-built binary. The commands below are placeholders for that future release:
+
+```bash
+# Linux x86_64 (placeholder URL — not yet available)
+curl -sSfL https://github.com/your-org/riptide/releases/latest/download/riptide-linux-x86_64 \
+  -o /usr/local/bin/riptide && chmod +x /usr/local/bin/riptide
+```
+
+## Cargo Install (Future / Illustrative)
+
+Once published to crates.io, this will also work (not yet available):
 
 ```bash
 cargo install riptide
@@ -43,13 +53,13 @@ uv add --dev pytest coverage
 
 ## CI / GitHub Actions
 
-The [official workflow](.github/workflows/ci.yml) handles installation automatically. For custom setups:
+The [official workflow](.github/workflows/ci.yml) handles installation automatically. Until prebuilt binaries are published, build from source in CI:
 
 ```yaml
-- name: Install riptide
+- name: Build riptide
   run: |
-    curl -sSfL https://github.com/your-org/riptide/releases/latest/download/riptide-linux-x86_64 \
-      -o /usr/local/bin/riptide && chmod +x /usr/local/bin/riptide
+    cargo build --release
+    install -m 0755 target/release/riptide /usr/local/bin/riptide
 
 - name: Run tests
   run: riptide tests/ --coverage -n 4

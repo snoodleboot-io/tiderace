@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -16,7 +16,8 @@ impl Database {
     }
 
     fn init(&self) -> Result<()> {
-        self.conn.execute_batch("
+        self.conn.execute_batch(
+            "
             CREATE TABLE IF NOT EXISTS file_hashes (
                 path TEXT PRIMARY KEY,
                 hash TEXT NOT NULL,
@@ -47,7 +48,8 @@ impl Database {
                 ran_at TEXT NOT NULL,
                 PRIMARY KEY (run_id, file_path)
             );
-        ")?;
+        ",
+        )?;
         Ok(())
     }
 
@@ -92,10 +94,11 @@ impl Database {
 
     /// Get all deps for a test
     pub fn get_test_deps(&self, test_id: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT dep_path FROM test_file_deps WHERE test_id = ?1"
-        )?;
-        let deps = stmt.query_map(params![test_id], |row| row.get(0))?
+        let mut stmt = self
+            .conn
+            .prepare("SELECT dep_path FROM test_file_deps WHERE test_id = ?1")?;
+        let deps = stmt
+            .query_map(params![test_id], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<String>>>()?;
         Ok(deps)
     }
@@ -134,29 +137,122 @@ impl Database {
         }
     }
 
-    /// Save coverage data for a run
-    pub fn save_coverage(&self, run_id: &str, coverage: &HashMap<String, (Vec<u32>, u32)>) -> Result<()> {
+    /// Persist a coverage report for a run. Stores executed and total line
+    /// counts per file so coverage history is queryable after the run.
+    pub fn save_coverage(
+        &self,
+        run_id: &str,
+        coverage: &HashMap<String, crate::runner::CoverageInfo>,
+    ) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        for (file, (covered_lines, total)) in coverage {
-            let lines_json = serde_json::to_string(covered_lines)?;
+        for (file, info) in coverage {
             self.conn.execute(
-                "INSERT OR REPLACE INTO coverage_data 
+                "INSERT OR REPLACE INTO coverage_data
                  (run_id, file_path, lines_covered, lines_total, ran_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![run_id, file, lines_json, total, now],
+                params![
+                    run_id,
+                    file,
+                    info.executed_lines.to_string(),
+                    info.total_lines,
+                    now
+                ],
             )?;
         }
         Ok(())
     }
 
-    /// Get all stored test IDs and their file paths
-    pub fn get_all_tests(&self) -> Result<Vec<(String, String)>> {
+    /// Read back persisted coverage rows for a run: `(file_path, executed, total)`.
+    /// Read-side counterpart to [`save_coverage`]; consumed by tests and available
+    /// for coverage-history tooling.
+    #[allow(dead_code)]
+    pub fn get_coverage(&self, run_id: &str) -> Result<Vec<(String, u32, u32)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT test_id, file_path FROM test_results"
+            "SELECT file_path, lines_covered, lines_total FROM coverage_data WHERE run_id = ?1",
         )?;
-        let tests = stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(tests)
+        let rows = stmt
+            .query_map(params![run_id], |row| {
+                let executed: String = row.get(1)?;
+                let total: u32 = row.get(2)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    executed.parse().unwrap_or(0),
+                    total,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runner::{CoverageInfo, TestResult, TestStatus};
+
+    fn temp_db() -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("state.db")).unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn file_hash_round_trip() {
+        let (_d, db) = temp_db();
+        assert!(db.get_file_hash("a.py").unwrap().is_none());
+        db.save_file_hash("a.py", "deadbeef").unwrap();
+        assert_eq!(
+            db.get_file_hash("a.py").unwrap().as_deref(),
+            Some("deadbeef")
+        );
+    }
+
+    #[test]
+    fn test_result_and_deps_round_trip() {
+        let (_d, db) = temp_db();
+        let res = TestResult {
+            test_id: "t.py::test_x".into(),
+            file_path: "t.py".into(),
+            status: TestStatus::Failed,
+            duration_ms: 12,
+            stdout: Some("out".into()),
+            stderr: None,
+            covered_files: vec!["src/a.py".into(), "src/b.py".into()],
+        };
+        db.save_test_result(&res).unwrap();
+        db.save_test_deps(&res.test_id, &res.covered_files).unwrap();
+        assert_eq!(
+            db.get_last_result("t.py::test_x").unwrap().as_deref(),
+            Some("failed")
+        );
+        let mut deps = db.get_test_deps("t.py::test_x").unwrap();
+        deps.sort();
+        assert_eq!(deps, vec!["src/a.py".to_string(), "src/b.py".to_string()]);
+    }
+
+    #[test]
+    fn deps_are_replaced_not_appended() {
+        let (_d, db) = temp_db();
+        db.save_test_deps("t", &["a".into(), "b".into()]).unwrap();
+        db.save_test_deps("t", &["c".into()]).unwrap();
+        assert_eq!(db.get_test_deps("t").unwrap(), vec!["c".to_string()]);
+    }
+
+    #[test]
+    fn coverage_persists_and_reads_back() {
+        // The W3 fix: coverage_data is actually written now.
+        let (_d, db) = temp_db();
+        let mut cov = HashMap::new();
+        cov.insert(
+            "src/a.py".to_string(),
+            CoverageInfo {
+                executed_lines: 8,
+                total_lines: 10,
+                percentage: 80.0,
+            },
+        );
+        db.save_coverage("run1", &cov).unwrap();
+        let rows = db.get_coverage("run1").unwrap();
+        assert_eq!(rows, vec![("src/a.py".to_string(), 8, 10)]);
     }
 }

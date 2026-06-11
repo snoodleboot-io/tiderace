@@ -29,6 +29,9 @@ riptide tests/test_auth.py::test_login  # single test (passed to pytest)
 | `--all` | | off | Run all tests, skip impact analysis |
 | `--pattern REGEX` | | `test_.*\.py\|.*_test\.py` | File discovery regex |
 | `--db PATH` | | `.riptide.db` | SQLite state database path |
+| `--timeout SECS` | | `300` | Per-test wall-clock timeout in seconds; a test that exceeds it is killed and recorded as an error |
+
+Defaults can also be set in `[tool.riptide]` in `pyproject.toml`. Precedence is **explicit CLI flag > `pyproject.toml` value > built-in default** — see [Configuration](../guides/configuration.md).
 
 **Exit codes:** See [Exit Codes](exit-codes.md).
 
@@ -80,11 +83,15 @@ riptide coverage
 # Standard development workflow
 riptide tests/
 
-# First run on a new project (builds dep graph)
+# First run on a new project — run with --coverage to build the dep graph
+# that unlocks precise source-level impact analysis
 riptide tests/ --coverage --all
 
 # CI run — 8 workers, coverage, explicit Python
 riptide tests/ -n 8 --coverage --python .venv/bin/python
+
+# Tighten the per-test timeout to 60 seconds
+riptide tests/ --timeout 60
 
 # Debug a specific test with full output
 riptide tests/test_auth.py::test_login --all -n 1

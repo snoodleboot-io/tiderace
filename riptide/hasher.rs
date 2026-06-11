@@ -1,5 +1,5 @@
 use anyhow::Result;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -23,10 +23,14 @@ pub fn hash_all_python_files(root: &Path) -> Result<HashMap<String, String>> {
         .filter_map(|e| e.ok())
         .filter(|e| {
             let path = e.path();
-            path.extension().map_or(false, |ext| ext == "py")
+            path.extension().is_some_and(|ext| ext == "py")
                 && !path.components().any(|c| {
                     let s = c.as_os_str().to_string_lossy();
-                    s == ".git" || s == "__pycache__" || s == ".venv" || s == "venv" || s == "node_modules"
+                    s == ".git"
+                        || s == "__pycache__"
+                        || s == ".venv"
+                        || s == "venv"
+                        || s == "node_modules"
                 })
         })
     {
@@ -63,10 +67,7 @@ pub fn find_changed_files(
 }
 
 /// Persist all current hashes into the database
-pub fn save_hashes(
-    hashes: &HashMap<String, String>,
-    db: &crate::db::Database,
-) -> Result<()> {
+pub fn save_hashes(hashes: &HashMap<String, String>, db: &crate::db::Database) -> Result<()> {
     for (path, hash) in hashes {
         db.save_file_hash(path, hash)?;
     }
