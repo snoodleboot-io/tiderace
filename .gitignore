@@ -1,1 +1,24 @@
 /target
+
+# riptide runtime state
+.riptide.db
+.riptide-coverage/
+
+# Phase 1 benchmark environment (provisioned by Lane 0)
+.riptide-bench-venv/
+
+# Session files are per-developer working state, not committed (see core-session.md)
+.prompticorn/sessions/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+.coverage.*
+.testmondata
+
+# Generated benchmark artifacts (regenerate via benchmarks/run_benchmarks.py)
+benchmarks/fixtures/sample_project/
+benchmarks/RESULTS.md
+benchmarks/results.json

@@ -13,23 +13,42 @@ riptide is configured via command-line flags and optionally a `pyproject.toml` s
 | `--all` | off | Ignore impact analysis, run everything |
 | `--pattern` | `test_.*\.py\|.*_test\.py` | Regex for test file discovery |
 | `--db` | `.riptide.db` | Path to SQLite state database |
+| `--timeout` | `300` | Per-test wall-clock timeout in seconds |
+
+A test that exceeds `--timeout` is killed and recorded as an error.
 
 ## pyproject.toml
 
-Add a `[tool.riptide]` section to configure defaults:
+riptide reads defaults from a `[tool.riptide]` section in your `pyproject.toml`:
 
 ```toml
 [tool.riptide]
-workers = 8
-python = ".venv/bin/python"
-coverage = true
-pattern = "test_.*\\.py"
-db = ".riptide.db"
-paths = ["tests/", "integration/"]
+workers = 8                          # int
+python = ".venv/bin/python"          # string
+coverage = true                      # bool
+pattern = "test_.*\\.py"             # string (regex)
+db = ".riptide.db"                   # path
+paths = ["tests/", "integration/"]   # list of strings
+timeout = 300                        # int (seconds)
 ```
 
-!!! note
-    CLI flags always take precedence over `pyproject.toml` settings.
+| Key | Type | Description |
+|---|---|---|
+| `workers` | int | Parallel worker threads |
+| `python` | string | Python binary to use |
+| `coverage` | bool | Enable per-test coverage |
+| `pattern` | string (regex) | Test file discovery regex |
+| `db` | path | SQLite state database path |
+| `paths` | list of strings | Default test directories or files to scan |
+| `timeout` | int (seconds) | Per-test wall-clock timeout |
+
+### Precedence
+
+Configuration is resolved in this order, highest priority first:
+
+**explicit CLI flag > `pyproject.toml` value > built-in default**
+
+So a flag passed on the command line always wins; if a setting is not given on the CLI, the `[tool.riptide]` value is used; otherwise the built-in default applies.
 
 ## Environment Variables
 

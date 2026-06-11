@@ -1,0 +1,32 @@
+version: '1.0'
+repository:
+  type: single-language
+  mappings: {}
+spec:
+  language: rust
+  runtime: '1.75'
+  package_manager: Cargo
+  test_framework: built-in
+  linter:
+    - clippy
+  linters:
+    - clippy
+  formatter: rustfmt
+  coverage:
+    line: 80
+    branch: 70
+    function: 90
+    statement: 85
+    mutation: 80
+    path: 60
+  repo_type: single-language
+  version: '1.76'
+variant: minimal
+active_personas:
+  - backend_software_engineer
+  - architect
+  - qa_tester
+  - devops_engineer
+  - security_engineer
+  - product_manager
+  - technical_writer

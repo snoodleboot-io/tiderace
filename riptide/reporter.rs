@@ -2,26 +2,43 @@ use colored::Colorize;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::runner::{CoverageInfo, TestResult, TestStatus};
 use crate::collector::TestItem;
+use crate::runner::{CoverageInfo, TestResult, TestStatus};
 
 pub fn print_header(total: usize, skipped: usize, workers: usize, with_coverage: bool) {
     println!();
-    println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed());
+    println!(
+        "{}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed()
+    );
     println!(
         "  {} {}",
         "riptide".bold().cyan(),
         "⚡ Rust-powered test engine".dimmed()
     );
-    println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed());
+    println!(
+        "{}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed()
+    );
     println!(
         "  {} {}   {} {}   {} {}   {} {}",
-        "tests:".dimmed(), total.to_string().bold(),
-        "skipped (unchanged):".dimmed(), skipped.to_string().yellow().bold(),
-        "workers:".dimmed(), workers.to_string().bold(),
-        "coverage:".dimmed(), if with_coverage { "on".green().bold() } else { "off".dimmed() }
+        "tests:".dimmed(),
+        total.to_string().bold(),
+        "skipped (unchanged):".dimmed(),
+        skipped.to_string().yellow().bold(),
+        "workers:".dimmed(),
+        workers.to_string().bold(),
+        "coverage:".dimmed(),
+        if with_coverage {
+            "on".green().bold()
+        } else {
+            "off".dimmed()
+        }
     );
-    println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed());
+    println!(
+        "{}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed()
+    );
     println!();
 }
 
@@ -31,27 +48,61 @@ pub fn print_summary(
     elapsed: Duration,
     coverage: Option<&HashMap<String, CoverageInfo>>,
 ) {
-    let passed = results.iter().filter(|r| r.status == TestStatus::Passed).count();
-    let failed = results.iter().filter(|r| r.status == TestStatus::Failed).count();
-    let errors = results.iter().filter(|r| r.status == TestStatus::Error).count();
-    let skipped_run = results.iter().filter(|r| r.status == TestStatus::Skipped).count();
+    let passed = results
+        .iter()
+        .filter(|r| r.status == TestStatus::Passed)
+        .count();
+    let failed = results
+        .iter()
+        .filter(|r| r.status == TestStatus::Failed)
+        .count();
+    let errors = results
+        .iter()
+        .filter(|r| r.status == TestStatus::Error)
+        .count();
+    let skipped_run = results
+        .iter()
+        .filter(|r| r.status == TestStatus::Skipped)
+        .count();
 
     println!();
-    println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed());
+    println!(
+        "{}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed()
+    );
     println!("  {}", "Results".bold());
-    println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed());
+    println!(
+        "{}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed()
+    );
 
     if passed > 0 {
-        println!("  {} {}", "✓ passed:".green(), passed.to_string().green().bold());
+        println!(
+            "  {} {}",
+            "✓ passed:".green(),
+            passed.to_string().green().bold()
+        );
     }
     if failed > 0 {
-        println!("  {} {}", "✗ failed:".red(), failed.to_string().red().bold());
+        println!(
+            "  {} {}",
+            "✗ failed:".red(),
+            failed.to_string().red().bold()
+        );
     }
     if errors > 0 {
-        println!("  {} {}", "E errors:".yellow(), errors.to_string().yellow().bold());
+        println!(
+            "  {} {}",
+            "E errors:".yellow(),
+            errors.to_string().yellow().bold()
+        );
     }
     if skipped_run > 0 {
-        println!("  {} {}", "s skipped (mark):".dimmed(), skipped_run.to_string().dimmed());
+        println!(
+            "  {} {}",
+            "s skipped (mark):".dimmed(),
+            skipped_run.to_string().dimmed()
+        );
     }
     if !skipped_tests.is_empty() {
         println!(
@@ -64,20 +115,28 @@ pub fn print_summary(
     println!("  {} {:.2}s", "time:".dimmed(), elapsed.as_secs_f64());
 
     // Print failures in detail
-    let failures: Vec<&TestResult> = results.iter()
+    let failures: Vec<&TestResult> = results
+        .iter()
         .filter(|r| r.status == TestStatus::Failed || r.status == TestStatus::Error)
         .collect();
 
     if !failures.is_empty() {
         println!();
-        println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed());
+        println!(
+            "{}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed()
+        );
         println!("  {}", "Failures".red().bold());
-        println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed());
+        println!(
+            "{}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed()
+        );
         for f in failures {
             println!();
             println!("  {} {}", "FAILED".red().bold(), f.test_id.bold());
             if let Some(stdout) = &f.stdout {
-                let relevant: Vec<&str> = stdout.lines()
+                let relevant: Vec<&str> = stdout
+                    .lines()
                     .filter(|l| !l.trim().is_empty())
                     .take(20)
                     .collect();
@@ -94,14 +153,22 @@ pub fn print_summary(
     }
 
     println!();
-    println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed());
+    println!(
+        "{}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed()
+    );
 
     // Final status line
     if failed == 0 && errors == 0 {
         println!(
             "  {} {}",
             "✓ All tests passed".green().bold(),
-            format!("({} run, {} skipped by impact analysis)", passed, skipped_tests.len()).dimmed()
+            format!(
+                "({} run, {} skipped by impact analysis)",
+                passed,
+                skipped_tests.len()
+            )
+            .dimmed()
         );
     } else {
         println!(
@@ -111,14 +178,23 @@ pub fn print_summary(
             passed
         );
     }
-    println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed());
+    println!(
+        "{}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed()
+    );
 }
 
 fn print_coverage_report(coverage: &HashMap<String, CoverageInfo>) {
     println!();
-    println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed());
+    println!(
+        "{}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed()
+    );
     println!("  {}", "Coverage".bold());
-    println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed());
+    println!(
+        "{}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".dimmed()
+    );
 
     let mut files: Vec<(&String, &CoverageInfo)> = coverage.iter().collect();
     files.sort_by(|a, b| a.0.cmp(b.0));
@@ -133,7 +209,8 @@ fn print_coverage_report(coverage: &HashMap<String, CoverageInfo>) {
 
     for (file, info) in &files {
         // Skip stdlib/venv files
-        if file.contains("/lib/python") || file.contains(".venv") || file.contains("site-packages") {
+        if file.contains("/lib/python") || file.contains(".venv") || file.contains("site-packages")
+        {
             continue;
         }
         let bar = coverage_bar(info.percentage);
