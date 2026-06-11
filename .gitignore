@@ -22,3 +22,4 @@ __pycache__/
 benchmarks/fixtures/sample_project/
 benchmarks/RESULTS.md
 benchmarks/results.json
+benchmarks/.hyperfine/

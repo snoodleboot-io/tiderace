@@ -11,11 +11,16 @@ riptide is configured via command-line flags and optionally a `pyproject.toml` s
 | `--python` | `python3` | Python binary to use |
 | `-c, --coverage` | off | Enable per-test coverage |
 | `--all` | off | Ignore impact analysis, run everything |
+| `--isolate` | off | One pytest process per test (legacy). Default is batched (one process per worker) — faster cold start |
 | `--pattern` | `test_.*\.py\|.*_test\.py` | Regex for test file discovery |
 | `--db` | `.riptide.db` | Path to SQLite state database |
-| `--timeout` | `300` | Per-test wall-clock timeout in seconds |
+| `--timeout` | `300` | Per-test (or per-batch) wall-clock timeout in seconds |
 
-A test that exceeds `--timeout` is killed and recorded as an error.
+A test that exceeds `--timeout` is killed and recorded as an error. By default riptide
+runs tests **batched** — one pytest process per worker — which avoids paying interpreter
+startup per test (see [ADR-009](../design/decisions.md)); `--isolate` forces the legacy
+one-process-per-test path, and `--coverage` always uses it to record precise per-test
+dependencies.
 
 ## pyproject.toml
 
@@ -30,6 +35,7 @@ pattern = "test_.*\\.py"             # string (regex)
 db = ".riptide.db"                   # path
 paths = ["tests/", "integration/"]   # list of strings
 timeout = 300                        # int (seconds)
+isolate = false                      # bool — one process per test (legacy)
 ```
 
 | Key | Type | Description |
@@ -41,6 +47,7 @@ timeout = 300                        # int (seconds)
 | `db` | path | SQLite state database path |
 | `paths` | list of strings | Default test directories or files to scan |
 | `timeout` | int (seconds) | Per-test wall-clock timeout |
+| `isolate` | bool | One pytest process per test (legacy isolation) |
 
 ### Precedence
 

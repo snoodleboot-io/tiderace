@@ -182,3 +182,50 @@ shared `Mutex<Vec<_>>` (and its lock-poisoning `unwrap`s) to `par_iter().map().c
 
 **Consequences:** Adds a `wait-timeout` dependency. Behaviour is covered by unit
 tests for status mapping, hashing, and output capping.
+
+---
+
+## ADR-009: Evolve the execution layer (batch → persistent workers → embedded subinterpreters)
+
+**Date:** 2026-06  
+**Status:** Accepted (Phase A implemented; B and C planned)
+
+**Decision:** Stop paying CPython + pytest startup *per test*. Keep pytest as the
+execution engine (full fixture/plugin/assertion-rewrite compatibility) but change
+*how* riptide drives it, in three stages:
+
+- **A — Batched subprocess (this change).** Instead of one `pytest <nodeid>` process
+  per test, distribute the selected tests across the worker pool and run **one pytest
+  process per worker** (`pytest <nodeid> <nodeid> …`). Per-test outcomes are recovered
+  by parsing pytest's `-rA` summary lines (which contain the exact node id). Collapses
+  *N* interpreter startups into *W* (= worker count). The precise per-test coverage
+  path (one process per test) is retained **only** for `--coverage` runs, which build
+  the dependency graph occasionally; everyday non-coverage runs use the batched path.
+- **B — Persistent warm workers (planned).** Long-lived CPython worker processes with
+  pytest pre-imported, fed node ids over IPC (the model `pytest-xdist` uses via
+  execnet). Startup is paid once per worker for the life of a daemon/watch session,
+  not once per run.
+- **C — Embedded CPython subinterpreters (planned, longer-term).** Embed libpython via
+  PyO3 and run per-core subinterpreters (PEP 684 per-interpreter GIL, Python 3.12+) for
+  true in-process parallelism with zero per-test startup. Gated on PyO3 subinterpreter
+  support maturing.
+
+**Context / problem:** ADR-001 chose one subprocess per test for isolation, accepting
+~250 ms startup per test. Benchmarks showed this makes the cold full run ~4–5× slower
+than in-process pytest (which starts up once for the whole suite) — the cost is the
+*process count*, not pytest. The per-test isolation that justified ADR-001 is rarely
+needed: pytest already isolates tests within one process.
+
+**This supersedes** the per-test-process aspect of ADR-001. The subprocess-vs-PyO3
+rationale of ADR-001 still holds for stages A and B (CPython, full compatibility);
+stage C revisits embedding deliberately and with subinterpreters, not naive PyO3.
+
+**Consequences:**
+- Batched runs report per-test status via `-rA` parsing and drop `-x` (run the whole
+  batch, report every result). Per-test wall-clock timing is coarser in batch mode
+  (timeout applies per batch). Precise per-test coverage still requires a `--coverage`
+  run, which uses the isolated path.
+- An `--isolate` escape hatch forces the legacy one-process-per-test behaviour when a
+  suite genuinely needs interpreter isolation.
+- Expected: cold full run drops from ~Nx pytest toward pytest-parity (stage A) and
+  below it with warm workers / subinterpreters (B, C).

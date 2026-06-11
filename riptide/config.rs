@@ -15,6 +15,7 @@ pub struct RiptideConfig {
     pub workers: Option<usize>,
     pub python: Option<String>,
     pub coverage: Option<bool>,
+    pub isolate: Option<bool>,
     pub pattern: Option<String>,
     pub db: Option<PathBuf>,
     pub paths: Option<Vec<PathBuf>>,

@@ -43,6 +43,10 @@ struct Cli {
     #[arg(long)]
     all: bool,
 
+    /// Run one pytest process per test (legacy isolation; slower cold start)
+    #[arg(long)]
+    isolate: bool,
+
     /// File name pattern for test discovery
     #[arg(long)]
     pattern: Option<String>,
@@ -129,6 +133,7 @@ fn cmd_run(cli: &Cli, cfg: &RiptideConfig) -> Result<()> {
         .or_else(|| cfg.pattern.clone())
         .unwrap_or_else(|| DEFAULT_PATTERN.to_string());
     let with_coverage = cli.coverage || cfg.coverage.unwrap_or(false);
+    let isolate = cli.isolate || cfg.isolate.unwrap_or(false);
     let timeout_secs = cli.timeout.or(cfg.timeout).unwrap_or(DEFAULT_TIMEOUT_SECS);
     let workers = match cli.workers.or(cfg.workers) {
         Some(0) | None => num_cpus(),
@@ -207,7 +212,7 @@ fn cmd_run(cli: &Cli, cfg: &RiptideConfig) -> Result<()> {
         return Ok(());
     }
 
-    let runner = runner::Runner::new(workers, &python, with_coverage, timeout_secs);
+    let runner = runner::Runner::new(workers, &python, with_coverage, timeout_secs, isolate);
     let start = Instant::now();
     let results = runner.run_parallel(&to_run)?;
     let elapsed = start.elapsed();

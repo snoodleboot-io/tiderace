@@ -89,7 +89,7 @@ Without a coverage graph, riptide stays conservative: any source-file change re-
 2. **Hash** — SHA-256 fingerprint every `.py` file in the tree
 3. **Diff** — Compare against hashes stored in `.riptide.db`
 4. **Impact** — A test re-runs if its own test file changed, if it never ran before, or if it previously failed/errored. With a stored coverage dep graph, a source-file change re-runs only the tests whose recorded dependencies changed; without one, riptide conservatively re-runs all tests lacking a dep graph. With no changes at all, a warm run skips everything.
-5. **Run** — Rayon parallel pool; each test is an isolated `pytest` subprocess
+5. **Run** — Rayon parallel pool. By default tests are **batched** — one `pytest` process per worker — so interpreter startup is paid per worker, not per test (≈8× faster cold start than one process per test). `--coverage` and `--isolate` use one process per test (see [ADR-009](docs/design/decisions.md))
 6. **Persist** — Store new hashes, results, and coverage dep graph
 
 ## Benchmarks
@@ -100,7 +100,7 @@ Without a coverage graph, riptide stays conservative: any source-file change re-
 python benchmarks/run_benchmarks.py
 ```
 
-Honest framing: riptide's **cold** full run is slower than in-process pytest because it spawns a subprocess per test (~250ms each — see ADR-001). Its advantage is **warm / impact** runs that skip unchanged tests. Numbers vary by machine, so run the harness yourself rather than trusting a fixed figure.
+Honest framing: riptide's strongest advantage is **warm / impact** runs that skip unchanged tests. For the **cold** full run, batched execution (one pytest process per worker, the default) is ~8× faster than the legacy one-process-per-test path, but still pays one interpreter startup per worker — so on many trivial tests it can trail single-process `pytest`. Persistent workers and embedded subinterpreters (ADR-009, stages B/C) close that remaining gap. Numbers vary by machine, so run the harness yourself rather than trusting a fixed figure.
 
 ## Add to .gitignore
 

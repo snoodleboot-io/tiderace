@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use wait_timeout::ChildExt;
 
@@ -52,27 +52,43 @@ pub struct Runner {
     pub python_bin: String,
     pub with_coverage: bool,
     pub coverage_dir: PathBuf,
-    /// Per-test wall-clock limit; a test exceeding it is killed and recorded as Error.
+    /// Per-test (isolated) or per-batch (batched) wall-clock limit; on expiry the
+    /// child is killed and the affected test(s) recorded as Error.
     pub timeout: Duration,
+    /// Force the legacy one-process-per-test path even without coverage.
+    pub isolate: bool,
 }
 
 impl Runner {
-    pub fn new(workers: usize, python_bin: &str, with_coverage: bool, timeout_secs: u64) -> Self {
+    pub fn new(
+        workers: usize,
+        python_bin: &str,
+        with_coverage: bool,
+        timeout_secs: u64,
+        isolate: bool,
+    ) -> Self {
         Runner {
             workers,
             python_bin: python_bin.to_string(),
             with_coverage,
             coverage_dir: PathBuf::from(".riptide-coverage"),
             timeout: Duration::from_secs(timeout_secs),
+            isolate,
         }
     }
 
-    /// Run all tests in parallel using a scoped rayon pool, returning results.
+    /// Run all selected tests in parallel using a scoped rayon pool.
     ///
-    /// Uses `par_iter().map().collect()` rather than a shared `Mutex<Vec<_>>`,
-    /// so there are no lock-poisoning panics (security finding #5) and the
-    /// requested worker count is honored deterministically via a scoped pool
-    /// (finding #7).
+    /// Two execution strategies (ADR-009):
+    ///   * **batched** (default) — distribute tests across the pool and run ONE
+    ///     pytest process per worker, amortising interpreter startup. Per-test
+    ///     outcomes are recovered from pytest's `-rA` summary.
+    ///   * **isolated** — one pytest process per test. Used when coverage is on
+    ///     (to record a precise per-test dependency graph) or `--isolate` is set.
+    ///
+    /// Either way, `par_iter().map().collect()` avoids the shared `Mutex<Vec<_>>`
+    /// and its lock-poisoning panics, and the worker count is honored via a scoped
+    /// pool.
     pub fn run_parallel(&self, tests: &[TestItem]) -> Result<Vec<TestResult>> {
         if self.with_coverage {
             std::fs::create_dir_all(&self.coverage_dir)?;
@@ -86,23 +102,121 @@ impl Runner {
         let total = tests.len();
         let counter = AtomicUsize::new(0);
 
-        let results: Vec<TestResult> = pool.install(|| {
-            tests
-                .par_iter()
-                .map(|test| {
-                    let result = self.run_single(test);
-                    let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
-                    match &result {
-                        Ok(r) => print_progress(n, total, r),
-                        Err(e) => eprintln!("  {} [ERROR] {}: {}", "✗".red(), test.test_id, e),
-                    }
-                    result.ok()
-                })
-                .flatten()
-                .collect()
-        });
+        if self.with_coverage || self.isolate {
+            return Ok(pool.install(|| {
+                tests
+                    .par_iter()
+                    .map(|test| {
+                        let result = self.run_single(test);
+                        let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                        match &result {
+                            Ok(r) => print_progress(n, total, r),
+                            Err(e) => {
+                                eprintln!("  {} [ERROR] {}: {}", "✗".red(), test.test_id, e)
+                            }
+                        }
+                        result.ok()
+                    })
+                    .flatten()
+                    .collect()
+            }));
+        }
 
+        // Batched: split into one chunk per worker (each chunk = one pytest run).
+        let chunk_size = tests.len().div_ceil(self.workers.max(1)).max(1);
+        let chunks: Vec<&[TestItem]> = tests.chunks(chunk_size).collect();
+        let results: Vec<TestResult> = pool.install(|| {
+            chunks
+                .par_iter()
+                .map(|chunk| self.run_chunk(chunk, total, &counter))
+                .reduce(Vec::new, |mut acc, mut v| {
+                    acc.append(&mut v);
+                    acc
+                })
+        });
         Ok(results)
+    }
+
+    /// Run one chunk of tests in a single pytest process and recover per-test
+    /// outcomes from the `-rA` summary. Any test the summary does not mention
+    /// (e.g. a collection error took down the batch) is recorded as an Error.
+    fn run_chunk(
+        &self,
+        chunk: &[TestItem],
+        total: usize,
+        counter: &AtomicUsize,
+    ) -> Vec<TestResult> {
+        let node_ids: Vec<String> = chunk.iter().map(|t| t.pytest_nodeid()).collect();
+        let out_path = unique_temp("batch.out");
+
+        let statuses = match self.exec_chunk(&node_ids, &out_path) {
+            Ok(map) => map,
+            Err(e) => {
+                eprintln!("  {} [BATCH ERROR] {}", "✗".red(), e);
+                HashMap::new()
+            }
+        };
+        let _ = std::fs::remove_file(&out_path);
+
+        chunk
+            .iter()
+            .map(|test| {
+                let node_id = test.pytest_nodeid();
+                // A test missing from the summary did not report an outcome.
+                let status = statuses.get(&node_id).cloned().unwrap_or(TestStatus::Error);
+                let result = TestResult {
+                    test_id: test.test_id.clone(),
+                    file_path: test.file_path.clone(),
+                    status,
+                    duration_ms: 0, // per-test timing is not available in batch mode
+                    stdout: None,
+                    stderr: None,
+                    covered_files: Vec::new(),
+                };
+                let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                print_progress(n, total, &result);
+                result
+            })
+            .collect()
+    }
+
+    /// Spawn the batched pytest process and parse its `-rA` summary into a
+    /// node-id -> status map.
+    fn exec_chunk(
+        &self,
+        node_ids: &[String],
+        out_path: &Path,
+    ) -> Result<HashMap<String, TestStatus>> {
+        let out_file = File::create(out_path)?;
+        let mut cmd = Command::new(&self.python_bin);
+        // -rA prints an outcome line per test; no -x so the whole batch runs.
+        cmd.args([
+            "-m",
+            "pytest",
+            "-rA",
+            "--tb=no",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "--",
+        ]);
+        cmd.args(node_ids);
+        cmd.stdout(Stdio::from(out_file));
+        cmd.stderr(Stdio::null());
+
+        let mut child = cmd
+            .spawn()
+            .context("failed to spawn batched test process")?;
+        match child.wait_timeout(self.timeout)? {
+            Some(_) => {}
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // Timed out: leave the map empty so every test in the batch is Error.
+                return Ok(HashMap::new());
+            }
+        }
+        Ok(parse_batch_summary(&read_capped(out_path)))
     }
 
     /// Run a single test in its own pytest subprocess, with a timeout and
@@ -121,10 +235,10 @@ impl Runner {
 
         // Capture child output via temp files rather than pipes: this avoids the
         // pipe-buffer deadlock that `wait_timeout` + piped stdio would hit, and
-        // lets us read a bounded slice afterwards.
-        let tmp_dir = std::env::temp_dir();
-        let out_path = tmp_dir.join(format!("riptide-{}.out", safe_id));
-        let err_path = tmp_dir.join(format!("riptide-{}.err", safe_id));
+        // lets us read a bounded slice afterwards. Names are process-unique so
+        // concurrent runs never share a capture file.
+        let out_path = unique_temp("out");
+        let err_path = unique_temp("err");
         let out_file = File::create(&out_path)?;
         let err_file = File::create(&err_path)?;
 
@@ -207,6 +321,16 @@ fn short_hash(s: &str) -> String {
     hex::encode(&hasher.finalize()[..16])
 }
 
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A temp path unique to this process and call site. Concurrent riptide runs (and
+/// parallel workers within one run) share the OS temp dir, so a content-derived
+/// name alone can collide — the pid plus a monotonic counter make it unique.
+fn unique_temp(suffix: &str) -> PathBuf {
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("riptide-{}-{}.{}", std::process::id(), seq, suffix))
+}
+
 /// Read a file's contents, truncated to [`MAX_CAPTURE_BYTES`] on a char boundary.
 fn read_capped(path: &Path) -> String {
     let bytes = std::fs::read(path).unwrap_or_default();
@@ -217,6 +341,38 @@ fn read_capped(path: &Path) -> String {
     let mut s = String::from_utf8_lossy(&bytes[..MAX_CAPTURE_BYTES]).into_owned();
     s.push_str("\n[riptide] output truncated\n");
     s
+}
+
+/// Parse pytest's `-rA` summary into a node-id -> status map. Lines look like:
+///   `PASSED tests/test_x.py::test_a`
+///   `FAILED tests/test_x.py::test_b - assert False`
+/// The first token is the outcome and the second is the exact node id (any
+/// trailing ` - reason` is ignored).
+fn parse_batch_summary(stdout: &str) -> HashMap<String, TestStatus> {
+    let mut map = HashMap::new();
+    for line in stdout.lines() {
+        let mut parts = line.splitn(3, ' ');
+        let outcome = match parts.next() {
+            Some(o) => o,
+            None => continue,
+        };
+        let status = match outcome {
+            "PASSED" | "XPASS" => TestStatus::Passed,
+            "FAILED" => TestStatus::Failed,
+            "ERROR" => TestStatus::Error,
+            "SKIPPED" | "XFAIL" => TestStatus::Skipped,
+            _ => continue,
+        };
+        // The node id is the second whitespace-free token; a ` - reason` tail
+        // (when present) lands in the third split and is ignored.
+        if let Some(node_id) = parts.next() {
+            let node_id = node_id.trim();
+            if !node_id.is_empty() {
+                map.insert(node_id.to_string(), status);
+            }
+        }
+    }
+    map
 }
 
 /// Heuristic for a passed-but-skipped run: pytest exits 0 for both passed and
@@ -397,6 +553,43 @@ mod tests {
         assert_eq!(parse_status(Some(2), false), TestStatus::Error);
         // Killed by signal (timeout path passes None).
         assert_eq!(parse_status(None, false), TestStatus::Error);
+    }
+
+    #[test]
+    fn batch_summary_parsing() {
+        let out = "\
+==== short test summary info ====
+PASSED tests/test_mod_0.py::test_compute_0_0
+PASSED tests/test_unit_case.py::ArithmeticCase::test_scale_0
+SKIPPED tests/test_x.py::test_skipme
+FAILED tests/test_mod_0.py::test_fail_demo - assert False
+ERROR tests/test_y.py::test_broken
+1 failed, 2 passed in 0.10s
+";
+        let m = parse_batch_summary(out);
+        assert_eq!(
+            m.get("tests/test_mod_0.py::test_compute_0_0"),
+            Some(&TestStatus::Passed)
+        );
+        assert_eq!(
+            m.get("tests/test_unit_case.py::ArithmeticCase::test_scale_0"),
+            Some(&TestStatus::Passed)
+        );
+        assert_eq!(
+            m.get("tests/test_x.py::test_skipme"),
+            Some(&TestStatus::Skipped)
+        );
+        // The reason after ` - ` must not corrupt the node id key.
+        assert_eq!(
+            m.get("tests/test_mod_0.py::test_fail_demo"),
+            Some(&TestStatus::Failed)
+        );
+        assert_eq!(
+            m.get("tests/test_y.py::test_broken"),
+            Some(&TestStatus::Error)
+        );
+        // The summary count line is not an outcome line.
+        assert_eq!(m.len(), 5);
     }
 
     #[test]
