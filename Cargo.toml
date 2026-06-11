@@ -25,6 +25,8 @@ walkdir = "=2.5.0"
 chrono = { version = "=0.4.35", features = ["serde"] }
 wait-timeout = "=0.2.0"
 toml = "=0.5.11"
+notify = "=6.1.1"
+notify-debouncer-full = "0.3"
 
 [dev-dependencies]
 assert_cmd = "=2.0.14"

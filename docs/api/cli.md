@@ -78,6 +78,36 @@ riptide coverage
 
 ---
 
+### `riptide watch [PATHS]`
+
+Start a long-lived watcher backed by a **warm pool** of Python workers that import pytest
+once. After an initial run, riptide re-runs only the impact-selected tests on each file
+save — and because the workers stay warm, cycles after the first pay no interpreter/pytest
+startup (sub-second feedback loops). Press Ctrl-C to stop.
+
+```bash
+riptide watch tests/
+riptide watch tests/ -n 8 --python .venv/bin/python
+```
+
+```
+  ✓ collected 47 tests
+  ⚡ warm pool ready: 8 workers
+  ✓ 47 passed · 0 failed · 0 skipped · 0.9s
+
+  👀 watching for changes — Ctrl-C to stop
+
+  ⚡ 1 file(s) changed → 6 test(s)
+  ✓ 6 passed · 0 failed · 0 skipped · 0.18s
+```
+
+Changed files are evicted from the workers' module cache before each cycle, so a warm
+re-run always reflects the code on disk; a `conftest.py` change recycles the pool. Warm
+workers are a convenience for trusted local development — use the isolated single-shot
+path (`--isolate`, or `--coverage`) for CI or untrusted code.
+
+---
+
 ## Examples
 
 ```bash

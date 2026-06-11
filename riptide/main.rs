@@ -3,14 +3,16 @@ mod config;
 mod db;
 mod hasher;
 mod impact;
+mod pool;
 mod reporter;
 mod runner;
+mod watcher;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use std::path::PathBuf;
-use std::time::Instant;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use config::{RiptideConfig, DEFAULT_DB, DEFAULT_PATTERN, DEFAULT_TIMEOUT_SECS};
 
@@ -75,6 +77,8 @@ enum Commands {
     },
     /// Show coverage report from last run
     Coverage,
+    /// Watch the tree and re-run impacted tests on change, using a warm worker pool
+    Watch { paths: Vec<PathBuf> },
 }
 
 fn main() -> Result<()> {
@@ -98,6 +102,14 @@ fn main() -> Result<()> {
         Some(Commands::Coverage) => {
             let python = resolve_python(&cli.python, &cfg);
             cmd_coverage(&python)
+        }
+        Some(Commands::Watch { paths }) => {
+            let paths = if paths.is_empty() {
+                resolve_paths(&cli.paths, &cfg)
+            } else {
+                paths.clone()
+            };
+            cmd_watch(&cli, &cfg, &paths)
         }
         None => cmd_run(&cli, &cfg),
     }
@@ -309,6 +321,172 @@ fn cmd_coverage(python_bin: &str) -> Result<()> {
         Err(e) => eprintln!("  {} {}", "error:".red(), e),
     }
     Ok(())
+}
+
+/// The persistent worker is embedded in the binary and materialised to a temp
+/// file at runtime, so riptide stays a single self-contained executable.
+const WORKER_PY: &str = include_str!("worker.py");
+
+fn write_worker_script() -> Result<PathBuf> {
+    let path = std::env::temp_dir().join(format!("riptide-worker-{}.py", std::process::id()));
+    std::fs::write(&path, WORKER_PY)?;
+    Ok(path)
+}
+
+fn cmd_watch(cli: &Cli, cfg: &RiptideConfig, paths: &[PathBuf]) -> Result<()> {
+    let python = resolve_python(&cli.python, cfg);
+    let db_path = resolve_db(cli.db.clone(), cfg);
+    let pattern = cli
+        .pattern
+        .clone()
+        .or_else(|| cfg.pattern.clone())
+        .unwrap_or_else(|| DEFAULT_PATTERN.to_string());
+    let timeout = Duration::from_secs(cli.timeout.or(cfg.timeout).unwrap_or(DEFAULT_TIMEOUT_SECS));
+    let workers = match cli.workers.or(cfg.workers) {
+        Some(0) | None => num_cpus(),
+        Some(n) => n,
+    };
+
+    let existing: Vec<PathBuf> = paths.iter().filter(|p| p.exists()).cloned().collect();
+    if existing.is_empty() {
+        eprintln!(
+            "{} No test paths found. Tried: {:?}",
+            "error:".red().bold(),
+            paths
+        );
+        std::process::exit(1);
+    }
+
+    let db = db::Database::open(&db_path)?;
+    let worker_py = write_worker_script()?;
+
+    let all_tests = collector::collect_tests(&existing, &pattern)?;
+    println!("  {} collected {} tests", "✓".green(), all_tests.len());
+
+    let mut pool = pool::WorkerPool::new(&python, &worker_py, Path::new("."), workers, timeout)?;
+    println!(
+        "  {} warm pool ready: {} workers",
+        "⚡".cyan(),
+        pool.worker_count()
+    );
+
+    // Initial full run priming the warm workers and the result baseline.
+    let start = Instant::now();
+    let results = pool.run_batch(&all_tests, &[]);
+    persist_cycle(&db, &results, &existing)?;
+    watch_report(&results, start.elapsed());
+
+    println!("\n  {} watching for changes — Ctrl-C to stop", "👀".cyan());
+
+    let recycle_python = python.clone();
+    let recycle_worker = worker_py.clone();
+    watcher::watch_loop(Path::new("."), |_changed| {
+        // Authoritative change detection via hashes (consistent path format with
+        // the collector/db); the watcher event is only the trigger.
+        let changed_files = hasher::find_changed_files(&hash_tree(&existing)?, &db)?;
+        if changed_files.is_empty() {
+            return Ok(());
+        }
+
+        // Re-collect so newly added test files are picked up, then impact-filter.
+        let tests = collector::collect_tests(&existing, &pattern)?;
+        let analyzer = impact::ImpactAnalyzer::new(&db, changed_files.clone(), &tests);
+        let (to_run, _) = analyzer.filter_affected(&tests)?;
+
+        println!(
+            "\n  {} {} file(s) changed → {} test(s)",
+            "⚡".cyan(),
+            changed_files.len(),
+            to_run.len()
+        );
+
+        // A conftest.py change alters fixtures/collection cached in the warm
+        // interpreters — recycle the pool so it can't run against stale config.
+        if changed_files.iter().any(|f| f.ends_with("conftest.py")) {
+            pool = pool::WorkerPool::new(
+                &recycle_python,
+                &recycle_worker,
+                Path::new("."),
+                workers,
+                timeout,
+            )?;
+        }
+
+        let start = Instant::now();
+        let results = pool.run_batch(&to_run, &changed_files);
+        persist_cycle(&db, &results, &existing)?;
+        watch_report(&results, start.elapsed());
+        Ok(())
+    })?;
+
+    let _ = std::fs::remove_file(&worker_py);
+    Ok(())
+}
+
+/// Hash every Python file under the watched paths (plus the cwd), as the normal
+/// run does, so change detection uses the same keys the database stores.
+fn hash_tree(paths: &[PathBuf]) -> Result<std::collections::HashMap<String, String>> {
+    let mut all = std::collections::HashMap::new();
+    for p in paths {
+        all.extend(hasher::hash_all_python_files(p)?);
+    }
+    if let Ok(h) = hasher::hash_all_python_files(Path::new(".")) {
+        all.extend(h);
+    }
+    Ok(all)
+}
+
+fn persist_cycle(
+    db: &db::Database,
+    results: &[runner::TestResult],
+    paths: &[PathBuf],
+) -> Result<()> {
+    for r in results {
+        db.save_test_result(r)?;
+    }
+    hasher::save_hashes(&hash_tree(paths)?, db)?;
+    Ok(())
+}
+
+fn watch_report(results: &[runner::TestResult], elapsed: Duration) {
+    let passed = results
+        .iter()
+        .filter(|r| r.status == runner::TestStatus::Passed)
+        .count();
+    let failed = results
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.status,
+                runner::TestStatus::Failed | runner::TestStatus::Error
+            )
+        })
+        .count();
+    let skipped = results
+        .iter()
+        .filter(|r| r.status == runner::TestStatus::Skipped)
+        .count();
+    for r in results.iter().filter(|r| {
+        matches!(
+            r.status,
+            runner::TestStatus::Failed | runner::TestStatus::Error
+        )
+    }) {
+        println!("    {} {}", "✗".red(), r.test_id.dimmed());
+    }
+    let icon = if failed == 0 {
+        "✓".green()
+    } else {
+        "✗".red()
+    };
+    println!(
+        "  {} {} passed · {} failed · {} skipped · {:.2}s",
+        icon,
+        passed,
+        failed,
+        skipped,
+        elapsed.as_secs_f64()
+    );
 }
 
 fn num_cpus() -> usize {

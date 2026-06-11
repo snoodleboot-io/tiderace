@@ -79,6 +79,9 @@ riptide tests/
 
 # CI
 riptide tests/ -n 8 --coverage --python .venv/bin/python
+
+# Watch mode — warm worker pool, sub-second re-runs of impacted tests on save
+riptide watch tests/
 ```
 
 Without a coverage graph, riptide stays conservative: any source-file change re-runs every test that lacks recorded dependencies, since it cannot map the edit to specific tests. Run once with `--coverage` to teach it which tests depend on which source files.

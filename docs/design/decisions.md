@@ -188,7 +188,31 @@ tests for status mapping, hashing, and output capping.
 ## ADR-009: Evolve the execution layer (batch → persistent workers → embedded subinterpreters)
 
 **Date:** 2026-06  
-**Status:** Accepted (Phase A implemented; B and C planned)
+**Status:** Accepted (Stages A and B implemented; C planned)
+
+### Stage B as shipped — `riptide watch`
+
+A `WorkerPool` (`riptide/pool.rs`) spawns N long-lived Python workers (`riptide/worker.py`,
+embedded in the binary) that `import pytest` once and run node ids fed as
+newline-delimited JSON. `riptide watch` (`notify` + `notify-debouncer-full`) re-runs only
+impact-selected tests on each save against the warm pool, so cycles after the first pay no
+pytest import. A security review drove the must-fix robustness that landed:
+- **Per-request timeout → kill + respawn** (a hung test never wedges the pool; the run never hangs).
+- **Crash detection** via stdout EOF / channel disconnect → respawn; the test is recorded Error.
+- **Correct staleness handling**: workers evict *all first-party modules* on any change (keeping
+  pytest/deps warm), call `importlib.invalidate_caches()`, set `dont_write_bytecode`, and a
+  `conftest.py` change recycles the whole pool — verified by an edit-then-rerun correctness test.
+- **Framing safety**: requests/responses are serde/`json.dumps`-encoded only (never hand-built),
+  with an adversarial test proving a node id containing `\n`/`\r`/NUL cannot forge a frame.
+- **No pipe deadlock**: a dedicated reader thread per worker drains stdout into a channel;
+  at most one request is in flight per worker.
+
+Known follow-ups (documented, not silently skipped): process-group kill for tests that spawn
+grandchildren; per-worker "max requests" recycle to bound long-session memory; incremental
+hashing in the watch loop (currently each cycle re-hashes the tree); and coverage-context-based
+precise impact in watch (without a prior `--coverage` graph, a source change conservatively
+re-runs all affected tests). Warm workers are a trusted-local-dev convenience — CI / untrusted
+code should use the isolated single-shot path.
 
 **Decision:** Stop paying CPython + pytest startup *per test*. Keep pytest as the
 execution engine (full fixture/plugin/assertion-rewrite compatibility) but change
