@@ -7,8 +7,8 @@
 **Rust-powered Python test engine**  
 Parallel execution · Impact analysis · Coverage · Zero config
 
-[![CI](https://github.com/your-org/riptide/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/riptide/actions/workflows/ci.yml)
-[![Release](https://github.com/your-org/riptide/actions/workflows/release.yml/badge.svg)](https://github.com/your-org/riptide/actions/workflows/release.yml)
+[![CI](https://github.com/snoodleboot-io/riptide/actions/workflows/ci.yml/badge.svg)](https://github.com/snoodleboot-io/riptide/actions/workflows/ci.yml)
+[![Release](https://github.com/snoodleboot-io/riptide/actions/workflows/release.yml/badge.svg)](https://github.com/snoodleboot-io/riptide/actions/workflows/release.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-C75B39.svg)](LICENSE)
 
 </div>
@@ -60,7 +60,7 @@ cargo build --release
 # binary at target/release/riptide
 
 # Future / illustrative — Linux x86_64 prebuilt binary
-curl -sSfL https://github.com/your-org/riptide/releases/latest/download/riptide-linux-x86_64 \
+curl -sSfL https://github.com/snoodleboot-io/riptide/releases/latest/download/riptide-linux-x86_64 \
   -o /usr/local/bin/riptide && chmod +x /usr/local/bin/riptide
 
 # Future / illustrative — once published to crates.io
@@ -92,7 +92,7 @@ Without a coverage graph, riptide stays conservative: any source-file change re-
 2. **Hash** — SHA-256 fingerprint every `.py` file in the tree
 3. **Diff** — Compare against hashes stored in `.riptide.db`
 4. **Impact** — A test re-runs if its own test file changed, if it never ran before, or if it previously failed/errored. With a stored coverage dep graph, a source-file change re-runs only the tests whose recorded dependencies changed; without one, riptide conservatively re-runs all tests lacking a dep graph. With no changes at all, a warm run skips everything.
-5. **Run** — Rayon parallel pool. By default tests are **batched** — one `pytest` process per worker — so interpreter startup is paid per worker, not per test (≈8× faster cold start than one process per test). `--coverage` and `--isolate` use one process per test (see [ADR-009](docs/design/decisions.md))
+5. **Run** — Rayon parallel pool. By default tests are **batched** — one `pytest` process per worker — so interpreter startup is paid per worker, not per test (≈8× faster cold start than one process per test). `--coverage` is also batched and records per-test dependencies via coverage dynamic contexts ([ADR-011](docs/design/decisions.md)); `--isolate` forces one process per test (see [ADR-009](docs/design/decisions.md))
 6. **Persist** — Store new hashes, results, and coverage dep graph
 
 ## Benchmarks
@@ -103,7 +103,7 @@ Without a coverage graph, riptide stays conservative: any source-file change re-
 python benchmarks/run_benchmarks.py
 ```
 
-Honest framing: riptide's strongest advantage is **warm / impact** runs that skip unchanged tests. For the **cold** full run, batched execution (one pytest process per worker, the default) is ~8× faster than the legacy one-process-per-test path, but still pays one interpreter startup per worker — so on many trivial tests it can trail single-process `pytest`. Persistent workers and embedded subinterpreters (ADR-009, stages B/C) close that remaining gap. Numbers vary by machine, so run the harness yourself rather than trusting a fixed figure.
+Honest framing: riptide's strongest advantage is **warm / impact** runs that skip unchanged tests. For the **cold** full run, batched execution (one pytest process per worker, the default) is ~8× faster than the legacy one-process-per-test path, but still pays one interpreter startup per worker — so on many trivial tests it can trail single-process `pytest`. Persistent warm workers (`riptide watch`, ADR-009 stage B) close most of that gap for the edit loop; embedded subinterpreters (stage C) were evaluated and **rejected** for breaking C-extension compatibility (see [ADR-010](docs/design/decisions.md)). Numbers vary by machine, so run the harness yourself rather than trusting a fixed figure.
 
 ## Add to .gitignore
 
@@ -114,12 +114,12 @@ Honest framing: riptide's strongest advantage is **warm / impact** runs that ski
 
 ## Documentation
 
-Full documentation at **[riptide-test.dev](https://riptide-test.dev)**:
+Full documentation at **[snoodleboot-io.github.io/riptide](https://snoodleboot-io.github.io/riptide)**:
 
-- [Quick Start](https://riptide-test.dev/guides/quickstart/)
-- [Architecture](https://riptide-test.dev/design/architecture/)
-- [Impact Analysis Deep Dive](https://riptide-test.dev/design/impact-analysis/)
-- [CLI Reference](https://riptide-test.dev/api/cli/)
+- [Quick Start](https://snoodleboot-io.github.io/riptide/guides/quickstart/)
+- [Architecture](https://snoodleboot-io.github.io/riptide/design/architecture/)
+- [Impact Analysis Deep Dive](https://snoodleboot-io.github.io/riptide/design/impact-analysis/)
+- [CLI Reference](https://snoodleboot-io.github.io/riptide/api/cli/)
 
 ## License
 

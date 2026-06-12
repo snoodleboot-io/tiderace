@@ -119,7 +119,7 @@ This document records key architectural decisions, the alternatives considered, 
 - Gating major bumps to CI prevents accidental breaking releases from local developer machines
 - Minor/patch versions are auto-computed from conventional commit messages in CI
 
-See [Release Process](releases.md) for implementation details.
+See [Release Process](../guides/releases.md) for implementation details.
 
 ---
 

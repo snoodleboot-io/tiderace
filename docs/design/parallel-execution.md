@@ -1,78 +1,84 @@
-# Parallel Execution
+# Execution Model
 
-## Overview
+riptide runs your tests with real `pytest` for full compatibility (fixtures, plugins,
+assertion rewriting), and uses Rust only to orchestrate. It has three execution strategies;
+which one runs depends on your flags.
 
-riptide runs tests concurrently using [Rayon](https://github.com/rayon-rs/rayon), Rust's data parallelism library. Each test executes in its own OS subprocess, fully isolated from other tests.
+## Worker pool
 
-## Worker Pool
-
-Rayon manages a thread pool sized to `available_parallelism()` by default — the number of logical CPU cores. Each thread picks a test from the queue, spawns a subprocess, waits for it to complete, and picks the next test.
-
-```
-Thread 1: [test_login] [test_search] [test_export] ...
-Thread 2: [test_logout] [test_filter] [test_import] ...
-Thread 3: [test_signup] [test_profile] ...
-Thread 4: [test_reset] [test_verify] ...
-```
-
-Override with `-n`:
+A [Rayon](https://github.com/rayon-rs/rayon) thread pool, sized to `available_parallelism()`
+by default (override with `-n`), drives concurrency. Each worker owns one Python process at a
+time.
 
 ```bash
-riptide tests/ -n 16   # 16 concurrent tests
+riptide tests/ -n 16   # 16 concurrent workers
 riptide tests/ -n 1    # sequential (useful for debugging)
 ```
 
-## Process Isolation
+## Strategy 1 — Batched (default)
 
-Each test runs as:
+The selected tests are split into one chunk per worker, and **each chunk runs as a single
+`pytest` process** over many node ids. This amortises interpreter + pytest startup: *N* tests
+cost *W* interpreter startups (one per worker), not *N*.
+
+```
+Worker 1: pytest t1 t2 t3 … t13     (one process)
+Worker 2: pytest t14 t15 … t26      (one process)
+…
+```
+
+Per-test pass/fail is recovered from pytest's `-rA` summary, whose lines carry the exact node
+id. This is what makes a cold full run roughly **8× faster** than a process-per-test approach.
+See [ADR-009](decisions.md).
+
+## Strategy 2 — Isolated (`--isolate`)
+
+One `pytest` process per test — the original model. Slower (one interpreter startup per test)
+but gives a fresh interpreter per test, for suites that genuinely need that isolation.
 
 ```bash
-python -m pytest path/to/test_file.py::test_function -x --tb=short -q --no-header
+riptide tests/ --isolate
 ```
 
-This means:
+Each test runs roughly as:
 
-- **No shared state** between tests — fresh Python interpreter per test
-- **Full pytest compatibility** — fixtures, plugins, and conftest.py all work
-- **Predictable** — tests cannot interfere with each other's imports or globals
-
-## Coverage Isolation
-
-When `--coverage` is enabled, each test writes to a unique data file:
-
-```
-.riptide-coverage/
-  .coverage.tests_test_auth_py__test_login
-  .coverage.tests_test_auth_py__test_logout
-  .coverage.tests_test_models_py__test_create_user
-  ...
+```bash
+python -m pytest -- path/to/test_file.py::test_function -x --tb=short -q --no-header
 ```
 
-After all tests complete, `coverage combine --keep` merges them into a unified report. This avoids write conflicts when tests run concurrently.
+The `--` separator means a hostile file name or path can never be parsed as a pytest flag,
+and a per-test [`--timeout`](../api/cli.md) kills and records any test that hangs.
 
-## Output Ordering
+## Strategy 3 — Warm pool (`riptide watch`)
 
-Because tests run in parallel, output is printed as each test completes — not in source order. The `[N/total]` counter reflects completion order, not discovery order.
+[Watch mode](../guides/watch.md) keeps a pool of **long-lived** worker processes that import
+pytest once and run node ids fed to them over a JSON protocol. Across edit→test cycles the
+import cost is paid only once, giving sub-second re-runs. The pool is hardened against hung
+tests (timeout → kill + respawn), crashed workers (detect → respawn), and stale code (changed
+modules are evicted from each worker before a re-run).
 
-```
-  ✓ [3/47] tests/test_utils.py::test_format_date 89ms    ← fast test finishes first
-  ✓ [1/47] tests/test_auth.py::test_login 312ms
-  ✓ [2/47] tests/test_auth.py::test_logout 289ms
-```
+## Coverage and batching
 
-## Failure Behaviour
+`--coverage` runs **batched too**: each chunk runs under `coverage run` with a per-test
+dynamic context, so a single fast batched run still yields a precise per-test dependency
+graph. See [Coverage Engine](coverage.md) and [ADR-011](decisions.md).
 
-By default, riptide continues running all tests even after a failure — unlike pytest's `-x` mode. The failing test's output is collected and printed in the summary.
+## Output ordering
 
-This is intentional for parallel runs: stopping the pool when one test fails wastes the work already in flight on other threads.
+Tests run concurrently, so output is printed as each completes — not in source order. The
+`[N/total]` counter reflects completion order.
 
-## Performance Characteristics
+## Failure behaviour
 
-| Scenario | Expected Speedup |
-|---|---|
-| 100% I/O-bound tests (DB, network) | Near-linear with core count |
-| 100% CPU-bound tests | Near-linear with core count |
-| Mixed workloads | Significant; depends on distribution |
-| Very fast tests (<50ms each) | Limited by subprocess startup (~250ms) |
+In a batched run, the whole chunk runs and every result is reported (no early stop), so one
+failure never hides the others. A run with any failed or errored test exits non-zero
+(see [Exit Codes](../api/exit-codes.md)).
 
-For very fast test suites, the subprocess startup cost dominates. In these cases, the impact analysis savings (skipping tests entirely) matter more than parallelism.
+## Choosing a strategy
+
+| You run | Strategy | Why |
+|---|---|---|
+| `riptide tests/` | Batched | Fast default for runs and CI |
+| `riptide tests/ --coverage` | Batched + contexts | Fast *and* precise dependency graph |
+| `riptide tests/ --isolate` | Isolated | Per-test interpreter isolation |
+| `riptide watch tests/` | Warm pool | Sub-second local feedback loops |
