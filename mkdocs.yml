@@ -75,6 +75,7 @@ nav:
     - Quick Start: guides/quickstart.md
     - Watch Mode: guides/watch.md
     - Configuration: guides/configuration.md
+    - Continuous Integration: guides/ci.md
     - Benchmarks: guides/benchmarks.md
   - How It Works:
     - Overview: design/overview.md
