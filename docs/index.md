@@ -16,7 +16,7 @@ hide:
   </div>
   <div class="cta">
     <a href="guides/quickstart/" class="btn-primary">Get Started →</a>
-    <a href="https://github.com/your-org/riptide" class="btn-secondary">View on GitHub</a>
+    <a href="https://github.com/snoodleboot-io/riptide" class="btn-secondary">View on GitHub</a>
   </div>
 </div>
 
@@ -95,7 +95,7 @@ How riptide compares on a 200-test Python project after changing a single source
 
 ```bash
 # Download the binary
-curl -sSfL https://github.com/your-org/riptide/releases/latest/download/riptide-linux-x86_64 \
+curl -sSfL https://github.com/snoodleboot-io/riptide/releases/latest/download/riptide-linux-x86_64 \
   -o riptide && chmod +x riptide
 
 # Or build from source

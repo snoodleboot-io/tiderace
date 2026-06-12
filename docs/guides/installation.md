@@ -29,7 +29,7 @@ Once releases are published, you will be able to download a pre-built binary. Th
 
 ```bash
 # Linux x86_64 (placeholder URL — not yet available)
-curl -sSfL https://github.com/your-org/riptide/releases/latest/download/riptide-linux-x86_64 \
+curl -sSfL https://github.com/snoodleboot-io/riptide/releases/latest/download/riptide-linux-x86_64 \
   -o /usr/local/bin/riptide && chmod +x /usr/local/bin/riptide
 ```
 
@@ -53,7 +53,7 @@ uv add --dev pytest coverage
 
 ## CI / GitHub Actions
 
-The [official workflow](.github/workflows/ci.yml) handles installation automatically. Until prebuilt binaries are published, build from source in CI:
+The [CI workflow](https://github.com/snoodleboot-io/riptide/blob/main/.github/workflows/ci.yml) builds and tests automatically. Until prebuilt binaries are published, build from source in CI:
 
 ```yaml
 - name: Build riptide

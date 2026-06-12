@@ -9,7 +9,7 @@
 ## Clone and Build
 
 ```bash
-git clone https://github.com/your-org/riptide
+git clone https://github.com/snoodleboot-io/riptide
 cd riptide
 cargo build
 ```

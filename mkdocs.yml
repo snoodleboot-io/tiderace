@@ -1,13 +1,12 @@
 site_name: riptide
 site_description: "⚡ Rust-powered Python test engine — parallel execution, impact analysis, coverage"
-site_url: https://riptide-test.dev
-repo_url: https://github.com/your-org/riptide
-repo_name: your-org/riptide
+site_url: https://snoodleboot-io.github.io/riptide/
+repo_url: https://github.com/snoodleboot-io/riptide
+repo_name: snoodleboot-io/riptide
 edit_uri: edit/main/docs/
 
 theme:
   name: material
-  custom_dir: docs/overrides
   logo: assets/logo.svg
   favicon: assets/favicon.svg
   font:
@@ -37,14 +36,7 @@ extra_css:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/your-org/riptide
-    - icon: fontawesome/brands/rust
-      link: https://crates.io/crates/riptide
-  version:
-    provider: mike
-  analytics:
-    provider: google
-    property: G-XXXXXXXXXX
+      link: https://github.com/snoodleboot-io/riptide
 
 plugins:
   - search
@@ -81,11 +73,13 @@ nav:
   - Getting Started:
     - Installation: guides/installation.md
     - Quick Start: guides/quickstart.md
+    - Watch Mode: guides/watch.md
     - Configuration: guides/configuration.md
+    - Benchmarks: guides/benchmarks.md
   - How It Works:
     - Overview: design/overview.md
     - Impact Analysis: design/impact-analysis.md
-    - Parallel Execution: design/parallel-execution.md
+    - Execution Model: design/parallel-execution.md
     - Coverage Engine: design/coverage.md
     - State Database: design/database.md
   - API Reference:

@@ -23,3 +23,6 @@ benchmarks/fixtures/sample_project/
 benchmarks/RESULTS.md
 benchmarks/results.json
 benchmarks/.hyperfine/
+
+# mkdocs build output
+/site/

@@ -2,39 +2,58 @@
 
 ## Overview
 
-riptide integrates with Python's `coverage.py` library for test coverage measurement. Coverage serves two purposes in riptide:
+riptide integrates with Python's `coverage.py`. Coverage serves two purposes:
 
-1. **Reporting** — show line coverage percentages per file after a run
-2. **Dependency mapping** — build the graph of which tests import which source files (powers impact analysis)
+1. **Reporting** — a line-coverage percentage per file after a run.
+2. **Dependency mapping** — the per-test graph of which source files each test executed, which
+   powers [impact analysis](impact-analysis.md).
 
-## Per-Test Coverage
+## Per-test coverage from one batched run
 
-Unlike running `pytest --cov` which measures aggregate coverage, riptide measures coverage **per test**. This is what enables impact analysis to know exactly which tests depend on which files.
+riptide gets **per-test** attribution without running a separate process per test. A coverage
+run is configured with dynamic contexts:
 
-Each test runs as:
-
-```bash
-python -m coverage run \
-  --data-file=.riptide-coverage/.coverage.<unique-test-id> \
-  --source=. \
-  --branch \
-  -m pytest <nodeid> -x --tb=short -q
+```ini
+[run]
+dynamic_context = test_function
+branch = True
+source = .
 ```
 
-The `--branch` flag enables branch coverage (not just line coverage), giving more accurate dependency information.
+With `dynamic_context = test_function`, coverage.py tags every measured line with the test
+that was executing. So a single **batched** run — `coverage run -m pytest <many node ids>`,
+one process per worker — still records which lines (and therefore which files) each individual
+test touched. This is the same fast batched execution as a normal run; only the wrapper
+differs. See [ADR-011](decisions.md).
 
-## Merging
+## Combining and extraction
 
-After all tests complete, riptide merges the individual `.coverage.*` files:
+After the batches finish, riptide combines the per-batch data files and reads the
+context-annotated report:
 
 ```bash
 python -m coverage combine --keep .riptide-coverage/
-python -m coverage json -o .riptide-coverage/combined.json
+python -m coverage json --show-contexts -o .riptide-coverage/contexts.json
 ```
 
-The JSON report is parsed to produce the terminal coverage table.
+For each file, the report lists which **contexts** (tests) executed lines in it. Coverage
+prefixes context names with the package-dependent module path (e.g.
+`pkg.tests.test_auth.test_login`), so riptide matches tests on the stable **suffix**
+`{file_stem}.{func}` / `{file_stem}.{Class}.{method}` rather than a predicted full name.
 
-## Coverage Report Format
+## Storing the dependency graph
+
+The extracted `test → files` map is written to SQLite:
+
+```sql
+INSERT INTO test_file_deps (test_id, dep_path) VALUES ('tests/test_auth.py::test_login', 'src/auth.py');
+INSERT INTO test_file_deps (test_id, dep_path) VALUES ('tests/test_auth.py::test_login', 'src/models.py');
+```
+
+On later runs **without** `--coverage`, this stored graph drives impact analysis — no
+instrumentation needed until you choose to refresh it.
+
+## Coverage report
 
 ```
   Coverage
@@ -46,47 +65,16 @@ The JSON report is parsed to produce the terminal coverage table.
   Overall: 87.4%
 ```
 
-Progress bars are colour-coded:
-
-- 🟢 Green: ≥80%
-- 🟡 Yellow: 60–79%
-- 🔴 Red: <60%
-
-## Dependency Extraction
-
-After each per-test coverage run, riptide extracts the list of files that were executed:
-
-```json
-{
-  "files": {
-    "src/auth.py": { "executed_lines": [...], "missing_lines": [...] },
-    "src/models.py": { ... }
-  }
-}
-```
-
-This list is stored in SQLite:
-
-```sql
-INSERT INTO test_file_deps (test_id, dep_path) VALUES ('tests/test_auth.py::test_login', 'src/auth.py');
-INSERT INTO test_file_deps (test_id, dep_path) VALUES ('tests/test_auth.py::test_login', 'src/models.py');
-```
-
-On subsequent runs without `--coverage`, this stored graph is used for impact analysis without re-running coverage instrumentation.
-
-## When to Use `--coverage`
+## When to use `--coverage`
 
 | Scenario | Recommendation |
 |---|---|
-| First run on a project | Always use `--coverage` to build dep graph |
-| Regular development | Can omit `--coverage` — dep graph persists |
-| After adding new source files | Use `--coverage` or `--all --coverage` to rebuild graph |
-| CI runs | Recommended — keeps graph fresh and generates reports |
+| First run on a project | Use `--coverage` to build the dependency graph |
+| Regular development | Omit `--coverage` — the graph persists and is reused |
+| After adding source files | Re-run `--coverage` to refresh the graph |
+| Before `riptide watch` | Prime once with `--coverage` for the tightest watch loops |
 
-## Performance Impact
-
-Coverage instrumentation adds ~2x overhead per test (roughly 300ms → 600ms for a typical test). This overhead is acceptable because:
-
-- Impact analysis savings compound across runs
-- Once the dep graph is built, future runs skip `--coverage` entirely
-- Coverage runs in parallel too — the 2x cost is divided across all cores
+Because coverage now runs batched (not one process per test), building the graph is far
+cheaper than it used to be — roughly **4–5× faster** than the legacy isolated path — while
+remaining precise. `--isolate --coverage` still uses the one-process-per-test path if you need
+strict isolation.
