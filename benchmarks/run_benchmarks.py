@@ -7,14 +7,16 @@ raw data to ``benchmarks/results.json``.
 
 Why both cold AND warm scenarios?
 ---------------------------------
-riptide runs each test in its own ``python -m pytest <nodeid>`` subprocess
-(see ADR-001 in ``docs/design/decisions.md``). Interpreter startup is ~250 ms
-per test, so on a *cold* full run of many fast tests riptide is **slower** than
-in-process pytest. riptide's win is *impact analysis*: on a *warm* run it hashes
-sources, consults its dependency graph, and re-runs only the tests affected by a
-change — skipping everything else. To compare fairly we measure both regimes for
-riptide and the closest equivalents for the other runners (pytest-testmon also
-has a cold/warm story; pytest-xdist parallelises the cold run).
+By default riptide runs tests **batched** — one ``pytest`` process per worker
+(ADR-009 in ``docs/design/decisions.md``) — so a cold full run pays one
+interpreter startup per worker, not per test. That is much faster than the
+legacy one-process-per-test path, but still leaves single-process pytest
+competitive on a cold full run of many fast tests. riptide's real win is
+*impact analysis*: on a *warm* run it hashes sources, consults its persisted
+dependency graph, and re-runs only the tests affected by a change — skipping
+everything else. To compare fairly we measure both regimes for riptide and the
+closest equivalents for the other runners (pytest-testmon also has a cold/warm
+story; pytest-xdist parallelises the cold run).
 
 Each scenario runs against the SAME freshly generated fixture, in the fixture
 directory, under hyperfine with ``--warmup`` and ``--runs``. Per-run ``--setup``
@@ -306,19 +308,27 @@ def write_results(results: list[ScenarioResult], meta: dict) -> None:
     lines.append("## Reading these numbers")
     lines.append("")
     lines.append(
-        "- **riptide cold full run** pays ~250 ms of interpreter startup per "
-        "test (subprocess-per-test, ADR-001), so on many fast tests it is "
-        "*slower* than in-process pytest. This is expected and honest."
+        "- **riptide warm runs are the win.** With an unchanged tree riptide "
+        "skips every test; after a one-module edit it re-runs only the affected "
+        "tests. This is the everyday edit→test loop — compare it against "
+        "**pytest-testmon warm** and the full **pytest** baseline."
     )
     lines.append(
-        "- **riptide warm runs** are where it wins: with an unchanged tree it "
-        "skips every test, and after a one-module edit it re-runs only the "
-        "affected tests. Compare these against **pytest-testmon warm** and the "
-        "full **pytest** baseline."
+        "- **riptide cold full run** (`--all`) runs tests **batched** — one "
+        "pytest process per worker (ADR-009), far faster than one process per "
+        "test — but still pays one interpreter startup per worker. Its cost is "
+        "roughly flat with test count (dominated by the fixed per-worker "
+        "startups), so on many fast tests single-process **pytest** can still "
+        "edge it out. For running *everything* once, pytest or pytest-xdist is "
+        "often fastest."
     )
     lines.append(
-        "- **pytest-xdist** parallelises the cold run in-process and is the "
-        "fastest way to run *everything* on this machine."
+        "- **Caching matters.** The cold scenario clears `.riptide.db` before "
+        "each timed run to measure the uncached worst case. In real use you pay "
+        "that once: the first run (or any `--all` run) is full; every run after "
+        "that uses the persisted state for impact analysis. In CI, cache "
+        "`.riptide.db` (and `.riptide-coverage/`) across runs to get the warm "
+        "speedup — a fresh checkout with no cache is always a cold full run."
     )
     lines.append("")
     RESULTS_MD.write_text("\n".join(lines))
