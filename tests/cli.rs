@@ -190,6 +190,24 @@ fn coverage_contexts_give_precise_impact() {
 }
 
 #[test]
+fn collect_with_dot_path_yields_clean_node_ids() {
+    // Running against `.` must not leak a `./` prefix into node ids, or they won't
+    // match pytest's normalized ids (this broke real root-level test layouts).
+    let proj = TempDir::new().unwrap();
+    std::fs::write(
+        proj.path().join("test_root.py"),
+        "def test_a():\n    assert True\n",
+    )
+    .unwrap();
+    riptide(proj.path())
+        .args(["collect", "."])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("test_root.py::test_a"))
+        .stdout(predicate::str::contains("./test_root.py").not());
+}
+
+#[test]
 fn parametrized_and_async_tests_report_correctly() {
     // A parametrized test (pytest expands to test[1], test[2], …) must aggregate
     // to a single pass/fail, not show up as an error. An async test must collect.

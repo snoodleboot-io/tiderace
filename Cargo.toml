@@ -1,8 +1,18 @@
 [package]
+# NOTE: the name `riptide` is already taken on crates.io by an unrelated crate.
+# To publish, rename here (e.g. `riptide-test`) — or distribute the GitHub-release
+# binary instead. The CLI binary name below is independent of the package name.
 name = "riptide"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
+description = "A Rust-powered Python test engine: parallel execution, impact analysis, and coverage."
+repository = "https://github.com/snoodleboot-io/riptide"
+homepage = "https://snoodleboot-io.github.io/riptide/"
+documentation = "https://snoodleboot-io.github.io/riptide/"
+readme = "README.md"
+keywords = ["pytest", "testing", "test-runner", "coverage", "python"]
+categories = ["development-tools::testing", "command-line-utilities"]
 
 [[bin]]
 name = "riptide"
