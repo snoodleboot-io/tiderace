@@ -3,6 +3,7 @@ name = "tiderace"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
+authors = ["John Aven <john@snoodleboot.com>"]
 description = "A Rust-powered Python test engine: parallel execution, impact analysis, and coverage."
 repository = "https://github.com/snoodleboot-io/tiderace"
 homepage = "https://snoodleboot-io.github.io/tiderace/"
