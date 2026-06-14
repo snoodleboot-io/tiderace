@@ -5,14 +5,14 @@ hide:
 ---
 
 <div class="tiderace-hero">
-  <h1>rip<span>tide</span> ⚡</h1>
+  <h1>tide<span>race</span> ⚡</h1>
   <p class="tagline">The Rust-powered Python test engine that only runs what changed.</p>
   <div class="badges">
     <span class="badge">Rust</span>
-    <span class="badge">parallel execution</span>
+    <span class="badge">batched parallel</span>
     <span class="badge">impact analysis</span>
     <span class="badge">coverage</span>
-    <span class="badge">SQLite state</span>
+    <span class="badge">watch mode</span>
   </div>
   <div class="cta">
     <a href="guides/quickstart/" class="btn-primary">Get Started →</a>
@@ -27,8 +27,8 @@ Python test suites are slow. `pytest` runs every test every time. `pytest-xdist`
 <div class="feature-grid">
   <div class="feature-card">
     <div class="icon">⚡</div>
-    <h3>Parallel by Default</h3>
-    <p>Rayon-powered thread pool runs tests concurrently across all CPU cores with zero configuration.</p>
+    <h3>Batched & Parallel</h3>
+    <p>A Rayon worker pool runs pytest batched — one process per worker — across all cores, paying interpreter startup once per worker, not per test.</p>
   </div>
   <div class="feature-card">
     <div class="icon">🎯</div>
@@ -53,13 +53,18 @@ Python test suites are slow. `pytest` runs every test every time. `pytest-xdist`
   <div class="feature-card">
     <div class="icon">🔌</div>
     <h3>Drop-in Compatible</h3>
-    <p>Works with your existing pytest-compatible test files. No rewrites, no annotations required.</p>
+    <p>Real pytest under the hood — fixtures, plugins, parametrize, async, and unittest all just work. No rewrites, no annotations.</p>
+  </div>
+  <div class="feature-card">
+    <div class="icon">👀</div>
+    <h3>Watch Mode</h3>
+    <p><code>tiderace watch</code> keeps a warm pool of workers (pytest imported once) and re-runs only impacted tests on save — sub-second feedback loops.</p>
   </div>
 </div>
 
 ## Benchmarks
 
-How tiderace compares on a 200-test Python project after changing a single source file:
+Illustrative — how the runners compare on a ~200-test project after changing a single source file (tiderace re-runs only the impacted tests; the others re-run more). Numbers vary by machine; reproduce with the [benchmark harness](guides/benchmarks.md).
 
 <div style="margin: 1.5rem 0;">
   <div class="bench-row">
@@ -93,16 +98,21 @@ How tiderace compares on a 200-test Python project after changing a single sourc
 
 ## Quick Install
 
+!!! note "Pre-release"
+    tiderace isn't published to crates.io / GitHub Releases yet — build from source for now. The download and `cargo install` lines below are how it will work once published.
+
 ```bash
-# Download the binary
+# Build from source (works today) — needs Rust + Python with pytest & coverage
+git clone https://github.com/snoodleboot-io/tiderace
+cd tiderace && cargo build --release
+./target/release/tiderace tests/
+
+# Future (once published): prebuilt binary
 curl -sSfL https://github.com/snoodleboot-io/tiderace/releases/latest/download/tiderace-linux-x86_64 \
   -o tiderace && chmod +x tiderace
 
-# Or build from source
+# Future (once published): from crates.io
 cargo install tiderace
-
-# Run your tests
-tiderace tests/
 ```
 
 ## How It Works
@@ -111,7 +121,7 @@ tiderace tests/
 ┌─────────────────────────────────────────────────────────┐
 │                        tiderace                          │
 │                                                         │
-│  1. COLLECT   Scan .py files via regex AST (Rust)      │
+│  1. COLLECT   Scan .py files via fast regex (Rust)     │
 │       ↓                                                 │
 │  2. HASH      SHA-256 fingerprint every source file     │
 │       ↓                                                 │
