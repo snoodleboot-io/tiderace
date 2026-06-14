@@ -2,16 +2,16 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-/// Defaults applied when neither a CLI flag nor a `[tool.riptide]` value is set.
+/// Defaults applied when neither a CLI flag nor a `[tool.tiderace]` value is set.
 pub const DEFAULT_PATTERN: &str = r"test_.*\.py|.*_test\.py";
-pub const DEFAULT_DB: &str = ".riptide.db";
+pub const DEFAULT_DB: &str = ".tiderace.db";
 pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
-/// Configuration parsed from `[tool.riptide]` in `pyproject.toml`. Every field is
+/// Configuration parsed from `[tool.tiderace]` in `pyproject.toml`. Every field is
 /// optional; a CLI flag, when present, always takes precedence over these.
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct RiptideConfig {
+pub struct TideraceConfig {
     pub workers: Option<usize>,
     pub python: Option<String>,
     pub coverage: Option<bool>,
@@ -29,22 +29,22 @@ struct PyProject {
 
 #[derive(Deserialize)]
 struct Tool {
-    riptide: Option<RiptideConfig>,
+    tiderace: Option<TideraceConfig>,
 }
 
-impl RiptideConfig {
-    /// Load `[tool.riptide]` from the given `pyproject.toml`. A missing file or a
-    /// file with no `[tool.riptide]` section yields the default (all-`None`)
+impl TideraceConfig {
+    /// Load `[tool.tiderace]` from the given `pyproject.toml`. A missing file or a
+    /// file with no `[tool.tiderace]` section yields the default (all-`None`)
     /// config; a malformed file or unknown key is a hard error so typos surface.
-    pub fn load(pyproject: &Path) -> Result<RiptideConfig> {
+    pub fn load(pyproject: &Path) -> Result<TideraceConfig> {
         if !pyproject.exists() {
-            return Ok(RiptideConfig::default());
+            return Ok(TideraceConfig::default());
         }
         let text = std::fs::read_to_string(pyproject)
             .with_context(|| format!("reading {}", pyproject.display()))?;
         let parsed: PyProject = toml::from_str(&text)
-            .with_context(|| format!("parsing [tool.riptide] in {}", pyproject.display()))?;
-        Ok(parsed.tool.and_then(|t| t.riptide).unwrap_or_default())
+            .with_context(|| format!("parsing [tool.tiderace] in {}", pyproject.display()))?;
+        Ok(parsed.tool.and_then(|t| t.tiderace).unwrap_or_default())
     }
 }
 
@@ -52,24 +52,24 @@ impl RiptideConfig {
 mod tests {
     use super::*;
 
-    fn parse(src: &str) -> RiptideConfig {
+    fn parse(src: &str) -> TideraceConfig {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("pyproject.toml");
         std::fs::write(&p, src).unwrap();
-        RiptideConfig::load(&p).unwrap()
+        TideraceConfig::load(&p).unwrap()
     }
 
     #[test]
     fn missing_file_is_default() {
-        let cfg = RiptideConfig::load(Path::new("/no/such/pyproject.toml")).unwrap();
-        assert_eq!(cfg, RiptideConfig::default());
+        let cfg = TideraceConfig::load(Path::new("/no/such/pyproject.toml")).unwrap();
+        assert_eq!(cfg, TideraceConfig::default());
     }
 
     #[test]
     fn no_section_is_default() {
         assert_eq!(
             parse("[tool.black]\nline-length = 88\n"),
-            RiptideConfig::default()
+            TideraceConfig::default()
         );
     }
 
@@ -77,7 +77,7 @@ mod tests {
     fn reads_all_fields() {
         let cfg = parse(
             r#"
-[tool.riptide]
+[tool.tiderace]
 workers = 8
 python = ".venv/bin/python"
 coverage = true
@@ -103,7 +103,7 @@ timeout = 60
     fn unknown_key_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("pyproject.toml");
-        std::fs::write(&p, "[tool.riptide]\nworkrs = 8\n").unwrap();
-        assert!(RiptideConfig::load(&p).is_err());
+        std::fs::write(&p, "[tool.tiderace]\nworkrs = 8\n").unwrap();
+        assert!(TideraceConfig::load(&p).is_err());
     }
 }

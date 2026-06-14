@@ -4,7 +4,7 @@ hide:
   - toc
 ---
 
-<div class="riptide-hero">
+<div class="tiderace-hero">
   <h1>rip<span>tide</span> ⚡</h1>
   <p class="tagline">The Rust-powered Python test engine that only runs what changed.</p>
   <div class="badges">
@@ -16,11 +16,11 @@ hide:
   </div>
   <div class="cta">
     <a href="guides/quickstart/" class="btn-primary">Get Started →</a>
-    <a href="https://github.com/snoodleboot-io/riptide" class="btn-secondary">View on GitHub</a>
+    <a href="https://github.com/snoodleboot-io/tiderace" class="btn-secondary">View on GitHub</a>
   </div>
 </div>
 
-## Why riptide?
+## Why tiderace?
 
 Python test suites are slow. `pytest` runs every test every time. `pytest-xdist` parallelises but doesn't know what changed. `pytest-testmon` knows what changed but is pure Python. No tool does all three — until now.
 
@@ -33,7 +33,7 @@ Python test suites are slow. `pytest` runs every test every time. `pytest-xdist`
   <div class="feature-card">
     <div class="icon">🎯</div>
     <h3>Impact Analysis</h3>
-    <p>SHA-256 file fingerprinting + coverage dep maps mean riptide only reruns tests affected by your changes.</p>
+    <p>SHA-256 file fingerprinting + coverage dep maps mean tiderace only reruns tests affected by your changes.</p>
   </div>
   <div class="feature-card">
     <div class="icon">📊</div>
@@ -59,13 +59,13 @@ Python test suites are slow. `pytest` runs every test every time. `pytest-xdist`
 
 ## Benchmarks
 
-How riptide compares on a 200-test Python project after changing a single source file:
+How tiderace compares on a 200-test Python project after changing a single source file:
 
 <div style="margin: 1.5rem 0;">
   <div class="bench-row">
-    <span class="bench-label">riptide</span>
+    <span class="bench-label">tiderace</span>
     <div class="bench-bar-wrap">
-      <div class="bench-bar riptide" style="width: 8%;">0.7s</div>
+      <div class="bench-bar tiderace" style="width: 8%;">0.7s</div>
     </div>
   </div>
   <div class="bench-row">
@@ -89,27 +89,27 @@ How riptide compares on a 200-test Python project after changing a single source
 </div>
 
 !!! tip "Why so fast?"
-    After one coverage run, riptide knows exactly which tests import which source files. Change one file, run only its tests. The Rust binary itself starts in <5ms.
+    After one coverage run, tiderace knows exactly which tests import which source files. Change one file, run only its tests. The Rust binary itself starts in <5ms.
 
 ## Quick Install
 
 ```bash
 # Download the binary
-curl -sSfL https://github.com/snoodleboot-io/riptide/releases/latest/download/riptide-linux-x86_64 \
-  -o riptide && chmod +x riptide
+curl -sSfL https://github.com/snoodleboot-io/tiderace/releases/latest/download/tiderace-linux-x86_64 \
+  -o tiderace && chmod +x tiderace
 
 # Or build from source
-cargo install riptide
+cargo install tiderace
 
 # Run your tests
-riptide tests/
+tiderace tests/
 ```
 
 ## How It Works
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                        riptide                          │
+│                        tiderace                          │
 │                                                         │
 │  1. COLLECT   Scan .py files via regex AST (Rust)      │
 │       ↓                                                 │

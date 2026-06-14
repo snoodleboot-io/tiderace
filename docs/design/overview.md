@@ -1,6 +1,6 @@
 # Design Overview
 
-riptide is built around three core ideas:
+tiderace is built around three core ideas:
 
 ## 1. Only run what changed
 
@@ -12,7 +12,7 @@ The orchestration layer — file scanning, hashing, dep lookup, process spawning
 
 ## 3. Zero configuration, persistent state
 
-A developer should be able to drop `riptide` into any existing pytest project and get value immediately. No annotations, no config files, no server. State accumulates automatically in a local SQLite file and gets smarter over time.
+A developer should be able to drop `tiderace` into any existing pytest project and get value immediately. No annotations, no config files, no server. State accumulates automatically in a local SQLite file and gets smarter over time.
 
 ## The Three Pillars in Practice
 
@@ -27,7 +27,7 @@ The first run pays the full cost. Every run after that is proportional to what a
 
 ## Non-Goals
 
-riptide is not:
+tiderace is not:
 - A replacement for `pytest` — it delegates execution to pytest
 - A test framework — no new test syntax or assertions
 - A CI platform — it's a binary that slots into existing CI

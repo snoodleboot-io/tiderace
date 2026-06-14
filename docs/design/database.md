@@ -1,6 +1,6 @@
 # State Database
 
-riptide persists state in a local SQLite database (`.riptide.db` by default). This file is machine-local and should not be committed to version control.
+tiderace persists state in a local SQLite database (`.tiderace.db` by default). This file is machine-local and should not be committed to version control.
 
 ## Schema
 
@@ -70,9 +70,9 @@ CREATE TABLE coverage_data (
 ### Resetting State
 
 ```bash
-riptide clear
+tiderace clear
 # or manually:
-rm .riptide.db
+rm .tiderace.db
 ```
 
 After clearing, the next run will execute all tests and rebuild the state from scratch.
@@ -82,7 +82,7 @@ After clearing, the next run will execute all tests and rebuild the state from s
 Since it's a standard SQLite database, you can inspect it directly:
 
 ```bash
-sqlite3 .riptide.db
+sqlite3 .tiderace.db
 
 # See all test results
 SELECT test_id, status, duration_ms FROM test_results ORDER BY ran_at DESC;
@@ -99,4 +99,4 @@ SELECT path, updated_at FROM file_hashes ORDER BY updated_at DESC LIMIT 10;
 The DB is intentionally machine-local. Each developer's machine maintains its own state reflecting their local working tree. CI runners also maintain their own DB (typically per-job or cached across runs).
 
 !!! tip "Caching in CI"
-    Cache `.riptide.db` between CI runs keyed on the branch name for maximum impact analysis benefit. See the [CI/CD guide](../guides/releases.md) for the GitHub Actions cache configuration.
+    Cache `.tiderace.db` between CI runs keyed on the branch name for maximum impact analysis benefit. See the [CI/CD guide](../guides/releases.md) for the GitHub Actions cache configuration.

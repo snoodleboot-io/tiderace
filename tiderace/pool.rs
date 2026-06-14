@@ -2,7 +2,7 @@
 //!
 //! Spawns N long-lived Python workers (`worker.py`) that import pytest **once** and
 //! run individual node ids fed as newline-delimited JSON. Because the workers stay
-//! warm across `riptide watch` cycles, edit→test cycles after the first pay ~no
+//! warm across `tiderace watch` cycles, edit→test cycles after the first pay ~no
 //! interpreter/pytest startup.
 //!
 //! Robustness (per the stage-B security review):
@@ -253,7 +253,7 @@ fn error_result(item: &TestItem, reason: &str) -> TestResult {
         file_path: item.file_path.clone(),
         status: TestStatus::Error,
         duration_ms: 0,
-        stdout: Some(format!("[riptide] {}", reason)),
+        stdout: Some(format!("[tiderace] {}", reason)),
         stderr: None,
         covered_files: Vec::new(),
     }
@@ -311,9 +311,9 @@ mod tests {
 
     fn python_with_pytest() -> Option<String> {
         let candidates = [
-            std::env::var("RIPTIDE_TEST_PYTHON").unwrap_or_default(),
+            std::env::var("TIDERACE_TEST_PYTHON").unwrap_or_default(),
             format!(
-                "{}/.riptide-bench-venv/bin/python",
+                "{}/.tiderace-bench-venv/bin/python",
                 env!("CARGO_MANIFEST_DIR")
             ),
             "python3".to_string(),
@@ -334,7 +334,7 @@ mod tests {
             eprintln!("skipping: no python with pytest");
             return;
         };
-        let worker = Path::new(env!("CARGO_MANIFEST_DIR")).join("riptide/worker.py");
+        let worker = Path::new(env!("CARGO_MANIFEST_DIR")).join("tiderace/worker.py");
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join("tests")).unwrap();

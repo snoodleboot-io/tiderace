@@ -13,7 +13,7 @@ pub fn print_header(total: usize, skipped: usize, workers: usize, with_coverage:
     );
     println!(
         "  {} {}",
-        "riptide".bold().cyan(),
+        "tiderace".bold().cyan(),
         "⚡ Rust-powered test engine".dimmed()
     );
     println!(

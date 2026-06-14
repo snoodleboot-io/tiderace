@@ -1,8 +1,8 @@
-site_name: riptide
+site_name: tiderace
 site_description: "⚡ Rust-powered Python test engine — parallel execution, impact analysis, coverage"
-site_url: https://snoodleboot-io.github.io/riptide/
-repo_url: https://github.com/snoodleboot-io/riptide
-repo_name: snoodleboot-io/riptide
+site_url: https://snoodleboot-io.github.io/tiderace/
+repo_url: https://github.com/snoodleboot-io/tiderace
+repo_name: snoodleboot-io/tiderace
 edit_uri: edit/main/docs/
 
 theme:
@@ -31,12 +31,12 @@ theme:
     - toc.integrate
 
 extra_css:
-  - assets/riptide.css
+  - assets/tiderace.css
 
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/snoodleboot-io/riptide
+      link: https://github.com/snoodleboot-io/tiderace
 
 plugins:
   - search

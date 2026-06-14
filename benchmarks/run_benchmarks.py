@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark harness: riptide vs. Python test runners on the reference fixture.
+"""Benchmark harness: tiderace vs. Python test runners on the reference fixture.
 
 This harness measures wall-clock time for several *honest* scenarios using
 ``hyperfine`` and writes a comparison table to ``benchmarks/RESULTS.md`` and the
@@ -7,14 +7,14 @@ raw data to ``benchmarks/results.json``.
 
 Why both cold AND warm scenarios?
 ---------------------------------
-By default riptide runs tests **batched** — one ``pytest`` process per worker
+By default tiderace runs tests **batched** — one ``pytest`` process per worker
 (ADR-009 in ``docs/design/decisions.md``) — so a cold full run pays one
 interpreter startup per worker, not per test. That is much faster than the
 legacy one-process-per-test path, but still leaves single-process pytest
-competitive on a cold full run of many fast tests. riptide's real win is
+competitive on a cold full run of many fast tests. tiderace's real win is
 *impact analysis*: on a *warm* run it hashes sources, consults its persisted
 dependency graph, and re-runs only the tests affected by a change — skipping
-everything else. To compare fairly we measure both regimes for riptide and the
+everything else. To compare fairly we measure both regimes for tiderace and the
 closest equivalents for the other runners (pytest-testmon also has a cold/warm
 story; pytest-xdist parallelises the cold run).
 
@@ -46,8 +46,8 @@ BENCH_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BENCH_DIR.parent
 GENERATE_PY = BENCH_DIR / "fixtures" / "generate.py"
 FIXTURE_DIR = BENCH_DIR / "fixtures" / "sample_project"
-DEFAULT_RIPTIDE = REPO_ROOT / "target" / "debug" / "riptide"
-DEFAULT_VENV_PY = REPO_ROOT / ".riptide-bench-venv" / "bin" / "python"
+DEFAULT_TIDERACE = REPO_ROOT / "target" / "debug" / "tiderace"
+DEFAULT_VENV_PY = REPO_ROOT / ".tiderace-bench-venv" / "bin" / "python"
 RESULTS_MD = BENCH_DIR / "RESULTS.md"
 RESULTS_JSON = BENCH_DIR / "results.json"
 
@@ -109,24 +109,24 @@ def regenerate_fixture(modules: int, tests_per_module: int, work_ms: int,
 # --------------------------------------------------------------------------- #
 # Scenario construction
 # --------------------------------------------------------------------------- #
-def build_scenarios(riptide: str, venv_py: str) -> list[Scenario]:
+def build_scenarios(tiderace: str, venv_py: str) -> list[Scenario]:
     """Construct every scenario. Commands run with cwd == FIXTURE_DIR.
 
     Hook commands also run with cwd == FIXTURE_DIR (hyperfine inherits cwd), so
-    relative paths like ``tests/`` and ``.riptide.db`` are resolved there.
+    relative paths like ``tests/`` and ``.tiderace.db`` are resolved there.
     """
-    rt = shlex.quote(riptide)
+    rt = shlex.quote(tiderace)
     py = shlex.quote(venv_py)
 
-    # riptide invocations -------------------------------------------------- #
-    rt_clear = f"{rt} clear --db .riptide.db"
+    # tiderace invocations -------------------------------------------------- #
+    rt_clear = f"{rt} clear --db .tiderace.db"
     # Cold full run: ignore impact analysis, run everything.
     rt_all = f"{rt} --all --python {py} tests/"
     # Impact-aware run (no --all): re-run only affected tests.
     rt_impact = f"{rt} --python {py} tests/"
     # Priming run builds the test->file dependency graph; coverage (-c) is what
     # populates test_deps in the state db, so impact analysis has data to use.
-    rt_prime = f"{rt} clear --db .riptide.db >/dev/null 2>&1; {rt} -c --python {py} tests/"
+    rt_prime = f"{rt} clear --db .tiderace.db >/dev/null 2>&1; {rt} -c --python {py} tests/"
 
     # Restore the pristine generated module then touch it, so each warm-impact
     # run sees exactly one changed source file. We regenerate just that file's
@@ -144,23 +144,23 @@ def build_scenarios(riptide: str, venv_py: str) -> list[Scenario]:
 
     scenarios = [
         Scenario(
-            key="riptide_cold_full",
-            label="riptide — cold full run (`--all`)",
+            key="tiderace_cold_full",
+            label="tiderace — cold full run (`--all`)",
             command=rt_all,
             # Each timed run starts from a cleared db => genuinely cold.
             prepare=rt_clear,
         ),
         Scenario(
-            key="riptide_warm_noop",
-            label="riptide — warm run, no changes (skips all)",
+            key="tiderace_warm_noop",
+            label="tiderace — warm run, no changes (skips all)",
             command=rt_impact,
             # Prime the dep graph once; subsequent timed runs change nothing,
             # so impact analysis should skip every test.
             setup=rt_prime,
         ),
         Scenario(
-            key="riptide_warm_one_module",
-            label="riptide — warm run, one source module touched",
+            key="tiderace_warm_one_module",
+            label="tiderace — warm run, one source module touched",
             command=rt_impact,
             setup=rt_prime,
             # Before every timed run: restore pristine module, then touch it.
@@ -269,7 +269,7 @@ def write_results(results: list[ScenarioResult], meta: dict) -> None:
     baseline = min((r.mean for r in successful), default=None)
 
     lines: list[str] = []
-    lines.append("# riptide benchmark results")
+    lines.append("# tiderace benchmark results")
     lines.append("")
     lines.append(
         "Generated by `benchmarks/run_benchmarks.py`. "
@@ -285,7 +285,7 @@ def write_results(results: list[ScenarioResult], meta: dict) -> None:
     lines.append(f"- per-test work: **{meta['work_ms']} ms** "
                  "(0 = pure-CPU; interpreter startup dominates)")
     lines.append(f"- hyperfine runs: **{meta['runs']}** (warmup {meta['warmup']})")
-    lines.append(f"- riptide: `{meta['riptide']}`")
+    lines.append(f"- tiderace: `{meta['tiderace']}`")
     lines.append(f"- python: `{meta['python']}`")
     lines.append("")
     lines.append("## Results")
@@ -308,13 +308,13 @@ def write_results(results: list[ScenarioResult], meta: dict) -> None:
     lines.append("## Reading these numbers")
     lines.append("")
     lines.append(
-        "- **riptide warm runs are the win.** With an unchanged tree riptide "
+        "- **tiderace warm runs are the win.** With an unchanged tree tiderace "
         "skips every test; after a one-module edit it re-runs only the affected "
         "tests. This is the everyday edit→test loop — compare it against "
         "**pytest-testmon warm** and the full **pytest** baseline."
     )
     lines.append(
-        "- **riptide cold full run** (`--all`) runs tests **batched** — one "
+        "- **tiderace cold full run** (`--all`) runs tests **batched** — one "
         "pytest process per worker (ADR-009), far faster than one process per "
         "test — but still pays one interpreter startup per worker. Its cost is "
         "roughly flat with test count (dominated by the fixed per-worker "
@@ -323,11 +323,11 @@ def write_results(results: list[ScenarioResult], meta: dict) -> None:
         "often fastest."
     )
     lines.append(
-        "- **Caching matters.** The cold scenario clears `.riptide.db` before "
+        "- **Caching matters.** The cold scenario clears `.tiderace.db` before "
         "each timed run to measure the uncached worst case. In real use you pay "
         "that once: the first run (or any `--all` run) is full; every run after "
         "that uses the persisted state for impact analysis. In CI, cache "
-        "`.riptide.db` (and `.riptide-coverage/`) across runs to get the warm "
+        "`.tiderace.db` (and `.tiderace-coverage/`) across runs to get the warm "
         "speedup — a fresh checkout with no cache is always a cold full run."
     )
     lines.append("")
@@ -358,19 +358,19 @@ def write_results(results: list[ScenarioResult], meta: dict) -> None:
 # --------------------------------------------------------------------------- #
 # Preflight
 # --------------------------------------------------------------------------- #
-def preflight(riptide: str, venv_py: str) -> None:
+def preflight(tiderace: str, venv_py: str) -> None:
     """Fail early with a clear message if a required tool is missing."""
     if shutil.which("hyperfine") is None:
         raise SystemExit("error: hyperfine not found on PATH (need v1.x).")
-    if not Path(riptide).exists():
+    if not Path(tiderace).exists():
         raise SystemExit(
-            f"error: riptide binary not found at {riptide}. "
+            f"error: tiderace binary not found at {tiderace}. "
             "Run `cargo build` in the repo root."
         )
     if not Path(venv_py).exists():
         raise SystemExit(
             f"error: venv python not found at {venv_py}. "
-            "Lane 0 provisions .riptide-bench-venv/."
+            "Lane 0 provisions .tiderace-bench-venv/."
         )
     if not GENERATE_PY.exists():
         raise SystemExit(f"error: fixture generator missing at {GENERATE_PY}.")
@@ -392,8 +392,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="hyperfine timed runs per scenario")
     ap.add_argument("--warmup", type=int, default=1,
                     help="hyperfine warmup runs per scenario")
-    ap.add_argument("--riptide", default=str(DEFAULT_RIPTIDE),
-                    help="path to the riptide binary")
+    ap.add_argument("--tiderace", default=str(DEFAULT_TIDERACE),
+                    help="path to the tiderace binary")
     ap.add_argument("--python", default=str(DEFAULT_VENV_PY),
                     help="python interpreter for the runners (the bench venv)")
     return ap.parse_args(argv)
@@ -401,7 +401,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    preflight(args.riptide, args.python)
+    preflight(args.tiderace, args.python)
 
     total = regenerate_fixture(args.modules, args.tests_per_module,
                                args.work_ms, args.python)
@@ -410,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
     json_dir = BENCH_DIR / ".hyperfine"
     json_dir.mkdir(exist_ok=True)
 
-    scenarios = build_scenarios(args.riptide, args.python)
+    scenarios = build_scenarios(args.tiderace, args.python)
     results: list[ScenarioResult] = []
     for sc in scenarios:
         try:
@@ -428,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
         "work_ms": args.work_ms,
         "runs": args.runs,
         "warmup": args.warmup,
-        "riptide": args.riptide,
+        "tiderace": args.tiderace,
         "python": args.python,
     }
     write_results(results, meta)

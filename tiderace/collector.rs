@@ -71,7 +71,7 @@ pub fn collect_tests(paths: &[PathBuf], pattern: &str) -> Result<Vec<TestItem>> 
 fn collect_from_file(path: &Path, items: &mut Vec<TestItem>) -> Result<()> {
     let content = fs::read_to_string(path)?;
     // Strip a leading "./" so node ids match how pytest normalizes paths (e.g.
-    // running `riptide .` must still produce `test_x.py::t`, not `./test_x.py::t`).
+    // running `tiderace .` must still produce `test_x.py::t`, not `./test_x.py::t`).
     let raw = path.to_string_lossy();
     let file_path = raw.strip_prefix("./").unwrap_or(&raw).to_string();
     parse_source(&content, &file_path, items)

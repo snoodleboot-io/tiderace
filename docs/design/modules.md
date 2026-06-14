@@ -11,7 +11,7 @@ reporter. Intentionally thin — the glue, not the logic.
 
 ## `config.rs` — Configuration
 
-Parses `[tool.riptide]` from `pyproject.toml`. Every key is optional; unknown keys are
+Parses `[tool.tiderace]` from `pyproject.toml`. Every key is optional; unknown keys are
 rejected so typos surface. Keys: `workers`, `python`, `coverage`, `isolate`, `pattern`, `db`,
 `paths`, `timeout`.
 
@@ -104,14 +104,14 @@ pub struct Runner {
 once and run node ids over newline-delimited JSON. Per-request timeout → kill + respawn;
 crash detection via stdout EOF; a dedicated reader thread per worker avoids pipe deadlock.
 `worker.py` evicts changed first-party modules from `sys.modules` before each run so a warm
-re-run never executes stale code. Powers `riptide watch`.
+re-run never executes stale code. Powers `tiderace watch`.
 
 ---
 
 ## `watcher.rs` — File watching
 
 Debounced recursive watch via `notify` + `notify-debouncer-full` (rename-aware), yielding a
-deduplicated batch of changed `.py` paths and ignoring artifact dirs and riptide's own state.
+deduplicated batch of changed `.py` paths and ignoring artifact dirs and tiderace's own state.
 
 ---
 
