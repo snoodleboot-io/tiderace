@@ -1,6 +1,6 @@
 # Release Process
 
-riptide uses **trunk-based development** with **semantic versioning**. Releases are fully automated via CI — developers never manually tag or bump versions.
+tiderace uses **trunk-based development** with **semantic versioning**. Releases are fully automated via CI — developers never manually tag or bump versions.
 
 ## Version Rules
 
@@ -41,16 +41,16 @@ See `.github/workflows/` for the full definitions:
 
 ## Caching in CI
 
-The release workflow caches `.riptide.db` between runs keyed on branch name:
+The release workflow caches `.tiderace.db` between runs keyed on branch name:
 
 ```yaml
 - uses: actions/cache@v4
   with:
-    path: .riptide.db
-    key: riptide-db-${{ github.ref_name }}-${{ hashFiles('tests/**') }}
+    path: .tiderace.db
+    key: tiderace-db-${{ github.ref_name }}-${{ hashFiles('tests/**') }}
     restore-keys: |
-      riptide-db-${{ github.ref_name }}-
-      riptide-db-main-
+      tiderace-db-${{ github.ref_name }}-
+      tiderace-db-main-
 ```
 
 This means CI gets the same impact-analysis benefits as local development — only changed-file tests re-run between commits on the same branch.

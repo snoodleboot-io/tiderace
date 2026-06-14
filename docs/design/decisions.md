@@ -141,7 +141,7 @@ As a result, a warm run **without** coverage re-ran the entire suite every time 
 the headline impact-analysis feature was effectively a no-op without coverage.
 
 **Rationale:**
-- Keying step (b) on a prior *result* (not on deps) lets riptide recognise a test
+- Keying step (b) on a prior *result* (not on deps) lets tiderace recognise a test
   as "already run" even when coverage was off, so unchanged warm runs skip — the
   expected behaviour.
 - Source-to-test mapping is fundamentally impossible without a coverage graph, so
@@ -161,7 +161,7 @@ integration tests in `tests/cli.rs`.
 **Status:** Accepted
 
 **Decision:** Each test subprocess runs under a per-test wall-clock timeout
-(default 300s, configurable via `--timeout` / `[tool.riptide].timeout`); on expiry
+(default 300s, configurable via `--timeout` / `[tool.tiderace].timeout`); on expiry
 the child is killed and recorded as an error. Node IDs and paths are passed after a
 `--` end-of-options separator so a hostile path or filename cannot be parsed as a
 pytest/coverage flag. Per-test coverage data files are named from a SHA-256 hash of
@@ -190,11 +190,11 @@ tests for status mapping, hashing, and output capping.
 **Date:** 2026-06  
 **Status:** Accepted (Stages A and B implemented; C planned)
 
-### Stage B as shipped — `riptide watch`
+### Stage B as shipped — `tiderace watch`
 
-A `WorkerPool` (`riptide/pool.rs`) spawns N long-lived Python workers (`riptide/worker.py`,
+A `WorkerPool` (`tiderace/pool.rs`) spawns N long-lived Python workers (`tiderace/worker.py`,
 embedded in the binary) that `import pytest` once and run node ids fed as
-newline-delimited JSON. `riptide watch` (`notify` + `notify-debouncer-full`) re-runs only
+newline-delimited JSON. `tiderace watch` (`notify` + `notify-debouncer-full`) re-runs only
 impact-selected tests on each save against the warm pool, so cycles after the first pay no
 pytest import. A security review drove the must-fix robustness that landed:
 - **Per-request timeout → kill + respawn** (a hung test never wedges the pool; the run never hangs).
@@ -227,7 +227,7 @@ isolated single-shot path.
 PEP 684 own-GIL subinterpreters). The subprocess-based worker pool (stage B) remains the
 execution architecture.
 
-**What was tested (feasibility spike, Python 3.12.3, throwaway crate — riptide untouched):**
+**What was tested (feasibility spike, Python 3.12.3, throwaway crate — tiderace untouched):**
 1. **Embedding works.** PyO3 0.23 builds and runs pytest in-process here (after a no-sudo
    `libpython3.12.so` symlink, since dev headers were absent).
 2. **PEP 684 parallelism is real.** Four own-GIL subinterpreters ran 4× CPU-bound work in
@@ -241,7 +241,7 @@ execution architecture.
 **Rationale (why rejected):**
 - Isolated subinterpreters (`check_multi_interp_extensions=1`) reject/corrupt single-phase C
   extensions, which is still nearly the entire ecosystem (numpy, pandas, pydantic-core, lxml,
-  many sqlalchemy/db drivers) and even parts of the **stdlib**. riptide's core value is full
+  many sqlalchemy/db drivers) and even parts of the **stdlib**. tiderace's core value is full
   pytest/ecosystem compatibility; stage C trades that away.
 - The failure mode is *worse* than subprocesses: one incompatible `import` in one test takes
   down **all** subinterpreters sharing the process, whereas the stage-B pool gives OS-level
@@ -287,7 +287,7 @@ detection keys match the collector's and coverage's relative paths. Verified by 
 
 **Decision:** Stop paying CPython + pytest startup *per test*. Keep pytest as the
 execution engine (full fixture/plugin/assertion-rewrite compatibility) but change
-*how* riptide drives it, in three stages:
+*how* tiderace drives it, in three stages:
 
 - **A — Batched subprocess (this change).** Instead of one `pytest <nodeid>` process
   per test, distribute the selected tests across the worker pool and run **one pytest

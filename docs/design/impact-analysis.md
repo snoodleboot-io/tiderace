@@ -1,14 +1,14 @@
 # Impact Analysis
 
-Impact analysis is the core feature that makes riptide fast on repeated runs. It answers the question: **given that these files changed, which tests need to re-run?**
+Impact analysis is the core feature that makes tiderace fast on repeated runs. It answers the question: **given that these files changed, which tests need to re-run?**
 
 ## The Problem
 
 A typical Python project has hundreds of tests. When you change one function in one file, naively you must run all tests to be safe. But most tests don't touch that file at all. Running them wastes time.
 
-## How riptide Solves It
+## How tiderace Solves It
 
-riptide builds and maintains a **dependency graph** mapping each test to the set of source files it executed during its last run. This graph comes from Python's `coverage.py` instrumentation.
+tiderace builds and maintains a **dependency graph** mapping each test to the set of source files it executed during its last run. This graph comes from Python's `coverage.py` instrumentation.
 
 ```
 test_login       → [src/auth.py, src/models.py, src/db.py]
@@ -26,7 +26,7 @@ When `src/auth.py` changes:
 
 ## Decision Rules
 
-For each test, riptide applies these rules in order:
+For each test, tiderace applies these rules in order:
 
 ```
 1. Has the test file itself changed?          → RUN
@@ -36,20 +36,20 @@ For each test, riptide applies these rules in order:
 5. Otherwise                                     → SKIP
 ```
 
-Rule 3 is important: riptide never silently skips a previously failing test. You always know if something is broken.
+Rule 3 is important: tiderace never silently skips a previously failing test. You always know if something is broken.
 
 ## Building the Dep Graph
 
 The dep graph is populated from coverage data. When you run with `--coverage`:
 
 ```bash
-riptide tests/ --coverage
+tiderace tests/ --coverage
 ```
 
-riptide runs each test as:
+tiderace runs each test as:
 
 ```bash
-python -m coverage run --data-file=.riptide-coverage/.coverage.<test_id> \
+python -m coverage run --data-file=.tiderace-coverage/.coverage.<test_id> \
   --source=. --branch -m pytest <nodeid>
 ```
 
@@ -69,13 +69,13 @@ On subsequent runs, this data powers the skip decision without needing `--covera
 
 ## File Change Detection
 
-riptide uses SHA-256 hashing rather than file modification times or git status:
+tiderace uses SHA-256 hashing rather than file modification times or git status:
 
 - **Reliable across filesystems** — mtime can be unreliable in Docker, network mounts, and CI
 - **Content-based** — touching a file without changing it doesn't trigger re-runs
 - **Git-independent** — works in any directory, not just git repos
 
-On each run, riptide hashes every `.py` file in the scanned paths and compares against hashes stored in `.riptide.db`. Files whose hash has changed are marked as "changed" and used to compute affected tests.
+On each run, tiderace hashes every `.py` file in the scanned paths and compares against hashes stored in `.tiderace.db`. Files whose hash has changed are marked as "changed" and used to compute affected tests.
 
 After a run completes successfully, the new hashes are written back to the DB.
 
@@ -83,7 +83,7 @@ After a run completes successfully, the new hashes are written back to the DB.
 
 ### Dynamic imports
 
-riptide cannot detect dependencies created by dynamic imports that coverage.py doesn't trace:
+tiderace cannot detect dependencies created by dynamic imports that coverage.py doesn't trace:
 
 ```python
 # This IS detected (coverage traces the import)
@@ -97,7 +97,7 @@ In practice this is rare, and the worst outcome is a missed dep that causes a fa
 
 ### First run after `--coverage`
 
-Impact analysis only becomes selective after at least one `--coverage` run has built the dep graph. On first run (or after `riptide clear`), all tests execute.
+Impact analysis only becomes selective after at least one `--coverage` run has built the dep graph. On first run (or after `tiderace clear`), all tests execute.
 
 ### Monorepo / shared libraries
 

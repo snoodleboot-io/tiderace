@@ -1,11 +1,11 @@
 /target
 
-# riptide runtime state
-.riptide.db
-.riptide-coverage/
+# tiderace runtime state
+.tiderace.db
+.tiderace-coverage/
 
 # Phase 1 benchmark environment (provisioned by Lane 0)
-.riptide-bench-venv/
+.tiderace-bench-venv/
 
 # Session files are per-developer working state, not committed (see core-session.md)
 .prompticorn/sessions/

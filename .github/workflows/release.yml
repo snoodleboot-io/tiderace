@@ -19,17 +19,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build release binary
-        run: cargo build --release --bin riptide
+        run: cargo build --release --bin tiderace
 
       - name: Stage artifact
         run: |
-          install -Dm755 target/release/riptide "dist/riptide-linux-x86_64"
-          (cd dist && sha256sum riptide-linux-x86_64 > riptide-linux-x86_64.sha256)
+          install -Dm755 target/release/tiderace "dist/tiderace-linux-x86_64"
+          (cd dist && sha256sum tiderace-linux-x86_64 > tiderace-linux-x86_64.sha256)
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: riptide-linux-x86_64
+          name: tiderace-linux-x86_64
           path: dist/*
 
       # Attaches the binary to the GitHub Release when triggered by a tag push.

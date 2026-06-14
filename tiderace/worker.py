@@ -1,4 +1,4 @@
-"""Persistent test worker for the riptide project.
+"""Persistent test worker for the tiderace project.
 
 Driven by a Rust parent over stdin/stdout using newline-delimited JSON.
 

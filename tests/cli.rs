@@ -1,4 +1,4 @@
-//! End-to-end integration tests: they run the real `riptide` binary against a
+//! End-to-end integration tests: they run the real `tiderace` binary against a
 //! throwaway Python project, exercising the genuine Rust → pytest → SQLite
 //! boundary (no mocks — per the project's mock-only-at-boundaries rule, and here
 //! the boundary IS the thing under test, so it is exercised for real).
@@ -14,14 +14,14 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 /// Locate a Python interpreter that can `import pytest`. Preference order:
-/// `RIPTIDE_TEST_PYTHON`, the repo's bench venv, then `python3`.
+/// `TIDERACE_TEST_PYTHON`, the repo's bench venv, then `python3`.
 fn python_with_pytest() -> Option<String> {
     let mut candidates = Vec::new();
-    if let Ok(p) = std::env::var("RIPTIDE_TEST_PYTHON") {
+    if let Ok(p) = std::env::var("TIDERACE_TEST_PYTHON") {
         candidates.push(p);
     }
     candidates.push(format!(
-        "{}/.riptide-bench-venv/bin/python",
+        "{}/.tiderace-bench-venv/bin/python",
         env!("CARGO_MANIFEST_DIR")
     ));
     candidates.push("python3".to_string());
@@ -62,8 +62,8 @@ fn scaffold(dir: &Path) {
     .unwrap();
 }
 
-fn riptide(dir: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("riptide").unwrap();
+fn tiderace(dir: &Path) -> Command {
+    let mut cmd = Command::cargo_bin("tiderace").unwrap();
     cmd.current_dir(dir);
     cmd
 }
@@ -74,7 +74,7 @@ fn collect_lists_unittest_case_with_class_in_node_id() {
     let proj = TempDir::new().unwrap();
     scaffold(proj.path());
 
-    riptide(proj.path())
+    tiderace(proj.path())
         .args(["collect", "tests/"])
         .assert()
         .success()
@@ -96,14 +96,14 @@ fn cold_run_passes_then_warm_run_skips_everything() {
     scaffold(proj.path());
 
     // Cold run: both tests execute and pass (the unittest one too — W4).
-    riptide(proj.path())
+    tiderace(proj.path())
         .args(["--python", &py, "tests/"])
         .assert()
         .success()
         .stdout(predicate::str::contains("passed: 2"));
 
     // Warm run, nothing changed: impact analysis skips everything (W1).
-    riptide(proj.path())
+    tiderace(proj.path())
         .args(["--python", &py, "tests/"])
         .assert()
         .success()
@@ -120,7 +120,7 @@ fn editing_a_source_file_reruns_affected_tests() {
     scaffold(proj.path());
 
     // Prime with coverage so the dependency graph is recorded.
-    riptide(proj.path())
+    tiderace(proj.path())
         .args(["--python", &py, "--coverage", "tests/"])
         .assert()
         .success();
@@ -132,7 +132,7 @@ fn editing_a_source_file_reruns_affected_tests() {
     )
     .unwrap();
 
-    riptide(proj.path())
+    tiderace(proj.path())
         .args(["--python", &py, "tests/"])
         .assert()
         .success()
@@ -172,7 +172,7 @@ fn coverage_contexts_give_precise_impact() {
     )
     .unwrap();
 
-    riptide(root)
+    tiderace(root)
         .args(["--python", &py, "--coverage", "tests/"])
         .assert()
         .success();
@@ -181,7 +181,7 @@ fn coverage_contexts_give_precise_impact() {
     std::fs::write(root.join("src/a.py"), "def fa():\n    return 1  # edited\n").unwrap();
 
     // Exactly one test (test_a) should run; test_b is skipped by impact analysis.
-    riptide(root)
+    tiderace(root)
         .args(["--python", &py, "tests/"])
         .assert()
         .success()
@@ -199,7 +199,7 @@ fn collect_with_dot_path_yields_clean_node_ids() {
         "def test_a():\n    assert True\n",
     )
     .unwrap();
-    riptide(proj.path())
+    tiderace(proj.path())
         .args(["collect", "."])
         .assert()
         .success()
@@ -223,7 +223,7 @@ fn parametrized_and_async_tests_report_correctly() {
     )
     .unwrap();
 
-    riptide(proj.path())
+    tiderace(proj.path())
         .args(["--python", &py, "tests/"])
         .assert()
         .failure() // test_mixed[-1] fails
@@ -237,7 +237,7 @@ fn parametrized_and_async_tests_report_correctly() {
 
 #[test]
 fn watch_reruns_impacted_tests_on_change() {
-    // Spawn `riptide watch`, let the warm pool prime, change a test file, and
+    // Spawn `tiderace watch`, let the warm pool prime, change a test file, and
     // confirm a re-run cycle fires. Exercises the pool + notify watcher + watch
     // command end-to-end. Uses generous sleeps for CI robustness.
     let Some(py) = python_with_pytest() else {
@@ -246,7 +246,7 @@ fn watch_reruns_impacted_tests_on_change() {
     };
     let proj = TempDir::new().unwrap();
     scaffold(proj.path());
-    let bin = assert_cmd::cargo::cargo_bin("riptide");
+    let bin = assert_cmd::cargo::cargo_bin("tiderace");
     let log = proj.path().join("watch.out");
     let mut child = Command::new(&bin)
         .args(["--python", &py, "watch", "tests/"])
@@ -292,7 +292,7 @@ fn failing_test_yields_exit_code_1() {
     )
     .unwrap();
 
-    riptide(proj.path())
+    tiderace(proj.path())
         .args(["--python", &py, "tests/"])
         .assert()
         .failure()
@@ -301,7 +301,7 @@ fn failing_test_yields_exit_code_1() {
 
 #[test]
 fn pyproject_config_supplies_defaults() {
-    // The W11 path: [tool.riptide] sets the python binary; no --python flag given.
+    // The W11 path: [tool.tiderace] sets the python binary; no --python flag given.
     let Some(py) = python_with_pytest() else {
         eprintln!("skipping: no python with pytest available");
         return;
@@ -310,12 +310,12 @@ fn pyproject_config_supplies_defaults() {
     scaffold(proj.path());
     std::fs::write(
         proj.path().join("pyproject.toml"),
-        format!("[tool.riptide]\npython = \"{}\"\npaths = [\"tests\"]\n", py),
+        format!("[tool.tiderace]\npython = \"{}\"\npaths = [\"tests\"]\n", py),
     )
     .unwrap();
 
     // No --python and no path args: both come from pyproject.
-    riptide(proj.path())
+    tiderace(proj.path())
         .assert()
         .success()
         .stdout(predicate::str::contains("passed: 2"));

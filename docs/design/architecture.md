@@ -2,7 +2,7 @@
 
 ## System Overview
 
-riptide is a single compiled Rust binary. It orchestrates Python test execution without being
+tiderace is a single compiled Rust binary. It orchestrates Python test execution without being
 a Python process itself — giving it native-speed control over discovery, hashing, scheduling,
 and state — while real `pytest` does the actual running (full fixture/plugin/assertion
 compatibility).
@@ -11,7 +11,7 @@ compatibility).
 graph TD
     CLI[CLI / main.rs] --> COL[Collector]
     CLI --> HASH[Hasher]
-    CLI --> DB[(SQLite .riptide.db)]
+    CLI --> DB[(SQLite .tiderace.db)]
 
     COL -->|test items| IMP[Impact Analyzer]
     HASH -->|file hashes| IMP
@@ -24,7 +24,7 @@ graph TD
     PY1 -->|"-rA status + coverage contexts"| RUN
 
     WATCH[watcher.rs] -.->|file changes| CLI
-    POOL[pool.rs warm workers] -.->|riptide watch| RUN
+    POOL[pool.rs warm workers] -.->|tiderace watch| RUN
 
     RUN --> DB
     RUN --> REP[Reporter]
@@ -32,13 +32,13 @@ graph TD
 
 ## Execution strategies
 
-riptide drives pytest three ways (see [Execution Model](parallel-execution.md) and
+tiderace drives pytest three ways (see [Execution Model](parallel-execution.md) and
 [ADR-009](decisions.md)):
 
 - **Batched (default)** — one `pytest` process per worker over many node ids; *N* tests cost
   *W* interpreter startups. ~8× faster cold than one process per test.
 - **Isolated (`--isolate`)** — one process per test, for suites needing a fresh interpreter.
-- **Warm pool (`riptide watch`)** — long-lived workers import pytest once; edit→test cycles
+- **Warm pool (`tiderace watch`)** — long-lived workers import pytest once; edit→test cycles
   pay no startup.
 
 ## Key design decisions
@@ -57,7 +57,7 @@ riptide drives pytest three ways (see [Execution Model](parallel-execution.md) a
 | Module | Responsibility |
 |---|---|
 | `main.rs` | CLI parsing, config resolution, run/collect/clear/coverage/**watch** orchestration |
-| `config.rs` | `[tool.riptide]` parsing from `pyproject.toml` |
+| `config.rs` | `[tool.tiderace]` parsing from `pyproject.toml` |
 | `collector.rs` | Regex test discovery (functions, `Test*` classes, `unittest.TestCase`, async) |
 | `hasher.rs` | SHA-256 fingerprinting + change detection |
 | `db.rs` | SQLite persistence (hashes, results, deps, coverage) |

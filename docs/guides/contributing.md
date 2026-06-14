@@ -9,12 +9,12 @@
 ## Clone and Build
 
 ```bash
-git clone https://github.com/snoodleboot-io/riptide
-cd riptide
+git clone https://github.com/snoodleboot-io/tiderace
+cd tiderace
 cargo build
 ```
 
-The debug binary is at `target/debug/riptide`.
+The debug binary is at `target/debug/tiderace`.
 
 ## Run Tests
 
@@ -24,7 +24,7 @@ cargo test --bins
 
 # Full suite incl. integration tests that run the real binary against temporary
 # Python projects. Point them at a Python that has pytest installed:
-RIPTIDE_TEST_PYTHON=/path/to/python cargo test --all
+TIDERACE_TEST_PYTHON=/path/to/python cargo test --all
 ```
 
 Integration tests (`tests/cli.rs`) scaffold throwaway projects and exercise the genuine
@@ -44,12 +44,12 @@ CI enforces both — PRs that fail `clippy` or `fmt` are blocked.
 
 ```bash
 cargo install cargo-llvm-cov   # once
-RIPTIDE_TEST_PYTHON=/path/to/python \
+TIDERACE_TEST_PYTHON=/path/to/python \
   cargo llvm-cov --all --ignore-filename-regex 'watcher\.rs' --fail-under-lines 80
 ```
 
 `watcher.rs` is excluded because its blocking `notify` loop only runs inside a long-lived
-`riptide watch` process that the test must kill — a killed process never flushes its coverage
+`tiderace watch` process that the test must kill — a killed process never flushes its coverage
 profile, so it's validated by an integration test instead of being counted.
 
 ## Mutation testing
@@ -59,14 +59,14 @@ Beyond line coverage, [`cargo-mutants`](https://mutants.rs) checks that the test
 
 ```bash
 cargo install cargo-mutants   # once
-RIPTIDE_TEST_PYTHON=/path/to/python cargo mutants
+TIDERACE_TEST_PYTHON=/path/to/python cargo mutants
 ```
 
 Mutation runs are slow (they rebuild and re-test per mutant), so run them on the pure-logic
 modules while iterating rather than the whole crate:
 
 ```bash
-cargo mutants --file riptide/collector.rs --file riptide/impact.rs --file riptide/runner.rs
+cargo mutants --file tiderace/collector.rs --file tiderace/impact.rs --file tiderace/runner.rs
 ```
 
 A surviving mutant means a behaviour no test pins down — add a test for it.
@@ -74,10 +74,10 @@ A surviving mutant means a behaviour no test pins down — add a test for it.
 ## Project Layout
 
 ```
-riptide/
-├── riptide/             # Rust source
+tiderace/
+├── tiderace/             # Rust source
 │   ├── main.rs          # CLI + orchestration (run/collect/clear/coverage/watch)
-│   ├── config.rs        # pyproject.toml [tool.riptide]
+│   ├── config.rs        # pyproject.toml [tool.tiderace]
 │   ├── collector.rs     # test discovery (functions, classes, unittest, async)
 │   ├── hasher.rs        # file fingerprinting
 │   ├── db.rs            # SQLite layer
@@ -98,7 +98,7 @@ riptide/
 
 ## Branching Model
 
-riptide uses **trunk-based development**:
+tiderace uses **trunk-based development**:
 
 - All work lands on `main` via short-lived branches (< 2 days)
 - No long-lived feature branches

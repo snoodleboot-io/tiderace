@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a deterministic reference Python project for riptide tests & benchmarks.
+"""Generate a deterministic reference Python project for tiderace tests & benchmarks.
 
 The generated suite has a real import graph so impact analysis is meaningful:
 

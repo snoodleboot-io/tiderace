@@ -1,38 +1,38 @@
-/* ─── Riptide Brand Colors ─────────────────────────────────────────────────── */
+/* ─── Tiderace Brand Colors ─────────────────────────────────────────────────── */
 :root {
-  --riptide-rust:        #C75B39;
-  --riptide-rust-dark:   #9E3D20;
-  --riptide-rust-light:  #E07A58;
-  --riptide-rust-glow:   #C75B3922;
-  --riptide-black:       #0D0D0D;
-  --riptide-surface:     #141414;
-  --riptide-surface-2:   #1E1E1E;
-  --riptide-surface-3:   #262626;
-  --riptide-border:      #2E2E2E;
-  --riptide-white:       #F5F5F5;
-  --riptide-muted:       #888888;
+  --tiderace-rust:        #C75B39;
+  --tiderace-rust-dark:   #9E3D20;
+  --tiderace-rust-light:  #E07A58;
+  --tiderace-rust-glow:   #C75B3922;
+  --tiderace-black:       #0D0D0D;
+  --tiderace-surface:     #141414;
+  --tiderace-surface-2:   #1E1E1E;
+  --tiderace-surface-3:   #262626;
+  --tiderace-border:      #2E2E2E;
+  --tiderace-white:       #F5F5F5;
+  --tiderace-muted:       #888888;
 }
 
 /* ─── Override Material Theme ──────────────────────────────────────────────── */
 [data-md-color-scheme="slate"] {
-  --md-primary-fg-color:          var(--riptide-rust);
-  --md-primary-fg-color--light:   var(--riptide-rust-light);
-  --md-primary-fg-color--dark:    var(--riptide-rust-dark);
-  --md-primary-bg-color:          var(--riptide-white);
-  --md-accent-fg-color:           var(--riptide-rust-light);
-  --md-default-bg-color:          var(--riptide-black);
-  --md-default-fg-color:          var(--riptide-white);
+  --md-primary-fg-color:          var(--tiderace-rust);
+  --md-primary-fg-color--light:   var(--tiderace-rust-light);
+  --md-primary-fg-color--dark:    var(--tiderace-rust-dark);
+  --md-primary-bg-color:          var(--tiderace-white);
+  --md-accent-fg-color:           var(--tiderace-rust-light);
+  --md-default-bg-color:          var(--tiderace-black);
+  --md-default-fg-color:          var(--tiderace-white);
   --md-default-fg-color--light:   #CCCCCC;
-  --md-default-fg-color--lighter: var(--riptide-muted);
-  --md-code-bg-color:             var(--riptide-surface);
+  --md-default-fg-color--lighter: var(--tiderace-muted);
+  --md-code-bg-color:             var(--tiderace-surface);
   --md-code-fg-color:             #E0E0E0;
-  --md-typeset-a-color:           var(--riptide-rust-light);
+  --md-typeset-a-color:           var(--tiderace-rust-light);
 }
 
 /* ─── Header ───────────────────────────────────────────────────────────────── */
 .md-header {
-  background: var(--riptide-black) !important;
-  border-bottom: 1px solid var(--riptide-border);
+  background: var(--tiderace-black) !important;
+  border-bottom: 1px solid var(--tiderace-border);
   box-shadow: 0 1px 20px rgba(199, 91, 57, 0.1);
 }
 
@@ -47,7 +47,7 @@
 
 /* ─── Navigation ───────────────────────────────────────────────────────────── */
 .md-nav__title {
-  color: var(--riptide-rust) !important;
+  color: var(--tiderace-rust) !important;
   font-size: 0.7rem;
   font-weight: 700;
   letter-spacing: 0.1em;
@@ -55,43 +55,43 @@
 }
 
 .md-nav__link--active {
-  color: var(--riptide-rust-light) !important;
+  color: var(--tiderace-rust-light) !important;
   font-weight: 600;
 }
 
 .md-nav__link:hover {
-  color: var(--riptide-rust-light) !important;
+  color: var(--tiderace-rust-light) !important;
 }
 
 .md-sidebar {
-  background: var(--riptide-surface) !important;
+  background: var(--tiderace-surface) !important;
 }
 
 /* ─── Tabs ─────────────────────────────────────────────────────────────────── */
 .md-tabs {
-  background: var(--riptide-surface) !important;
-  border-bottom: 1px solid var(--riptide-border);
+  background: var(--tiderace-surface) !important;
+  border-bottom: 1px solid var(--tiderace-border);
 }
 
 .md-tabs__link--active {
-  border-bottom: 2px solid var(--riptide-rust) !important;
-  color: var(--riptide-rust-light) !important;
+  border-bottom: 2px solid var(--tiderace-rust) !important;
+  color: var(--tiderace-rust-light) !important;
 }
 
 /* ─── Code Blocks ──────────────────────────────────────────────────────────── */
 .highlight {
-  background: var(--riptide-surface) !important;
-  border: 1px solid var(--riptide-border);
+  background: var(--tiderace-surface) !important;
+  border: 1px solid var(--tiderace-border);
   border-radius: 6px;
 }
 
 .highlight pre {
-  background: var(--riptide-surface) !important;
+  background: var(--tiderace-surface) !important;
 }
 
 code {
-  background: var(--riptide-surface-2) !important;
-  color: var(--riptide-rust-light) !important;
+  background: var(--tiderace-surface-2) !important;
+  color: var(--tiderace-rust-light) !important;
   border-radius: 3px;
   padding: 1px 5px;
   font-size: 0.85em;
@@ -106,26 +106,26 @@ pre code {
 /* ─── Admonitions ──────────────────────────────────────────────────────────── */
 .md-typeset .admonition,
 .md-typeset details {
-  border-left: 4px solid var(--riptide-rust) !important;
-  background: var(--riptide-surface) !important;
+  border-left: 4px solid var(--tiderace-rust) !important;
+  background: var(--tiderace-surface) !important;
 }
 
 .md-typeset .admonition-title,
 .md-typeset summary {
-  background: var(--riptide-rust-glow) !important;
-  color: var(--riptide-rust-light) !important;
+  background: var(--tiderace-rust-glow) !important;
+  color: var(--tiderace-rust-light) !important;
 }
 
 /* ─── Tables ───────────────────────────────────────────────────────────────── */
 .md-typeset table:not([class]) {
-  border: 1px solid var(--riptide-border);
+  border: 1px solid var(--tiderace-border);
   border-radius: 6px;
   overflow: hidden;
 }
 
 .md-typeset table:not([class]) th {
-  background: var(--riptide-surface-2) !important;
-  color: var(--riptide-rust-light) !important;
+  background: var(--tiderace-surface-2) !important;
+  color: var(--tiderace-rust-light) !important;
   font-weight: 600;
   text-transform: uppercase;
   font-size: 0.75rem;
@@ -133,13 +133,13 @@ pre code {
 }
 
 .md-typeset table:not([class]) tr:hover {
-  background: var(--riptide-surface-2) !important;
+  background: var(--tiderace-surface-2) !important;
 }
 
 /* ─── Hero Section (homepage) ──────────────────────────────────────────────── */
-.riptide-hero {
-  background: linear-gradient(135deg, var(--riptide-black) 0%, var(--riptide-surface-2) 100%);
-  border: 1px solid var(--riptide-border);
+.tiderace-hero {
+  background: linear-gradient(135deg, var(--tiderace-black) 0%, var(--tiderace-surface-2) 100%);
+  border: 1px solid var(--tiderace-border);
   border-radius: 12px;
   padding: 3rem 2rem;
   text-align: center;
@@ -148,38 +148,38 @@ pre code {
   overflow: hidden;
 }
 
-.riptide-hero::before {
+.tiderace-hero::before {
   content: '';
   position: absolute;
   top: -50%;
   left: -50%;
   width: 200%;
   height: 200%;
-  background: radial-gradient(ellipse at center, var(--riptide-rust-glow) 0%, transparent 60%);
+  background: radial-gradient(ellipse at center, var(--tiderace-rust-glow) 0%, transparent 60%);
   pointer-events: none;
 }
 
-.riptide-hero h1 {
+.tiderace-hero h1 {
   font-size: 3rem;
   font-weight: 800;
   letter-spacing: -0.04em;
-  color: var(--riptide-white) !important;
+  color: var(--tiderace-white) !important;
   margin: 0 0 0.5rem;
   line-height: 1.1;
   border: none !important;
 }
 
-.riptide-hero h1 span {
-  color: var(--riptide-rust) !important;
+.tiderace-hero h1 span {
+  color: var(--tiderace-rust) !important;
 }
 
-.riptide-hero .tagline {
+.tiderace-hero .tagline {
   font-size: 1.2rem;
-  color: var(--riptide-muted);
+  color: var(--tiderace-muted);
   margin: 0 0 2rem;
 }
 
-.riptide-hero .badges {
+.tiderace-hero .badges {
   display: flex;
   gap: 0.5rem;
   justify-content: center;
@@ -187,25 +187,25 @@ pre code {
   margin-bottom: 2rem;
 }
 
-.riptide-hero .badge {
-  background: var(--riptide-surface-3);
-  border: 1px solid var(--riptide-border);
+.tiderace-hero .badge {
+  background: var(--tiderace-surface-3);
+  border: 1px solid var(--tiderace-border);
   border-radius: 20px;
   padding: 0.25rem 0.75rem;
   font-size: 0.8rem;
   font-family: 'JetBrains Mono', monospace;
-  color: var(--riptide-rust-light);
+  color: var(--tiderace-rust-light);
 }
 
-.riptide-hero .cta {
+.tiderace-hero .cta {
   display: inline-flex;
   gap: 1rem;
   flex-wrap: wrap;
   justify-content: center;
 }
 
-.riptide-hero .btn-primary {
-  background: var(--riptide-rust);
+.tiderace-hero .btn-primary {
+  background: var(--tiderace-rust);
   color: white;
   padding: 0.75rem 1.75rem;
   border-radius: 6px;
@@ -215,26 +215,26 @@ pre code {
   display: inline-block;
 }
 
-.riptide-hero .btn-primary:hover {
-  background: var(--riptide-rust-light);
+.tiderace-hero .btn-primary:hover {
+  background: var(--tiderace-rust-light);
   transform: translateY(-1px);
 }
 
-.riptide-hero .btn-secondary {
+.tiderace-hero .btn-secondary {
   background: transparent;
-  color: var(--riptide-white);
+  color: var(--tiderace-white);
   padding: 0.75rem 1.75rem;
   border-radius: 6px;
   font-weight: 600;
-  border: 1px solid var(--riptide-border);
+  border: 1px solid var(--tiderace-border);
   text-decoration: none !important;
   transition: border-color 0.2s;
   display: inline-block;
 }
 
-.riptide-hero .btn-secondary:hover {
-  border-color: var(--riptide-rust);
-  color: var(--riptide-rust-light);
+.tiderace-hero .btn-secondary:hover {
+  border-color: var(--tiderace-rust);
+  color: var(--tiderace-rust-light);
 }
 
 /* ─── Feature Grid ─────────────────────────────────────────────────────────── */
@@ -246,15 +246,15 @@ pre code {
 }
 
 .feature-card {
-  background: var(--riptide-surface);
-  border: 1px solid var(--riptide-border);
+  background: var(--tiderace-surface);
+  border: 1px solid var(--tiderace-border);
   border-radius: 8px;
   padding: 1.5rem;
   transition: border-color 0.2s, transform 0.1s;
 }
 
 .feature-card:hover {
-  border-color: var(--riptide-rust);
+  border-color: var(--tiderace-rust);
   transform: translateY(-2px);
 }
 
@@ -264,7 +264,7 @@ pre code {
 }
 
 .feature-card h3 {
-  color: var(--riptide-white) !important;
+  color: var(--tiderace-white) !important;
   font-size: 1rem;
   font-weight: 600;
   margin: 0 0 0.5rem;
@@ -272,7 +272,7 @@ pre code {
 }
 
 .feature-card p {
-  color: var(--riptide-muted);
+  color: var(--tiderace-muted);
   font-size: 0.9rem;
   margin: 0;
   line-height: 1.5;
@@ -290,14 +290,14 @@ pre code {
 
 .bench-label {
   width: 120px;
-  color: var(--riptide-muted);
+  color: var(--tiderace-muted);
   text-align: right;
   flex-shrink: 0;
 }
 
 .bench-bar-wrap {
   flex: 1;
-  background: var(--riptide-surface-2);
+  background: var(--tiderace-surface-2);
   border-radius: 3px;
   height: 20px;
   overflow: hidden;
@@ -315,17 +315,17 @@ pre code {
   transition: width 0.8s ease;
 }
 
-.bench-bar.riptide { background: var(--riptide-rust); color: white; }
-.bench-bar.pytest  { background: var(--riptide-surface-3); color: var(--riptide-muted); }
+.bench-bar.tiderace { background: var(--tiderace-rust); color: white; }
+.bench-bar.pytest  { background: var(--tiderace-surface-3); color: var(--tiderace-muted); }
 
 /* ─── Scrollbar ────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: var(--riptide-surface); }
-::-webkit-scrollbar-thumb { background: var(--riptide-border); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--riptide-rust); }
+::-webkit-scrollbar-track { background: var(--tiderace-surface); }
+::-webkit-scrollbar-thumb { background: var(--tiderace-border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--tiderace-rust); }
 
 /* ─── Footer ───────────────────────────────────────────────────────────────── */
 .md-footer {
-  background: var(--riptide-surface) !important;
-  border-top: 1px solid var(--riptide-border);
+  background: var(--tiderace-surface) !important;
+  border-top: 1px solid var(--tiderace-border);
 }

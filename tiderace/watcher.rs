@@ -1,8 +1,8 @@
-//! Debounced recursive file watcher for `riptide watch` (ADR-009, stage B).
+//! Debounced recursive file watcher for `tiderace watch` (ADR-009, stage B).
 //!
 //! Wraps `notify-debouncer-full` so editor atomic-saves (write-temp + rename) are
 //! stitched into sane events, and yields a deduplicated batch of changed `.py`
-//! paths per quiet window. Artifact dirs and riptide's own state are ignored so a
+//! paths per quiet window. Artifact dirs and tiderace's own state are ignored so a
 //! test run cannot retrigger itself.
 
 use std::collections::BTreeSet;
@@ -21,7 +21,7 @@ const IGNORED_COMPONENTS: &[&str] = &[
     ".venv",
     "venv",
     "node_modules",
-    ".riptide-coverage",
+    ".tiderace-coverage",
 ];
 
 /// Watch `root` recursively; invoke `on_batch` with a deduplicated set of changed
@@ -76,7 +76,7 @@ fn collect_relevant_paths(event: &DebouncedEvent, out: &mut BTreeSet<PathBuf>) {
     }
 }
 
-/// True only for `*.py` files outside ignored directories and not riptide state.
+/// True only for `*.py` files outside ignored directories and not tiderace state.
 fn is_relevant_python_path(path: &Path) -> bool {
     if path.components().any(|c| {
         let s = c.as_os_str();
@@ -85,7 +85,7 @@ fn is_relevant_python_path(path: &Path) -> bool {
         return false;
     }
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        if name.starts_with(".riptide.db") {
+        if name.starts_with(".tiderace.db") {
             return false;
         }
     }
@@ -112,9 +112,9 @@ mod tests {
         assert!(!is_relevant_python_path(Path::new(".venv/lib/x.py")));
         assert!(!is_relevant_python_path(Path::new(".git/hooks/x.py")));
         assert!(!is_relevant_python_path(Path::new(
-            ".riptide-coverage/c.py"
+            ".tiderace-coverage/c.py"
         )));
-        // riptide's own state files (incl. sqlite -wal/-shm siblings).
-        assert!(!is_relevant_python_path(Path::new(".riptide.db")));
+        // tiderace's own state files (incl. sqlite -wal/-shm siblings).
+        assert!(!is_relevant_python_path(Path::new(".tiderace.db")));
     }
 }

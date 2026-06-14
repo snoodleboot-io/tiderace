@@ -71,7 +71,7 @@ impl Runner {
             workers,
             python_bin: python_bin.to_string(),
             with_coverage,
-            coverage_dir: PathBuf::from(".riptide-coverage"),
+            coverage_dir: PathBuf::from(".tiderace-coverage"),
             timeout: Duration::from_secs(timeout_secs),
             isolate,
         }
@@ -157,7 +157,7 @@ impl Runner {
     /// Write a coverage config enabling per-test dynamic contexts, so a single
     /// batched `coverage run` records which lines each test touched.
     fn write_coverage_rc(&self) -> Result<PathBuf> {
-        let rc = self.coverage_dir.join(".riptide.coveragerc");
+        let rc = self.coverage_dir.join(".tiderace.coveragerc");
         std::fs::write(
             &rc,
             "[run]\ndynamic_context = test_function\nbranch = True\nsource = .\n",
@@ -251,7 +251,7 @@ impl Runner {
         let mut cmd = Command::new(&self.python_bin);
         // Optionally wrap pytest in `coverage run` with per-test dynamic contexts.
         if let Some(data) = cov_data {
-            let rc = self.coverage_dir.join(".riptide.coveragerc");
+            let rc = self.coverage_dir.join(".tiderace.coveragerc");
             cmd.arg("-m")
                 .arg("coverage")
                 .arg("run")
@@ -348,7 +348,7 @@ impl Runner {
 
         let status = if timed_out {
             stdout.push_str(&format!(
-                "\n[riptide] test exceeded timeout of {}s and was killed\n",
+                "\n[tiderace] test exceeded timeout of {}s and was killed\n",
                 self.timeout.as_secs()
             ));
             TestStatus::Error
@@ -387,12 +387,12 @@ fn short_hash(s: &str) -> String {
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// A temp path unique to this process and call site. Concurrent riptide runs (and
+/// A temp path unique to this process and call site. Concurrent tiderace runs (and
 /// parallel workers within one run) share the OS temp dir, so a content-derived
 /// name alone can collide — the pid plus a monotonic counter make it unique.
 fn unique_temp(suffix: &str) -> PathBuf {
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("riptide-{}-{}.{}", std::process::id(), seq, suffix))
+    std::env::temp_dir().join(format!("tiderace-{}-{}.{}", std::process::id(), seq, suffix))
 }
 
 /// Read a file's contents, truncated to [`MAX_CAPTURE_BYTES`] on a char boundary.
@@ -403,7 +403,7 @@ fn read_capped(path: &Path) -> String {
     }
     // Slicing may land mid-codepoint; from_utf8_lossy replaces the partial tail.
     let mut s = String::from_utf8_lossy(&bytes[..MAX_CAPTURE_BYTES]).into_owned();
-    s.push_str("\n[riptide] output truncated\n");
+    s.push_str("\n[tiderace] output truncated\n");
     s
 }
 
@@ -650,7 +650,7 @@ pub fn merge_coverage(
             "coverage",
             "json",
             "-o",
-            ".riptide-coverage/combined.json",
+            ".tiderace-coverage/combined.json",
             "-q",
         ])
         .output()?;
@@ -659,7 +659,7 @@ pub fn merge_coverage(
         return Ok(HashMap::new());
     }
 
-    let json_str = std::fs::read_to_string(".riptide-coverage/combined.json")?;
+    let json_str = std::fs::read_to_string(".tiderace-coverage/combined.json")?;
     let v: serde_json::Value = serde_json::from_str(&json_str)?;
 
     let mut coverage_map = HashMap::new();
@@ -882,6 +882,6 @@ ERROR tests/test_y.py::test_broken
         f.write_all(&big).unwrap();
         let out = read_capped(f.path());
         assert!(out.len() < big.len());
-        assert!(out.ends_with("[riptide] output truncated\n"));
+        assert!(out.ends_with("[tiderace] output truncated\n"));
     }
 }

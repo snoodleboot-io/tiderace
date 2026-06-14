@@ -15,11 +15,11 @@ use colored::Colorize;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use config::{RiptideConfig, DEFAULT_DB, DEFAULT_PATTERN, DEFAULT_TIMEOUT_SECS};
+use config::{TideraceConfig, DEFAULT_DB, DEFAULT_PATTERN, DEFAULT_TIMEOUT_SECS};
 
 #[derive(Parser)]
 #[command(
-    name = "riptide",
+    name = "tiderace",
     about = "⚡ Rust-powered Python test engine — parallel execution, impact analysis, coverage",
     version = "0.1.0"
 )]
@@ -54,7 +54,7 @@ struct Cli {
     #[arg(long)]
     pattern: Option<String>,
 
-    /// Path to state database [default: .riptide.db]
+    /// Path to state database [default: .tiderace.db]
     #[arg(long)]
     db: Option<PathBuf>,
 
@@ -85,7 +85,7 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     // pyproject.toml in the current directory provides defaults below the CLI.
-    let cfg = RiptideConfig::load(&PathBuf::from("pyproject.toml"))?;
+    let cfg = TideraceConfig::load(&PathBuf::from("pyproject.toml"))?;
 
     match &cli.command {
         Some(Commands::Collect { paths, pattern }) => {
@@ -116,18 +116,18 @@ fn main() -> Result<()> {
     }
 }
 
-fn resolve_python(cli: &Option<String>, cfg: &RiptideConfig) -> String {
+fn resolve_python(cli: &Option<String>, cfg: &TideraceConfig) -> String {
     cli.clone()
         .or_else(|| cfg.python.clone())
         .unwrap_or_else(|| "python3".to_string())
 }
 
-fn resolve_db(cli: Option<PathBuf>, cfg: &RiptideConfig) -> PathBuf {
+fn resolve_db(cli: Option<PathBuf>, cfg: &TideraceConfig) -> PathBuf {
     cli.or_else(|| cfg.db.clone())
         .unwrap_or_else(|| PathBuf::from(DEFAULT_DB))
 }
 
-fn resolve_paths(cli: &[PathBuf], cfg: &RiptideConfig) -> Vec<PathBuf> {
+fn resolve_paths(cli: &[PathBuf], cfg: &TideraceConfig) -> Vec<PathBuf> {
     if !cli.is_empty() {
         return cli.to_vec();
     }
@@ -136,7 +136,7 @@ fn resolve_paths(cli: &[PathBuf], cfg: &RiptideConfig) -> Vec<PathBuf> {
         .unwrap_or_else(|| vec![PathBuf::from("tests"), PathBuf::from("test")])
 }
 
-fn cmd_run(cli: &Cli, cfg: &RiptideConfig) -> Result<()> {
+fn cmd_run(cli: &Cli, cfg: &TideraceConfig) -> Result<()> {
     // Resolve effective settings: explicit CLI flag > pyproject > built-in default.
     let python = resolve_python(&cli.python, cfg);
     let db_path = resolve_db(cli.db.clone(), cfg);
@@ -299,7 +299,7 @@ fn cmd_clear(db_path: &PathBuf) -> Result<()> {
 }
 
 fn cmd_coverage(python_bin: &str) -> Result<()> {
-    let cov_dir = PathBuf::from(".riptide-coverage");
+    let cov_dir = PathBuf::from(".tiderace-coverage");
     if !cov_dir.exists() {
         println!(
             "  {} No coverage data found. Run with {} first.",
@@ -325,16 +325,16 @@ fn cmd_coverage(python_bin: &str) -> Result<()> {
 }
 
 /// The persistent worker is embedded in the binary and materialised to a temp
-/// file at runtime, so riptide stays a single self-contained executable.
+/// file at runtime, so tiderace stays a single self-contained executable.
 const WORKER_PY: &str = include_str!("worker.py");
 
 fn write_worker_script() -> Result<PathBuf> {
-    let path = std::env::temp_dir().join(format!("riptide-worker-{}.py", std::process::id()));
+    let path = std::env::temp_dir().join(format!("tiderace-worker-{}.py", std::process::id()));
     std::fs::write(&path, WORKER_PY)?;
     Ok(path)
 }
 
-fn cmd_watch(cli: &Cli, cfg: &RiptideConfig, paths: &[PathBuf]) -> Result<()> {
+fn cmd_watch(cli: &Cli, cfg: &TideraceConfig, paths: &[PathBuf]) -> Result<()> {
     let python = resolve_python(&cli.python, cfg);
     let db_path = resolve_db(cli.db.clone(), cfg);
     let pattern = cli

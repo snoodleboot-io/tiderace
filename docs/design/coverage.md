@@ -2,7 +2,7 @@
 
 ## Overview
 
-riptide integrates with Python's `coverage.py`. Coverage serves two purposes:
+tiderace integrates with Python's `coverage.py`. Coverage serves two purposes:
 
 1. **Reporting** — a line-coverage percentage per file after a run.
 2. **Dependency mapping** — the per-test graph of which source files each test executed, which
@@ -10,7 +10,7 @@ riptide integrates with Python's `coverage.py`. Coverage serves two purposes:
 
 ## Per-test coverage from one batched run
 
-riptide gets **per-test** attribution without running a separate process per test. A coverage
+tiderace gets **per-test** attribution without running a separate process per test. A coverage
 run is configured with dynamic contexts:
 
 ```ini
@@ -28,17 +28,17 @@ differs. See [ADR-011](decisions.md).
 
 ## Combining and extraction
 
-After the batches finish, riptide combines the per-batch data files and reads the
+After the batches finish, tiderace combines the per-batch data files and reads the
 context-annotated report:
 
 ```bash
-python -m coverage combine --keep .riptide-coverage/
-python -m coverage json --show-contexts -o .riptide-coverage/contexts.json
+python -m coverage combine --keep .tiderace-coverage/
+python -m coverage json --show-contexts -o .tiderace-coverage/contexts.json
 ```
 
 For each file, the report lists which **contexts** (tests) executed lines in it. Coverage
 prefixes context names with the package-dependent module path (e.g.
-`pkg.tests.test_auth.test_login`), so riptide matches tests on the stable **suffix**
+`pkg.tests.test_auth.test_login`), so tiderace matches tests on the stable **suffix**
 `{file_stem}.{func}` / `{file_stem}.{Class}.{method}` rather than a predicted full name.
 
 ## Storing the dependency graph
@@ -72,7 +72,7 @@ instrumentation needed until you choose to refresh it.
 | First run on a project | Use `--coverage` to build the dependency graph |
 | Regular development | Omit `--coverage` — the graph persists and is reused |
 | After adding source files | Re-run `--coverage` to refresh the graph |
-| Before `riptide watch` | Prime once with `--coverage` for the tightest watch loops |
+| Before `tiderace watch` | Prime once with `--coverage` for the tightest watch loops |
 
 Because coverage now runs batched (not one process per test), building the graph is far
 cheaper than it used to be — roughly **4–5× faster** than the legacy isolated path — while

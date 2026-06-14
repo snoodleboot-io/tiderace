@@ -1,6 +1,6 @@
 # Database Schema
 
-The `.riptide.db` SQLite database can be queried directly for debugging or integration purposes.
+The `.tiderace.db` SQLite database can be queried directly for debugging or integration purposes.
 
 ## Tables
 

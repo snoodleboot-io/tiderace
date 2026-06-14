@@ -1,6 +1,6 @@
 # Execution Model
 
-riptide runs your tests with real `pytest` for full compatibility (fixtures, plugins,
+tiderace runs your tests with real `pytest` for full compatibility (fixtures, plugins,
 assertion rewriting), and uses Rust only to orchestrate. It has three execution strategies;
 which one runs depends on your flags.
 
@@ -11,8 +11,8 @@ by default (override with `-n`), drives concurrency. Each worker owns one Python
 time.
 
 ```bash
-riptide tests/ -n 16   # 16 concurrent workers
-riptide tests/ -n 1    # sequential (useful for debugging)
+tiderace tests/ -n 16   # 16 concurrent workers
+tiderace tests/ -n 1    # sequential (useful for debugging)
 ```
 
 ## Strategy 1 — Batched (default)
@@ -37,7 +37,7 @@ One `pytest` process per test — the original model. Slower (one interpreter st
 but gives a fresh interpreter per test, for suites that genuinely need that isolation.
 
 ```bash
-riptide tests/ --isolate
+tiderace tests/ --isolate
 ```
 
 Each test runs roughly as:
@@ -49,7 +49,7 @@ python -m pytest -- path/to/test_file.py::test_function -x --tb=short -q --no-he
 The `--` separator means a hostile file name or path can never be parsed as a pytest flag,
 and a per-test [`--timeout`](../api/cli.md) kills and records any test that hangs.
 
-## Strategy 3 — Warm pool (`riptide watch`)
+## Strategy 3 — Warm pool (`tiderace watch`)
 
 [Watch mode](../guides/watch.md) keeps a pool of **long-lived** worker processes that import
 pytest once and run node ids fed to them over a JSON protocol. Across edit→test cycles the
@@ -78,7 +78,7 @@ failure never hides the others. A run with any failed or errored test exits non-
 
 | You run | Strategy | Why |
 |---|---|---|
-| `riptide tests/` | Batched | Fast default for runs and CI |
-| `riptide tests/ --coverage` | Batched + contexts | Fast *and* precise dependency graph |
-| `riptide tests/ --isolate` | Isolated | Per-test interpreter isolation |
-| `riptide watch tests/` | Warm pool | Sub-second local feedback loops |
+| `tiderace tests/` | Batched | Fast default for runs and CI |
+| `tiderace tests/ --coverage` | Batched + contexts | Fast *and* precise dependency graph |
+| `tiderace tests/ --isolate` | Isolated | Per-test interpreter isolation |
+| `tiderace watch tests/` | Warm pool | Sub-second local feedback loops |
