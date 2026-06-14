@@ -207,12 +207,14 @@ pytest import. A security review drove the must-fix robustness that landed:
 - **No pipe deadlock**: a dedicated reader thread per worker drains stdout into a channel;
   at most one request is in flight per worker.
 
-Known follow-ups (documented, not silently skipped): process-group kill for tests that spawn
-grandchildren; per-worker "max requests" recycle to bound long-session memory; incremental
-hashing in the watch loop (currently each cycle re-hashes the tree); and coverage-context-based
-precise impact in watch (without a prior `--coverage` graph, a source change conservatively
-re-runs all affected tests). Warm workers are a trusted-local-dev convenience — CI / untrusted
-code should use the isolated single-shot path.
+Hardening follow-ups (all now landed): **process-group kill** — spawned test processes run in
+their own group and timeouts/crashes signal the whole group, so a test's grandchildren are
+reaped too (`procutil.rs`); **per-worker recycle** after `MAX_WORKER_REQUESTS` to bound
+long-session memory/fd growth; **incremental hashing** in the watch loop (each cycle hashes
+only the paths the watcher reported, not the whole tree); and **coverage-context precise
+impact** ([ADR-011](#adr-011-per-test-impact-via-coverage-dynamic-contexts-precise-and-batched)).
+Warm workers remain a trusted-local-dev convenience — CI / untrusted code should use the
+isolated single-shot path.
 
 ---
 

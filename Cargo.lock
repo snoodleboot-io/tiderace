@@ -884,6 +884,7 @@ dependencies = [
  "glob",
  "hex",
  "indicatif",
+ "libc",
  "notify",
  "notify-debouncer-full",
  "predicates",

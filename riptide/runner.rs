@@ -266,6 +266,7 @@ impl Runner {
         cmd.args(node_ids);
         cmd.stdout(Stdio::from(out_file));
         cmd.stderr(Stdio::null());
+        crate::procutil::set_process_group(&mut cmd);
 
         let mut child = cmd
             .spawn()
@@ -273,9 +274,9 @@ impl Runner {
         match child.wait_timeout(self.timeout)? {
             Some(_) => {}
             None => {
-                let _ = child.kill();
-                let _ = child.wait();
-                // Timed out: leave the map empty so every test in the batch is Error.
+                // Timed out: kill the whole process group, then report nothing so
+                // every test in the batch becomes an Error.
+                crate::procutil::kill_tree(&mut child);
                 return Ok(HashMap::new());
             }
         }
@@ -326,15 +327,15 @@ impl Runner {
         cmd.args(["-x", "--tb=short", "-q", "--no-header", "--", &node_id]);
         cmd.stdout(Stdio::from(out_file));
         cmd.stderr(Stdio::from(err_file));
+        crate::procutil::set_process_group(&mut cmd);
 
         let mut child = cmd.spawn().context("failed to spawn test subprocess")?;
 
         let (exit_code, timed_out) = match child.wait_timeout(self.timeout)? {
             Some(exit) => (exit.code(), false),
             None => {
-                // Exceeded the limit — kill the child and reap it.
-                let _ = child.kill();
-                let _ = child.wait();
+                // Exceeded the limit — kill the whole process group and reap it.
+                crate::procutil::kill_tree(&mut child);
                 (None, true)
             }
         };

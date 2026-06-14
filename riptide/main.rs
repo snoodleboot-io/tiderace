@@ -4,6 +4,7 @@ mod db;
 mod hasher;
 mod impact;
 mod pool;
+mod procutil;
 mod reporter;
 mod runner;
 mod watcher;
@@ -380,10 +381,10 @@ fn cmd_watch(cli: &Cli, cfg: &RiptideConfig, paths: &[PathBuf]) -> Result<()> {
 
     let recycle_python = python.clone();
     let recycle_worker = worker_py.clone();
-    watcher::watch_loop(Path::new("."), |_changed| {
-        // Authoritative change detection via hashes (consistent path format with
-        // the collector/db); the watcher event is only the trigger.
-        let changed_files = hasher::find_changed_files(&hash_tree(&existing)?, &db)?;
+    let cwd = std::env::current_dir().unwrap_or_default();
+    watcher::watch_loop(Path::new("."), |changed| {
+        // Incremental: hash only the paths the watcher reported (not the whole tree).
+        let (changed_files, updates) = hasher::detect_changes(changed, &cwd, &db)?;
         if changed_files.is_empty() {
             return Ok(());
         }
@@ -414,7 +415,13 @@ fn cmd_watch(cli: &Cli, cfg: &RiptideConfig, paths: &[PathBuf]) -> Result<()> {
 
         let start = Instant::now();
         let results = pool.run_batch(&to_run, &changed_files);
-        persist_cycle(&db, &results, &existing)?;
+        for r in &results {
+            db.save_test_result(r)?;
+        }
+        // Persist just the hashes of the files that changed this cycle.
+        for (path, hash) in &updates {
+            db.save_file_hash(path, hash)?;
+        }
         watch_report(&results, start.elapsed());
         Ok(())
     })?;
