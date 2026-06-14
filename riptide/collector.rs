@@ -80,7 +80,7 @@ fn parse_source(content: &str, file_path: &str, items: &mut Vec<TestItem>) -> Re
     // Capture indentation, class name, and the (optional) base-class list.
     let class_re = Regex::new(r"^(\s*)class\s+(\w+)\s*(?:\(([^)]*)\))?\s*:")?;
     // Capture indentation and the test function name (pytest `test*` convention).
-    let func_re = Regex::new(r"^(\s*)def\s+(test\w*)\s*\(")?;
+    let func_re = Regex::new(r"^(\s*)(?:async\s+)?def\s+(test\w*)\s*\(")?;
 
     // Nearest enclosing class scope: (name, indent_of_class_keyword, is_test_class).
     let mut enclosing: Option<(String, usize, bool)> = None;
@@ -173,6 +173,18 @@ mod tests {
     fn ignores_non_test_functions() {
         let ids = ids("def helper():\n    pass\n\ndef test_real():\n    pass\n");
         assert_eq!(ids, vec!["t.py::test_real"]);
+    }
+
+    #[test]
+    fn collects_async_test_functions() {
+        let ids = ids("async def test_a():\n    pass\n\ndef test_b():\n    pass\n");
+        assert_eq!(ids, vec!["t.py::test_a", "t.py::test_b"]);
+    }
+
+    #[test]
+    fn collects_async_methods_in_test_class() {
+        let src = "class TestX:\n    async def test_m(self):\n        pass\n";
+        assert_eq!(ids(src), vec!["t.py::TestX::test_m"]);
     }
 
     #[test]
