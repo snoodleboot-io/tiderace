@@ -56,12 +56,12 @@ jobs:
         run: cargo build --release
 
   coverage:
-    # Core engine modules sit at 88–99% line coverage. The global gate is 75 (not
-    # the 80 target) because the interactive `riptide watch` surface (the notify
-    # loop + cmd_watch) can only be exercised by a long-running process that must
-    # be killed, which loses its instrumented coverage profile — it is validated by
-    # an integration test instead. See ADR-011 / decisions.md.
-    name: coverage (line >= 75)
+    # Gate at the 80% line target. `watcher.rs` (the notify blocking event loop) is
+    # excluded from the denominator: it can only run inside a long-lived `riptide
+    # watch` process which the test must KILL, and a killed process never flushes
+    # its instrumented coverage profile — so it is validated by an integration test
+    # instead of being counted. Everything else (engine, pool, runner) is measured.
+    name: coverage (line >= 80)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -75,4 +75,4 @@ jobs:
       - name: Coverage gate
         env:
           RIPTIDE_TEST_PYTHON: python
-        run: cargo llvm-cov --all --fail-under-lines 75
+        run: cargo llvm-cov --all --ignore-filename-regex 'watcher\.rs' --fail-under-lines 80
