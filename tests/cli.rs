@@ -310,7 +310,10 @@ fn pyproject_config_supplies_defaults() {
     scaffold(proj.path());
     std::fs::write(
         proj.path().join("pyproject.toml"),
-        format!("[tool.tiderace]\npython = \"{}\"\npaths = [\"tests\"]\n", py),
+        format!(
+            "[tool.tiderace]\npython = \"{}\"\npaths = [\"tests\"]\n",
+            py
+        ),
     )
     .unwrap();
 

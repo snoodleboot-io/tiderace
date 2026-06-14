@@ -392,7 +392,12 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// name alone can collide — the pid plus a monotonic counter make it unique.
 fn unique_temp(suffix: &str) -> PathBuf {
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("tiderace-{}-{}.{}", std::process::id(), seq, suffix))
+    std::env::temp_dir().join(format!(
+        "tiderace-{}-{}.{}",
+        std::process::id(),
+        seq,
+        suffix
+    ))
 }
 
 /// Read a file's contents, truncated to [`MAX_CAPTURE_BYTES`] on a char boundary.
