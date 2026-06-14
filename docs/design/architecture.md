@@ -2,100 +2,84 @@
 
 ## System Overview
 
-riptide is a single compiled binary written in Rust. It orchestrates Python test execution without being a Python process itself — giving it native-speed control over parallelism, file I/O, and state management.
+riptide is a single compiled Rust binary. It orchestrates Python test execution without being
+a Python process itself — giving it native-speed control over discovery, hashing, scheduling,
+and state — while real `pytest` does the actual running (full fixture/plugin/assertion
+compatibility).
 
 ```mermaid
 graph TD
     CLI[CLI / main.rs] --> COL[Collector]
     CLI --> HASH[Hasher]
-    CLI --> DB[(SQLite DB)]
-    
+    CLI --> DB[(SQLite .riptide.db)]
+
     COL -->|test items| IMP[Impact Analyzer]
     HASH -->|file hashes| IMP
     DB -->|stored hashes + deps| IMP
-    
-    IMP -->|tests to run| RUN[Runner / Rayon Pool]
-    
-    RUN -->|subprocess| PY1[pytest worker 1]
-    RUN -->|subprocess| PY2[pytest worker 2]
-    RUN -->|subprocess| PYN[pytest worker N]
-    
-    PY1 -->|result + coverage| RUN
-    PY2 -->|result + coverage| RUN
-    PYN -->|result + coverage| RUN
-    
+
+    IMP -->|tests to run| RUN[Runner / Rayon pool]
+
+    RUN -->|"one process per worker (batched)"| PY1[pytest worker 1]
+    RUN -->|…| PYN[pytest worker N]
+    PY1 -->|"-rA status + coverage contexts"| RUN
+
+    WATCH[watcher.rs] -.->|file changes| CLI
+    POOL[pool.rs warm workers] -.->|riptide watch| RUN
+
     RUN --> DB
     RUN --> REP[Reporter]
 ```
 
-## Key Design Decisions
+## Execution strategies
 
-### Why subprocesses, not embedding Python?
+riptide drives pytest three ways (see [Execution Model](parallel-execution.md) and
+[ADR-009](decisions.md)):
 
-riptide runs each test as a `pytest` subprocess rather than embedding CPython via PyO3. This was a deliberate choice:
+- **Batched (default)** — one `pytest` process per worker over many node ids; *N* tests cost
+  *W* interpreter startups. ~8× faster cold than one process per test.
+- **Isolated (`--isolate`)** — one process per test, for suites needing a fresh interpreter.
+- **Warm pool (`riptide watch`)** — long-lived workers import pytest once; edit→test cycles
+  pay no startup.
 
-- **Isolation**: Each test gets a clean Python process. No shared state, no import cache pollution.
-- **Compatibility**: Full `conftest.py`, fixture, and plugin support — no reimplementation needed.
-- **Stability**: PyO3 embedding is complex and version-sensitive. Subprocess is robust.
-- **Cost**: Subprocess startup is ~250ms per test. This is acceptable given the parallelism and impact-analysis savings.
+## Key design decisions
 
-### Why SQLite for state?
+- **Subprocesses, not embedded Python.** Full compatibility and OS-level isolation. Embedding
+  via PyO3 with subinterpreters was prototyped and **rejected** — most C extensions aren't
+  multi-interpreter-safe and crash the process ([ADR-010](decisions.md)).
+- **SQLite for state.** Zero infrastructure, ACID for concurrent writers, a single
+  inspectable file ([ADR-002](decisions.md)).
+- **SHA-256 for change detection.** Works without git, content-based ([ADR-003](decisions.md)).
+- **Coverage dynamic contexts.** Per-test dependencies come from a single *batched* coverage
+  run, so `--coverage` is precise *and* fast ([ADR-011](decisions.md)).
 
-- Zero infrastructure — no daemon, no server, no network
-- Single file, trivially backed up or cleared
-- ACID guarantees — concurrent writes from parallel workers are safe
-- Fast enough for thousands of test records
+## Module breakdown
 
-### Why SHA-256 for change detection?
+| Module | Responsibility |
+|---|---|
+| `main.rs` | CLI parsing, config resolution, run/collect/clear/coverage/**watch** orchestration |
+| `config.rs` | `[tool.riptide]` parsing from `pyproject.toml` |
+| `collector.rs` | Regex test discovery (functions, `Test*` classes, `unittest.TestCase`, async) |
+| `hasher.rs` | SHA-256 fingerprinting + change detection |
+| `db.rs` | SQLite persistence (hashes, results, deps, coverage) |
+| `impact.rs` | Changed-file → affected-test selection |
+| `runner.rs` | Rayon pool, batched/isolated execution, coverage-context extraction |
+| `pool.rs` | Persistent warm worker pool (watch mode) |
+| `watcher.rs` | Debounced file watching (`notify`) |
+| `worker.py` | Embedded Python worker run by the warm pool |
+| `reporter.rs` | Terminal output and coverage report |
 
-Git status would be faster but requires git. SHA-256 of file contents works in any environment — Docker containers, CI runners without git, monorepos with unusual structures.
+## Concurrency model
 
-## Module Breakdown
-
-| Module | Responsibility | Key Types |
-|---|---|---|
-| `main.rs` | CLI parsing, top-level orchestration | `Cli`, `Commands` |
-| `collector.rs` | Regex-based test discovery | `TestItem` |
-| `hasher.rs` | SHA-256 file fingerprinting | `hash_file()`, `find_changed_files()` |
-| `db.rs` | SQLite persistence layer | `Database` |
-| `impact.rs` | Changed file → affected test mapping | `ImpactAnalyzer` |
-| `runner.rs` | Rayon parallel execution, coverage extraction | `Runner`, `TestResult` |
-| `reporter.rs` | Terminal output, coverage report | `print_summary()` |
-
-## Data Flow: Normal Run
-
-```
-1. Parse CLI args
-2. Open / create .riptide.db
-3. Collect all test items (regex scan)
-4. Hash all .py files in tree
-5. Query DB for stored hashes → find changed files
-6. For each test: check if own file changed OR any dep changed OR last result=failed
-7. Partition: to_run | skipped
-8. Rayon: spawn N workers, each runs: python -m pytest <nodeid>
-9. (if --coverage): python -m coverage run ... per test
-10. Parse stdout for pass/fail status
-11. Extract covered file list from coverage JSON
-12. Write: test results, dep graphs, new file hashes → DB
-13. (if --coverage): coverage combine → merged report
-14. Print summary + coverage table
-```
-
-## Concurrency Model
-
-riptide uses [Rayon](https://github.com/rayon-rs/rayon) for data parallelism:
-
-```rust
-tests.par_iter().for_each(|test| {
-    let result = runner.run_single(test);
-    // results collected into Arc<Mutex<Vec<TestResult>>>
-});
-```
-
-Each test runs in a separate OS thread → subprocess. The thread pool size defaults to `available_parallelism()` (CPU count). Per-test coverage data is written to unique `.coverage.<test_id>` files to avoid write conflicts.
+Tests run on a scoped Rayon pool via `par_iter().map().collect()` — no shared
+`Mutex<Vec<_>>`, so there are no lock-poisoning panics, and the requested worker count is
+honored deterministically. The warm pool (`pool.rs`) adds a dedicated stdout reader thread per
+worker so a timeout/crash never deadlocks or hangs the run.
 
 ## Limitations (v0.1)
 
-- **Linux only** — container namespaces not used yet, but `std::process::Command` is portable; macOS support is straightforward in a future release
-- **No fixture awareness** — riptide cannot statically detect fixture dependencies; the dep graph is built from runtime coverage data only
-- **No parametrize expansion** — parametrized tests are collected as single items; pytest handles the expansion at runtime
+- **Linux x86_64** is the supported target this phase (the code uses portable
+  `std::process`, so other platforms are a future step).
+- **Fixture/plugin dependencies** are captured only through runtime coverage, not static
+  analysis — so precise impact analysis requires a prior `--coverage` run.
+- **Embedded subinterpreters** are out (ecosystem not multi-interpreter-ready —
+  [ADR-010](decisions.md)).

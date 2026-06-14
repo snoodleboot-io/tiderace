@@ -219,8 +219,10 @@ impl Runner {
             .iter()
             .map(|test| {
                 let node_id = test.pytest_nodeid();
-                // A test missing from the summary did not report an outcome.
-                let status = statuses.get(&node_id).cloned().unwrap_or(TestStatus::Error);
+                // A parametrized test runs as many `nodeid[param]` cases, so we
+                // aggregate every reported case under its base node id. Missing
+                // from the summary => no outcome reported => Error.
+                let status = aggregate_status(&node_id, &statuses).unwrap_or(TestStatus::Error);
                 let result = TestResult {
                     test_id: test.test_id.clone(),
                     file_path: test.file_path.clone(),
@@ -471,6 +473,43 @@ fn expected_suffix(item: &TestItem) -> String {
         Some(c) => format!("{}.{}.{}", stem, c, item.function_name),
         None => format!("{}.{}", stem, item.function_name),
     }
+}
+
+/// Aggregate the outcome of a collected test from the batch summary, folding in
+/// every parametrized case. pytest reports a parametrized `tests/t.py::test_x` as
+/// `test_x[1]`, `test_x[2]`, … — so we match the exact node id *and* any
+/// `node_id[...]` case. Precedence: a failure wins, then an error, then a pass;
+/// only if every case skipped is the test skipped. Returns `None` if nothing
+/// matched (the test never reported an outcome).
+fn aggregate_status(node_id: &str, statuses: &HashMap<String, TestStatus>) -> Option<TestStatus> {
+    let param_prefix = format!("{}[", node_id);
+    let mut any = false;
+    let mut failed = false;
+    let mut errored = false;
+    let mut passed = false;
+    for (key, status) in statuses {
+        if key == node_id || key.starts_with(&param_prefix) {
+            any = true;
+            match status {
+                TestStatus::Failed => failed = true,
+                TestStatus::Error => errored = true,
+                TestStatus::Passed => passed = true,
+                TestStatus::Skipped => {}
+            }
+        }
+    }
+    if !any {
+        return None;
+    }
+    Some(if failed {
+        TestStatus::Failed
+    } else if errored {
+        TestStatus::Error
+    } else if passed {
+        TestStatus::Passed
+    } else {
+        TestStatus::Skipped
+    })
 }
 
 /// Parse pytest's `-rA` summary into a node-id -> status map. Lines look like:
@@ -737,6 +776,46 @@ mod tests {
         assert_eq!(
             deps.get("tests/test_b.py::TestB::test_b"),
             Some(&vec!["src/b.py".to_string()])
+        );
+    }
+
+    #[test]
+    fn aggregates_parametrized_cases() {
+        let mut s = HashMap::new();
+        s.insert("t.py::test_p[1]".to_string(), TestStatus::Passed);
+        s.insert("t.py::test_p[2]".to_string(), TestStatus::Passed);
+        s.insert("t.py::test_p[3]".to_string(), TestStatus::Passed);
+        // All params passed → the base test passes (was wrongly Error before).
+        assert_eq!(
+            aggregate_status("t.py::test_p", &s),
+            Some(TestStatus::Passed)
+        );
+
+        s.insert("t.py::test_p[2]".to_string(), TestStatus::Failed);
+        // Any failing param → the base test fails.
+        assert_eq!(
+            aggregate_status("t.py::test_p", &s),
+            Some(TestStatus::Failed)
+        );
+
+        // A plain (non-param) test still matches exactly.
+        let mut p = HashMap::new();
+        p.insert("t.py::test_plain".to_string(), TestStatus::Passed);
+        assert_eq!(
+            aggregate_status("t.py::test_plain", &p),
+            Some(TestStatus::Passed)
+        );
+
+        // Not reported at all → None (caller treats as Error).
+        assert_eq!(aggregate_status("t.py::missing", &p), None);
+
+        // All cases skipped → skipped.
+        let mut sk = HashMap::new();
+        sk.insert("t.py::test_s[a]".to_string(), TestStatus::Skipped);
+        sk.insert("t.py::test_s[b]".to_string(), TestStatus::Skipped);
+        assert_eq!(
+            aggregate_status("t.py::test_s", &sk),
+            Some(TestStatus::Skipped)
         );
     }
 

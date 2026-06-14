@@ -48,10 +48,15 @@ struct Ready {
 
 /// A single long-lived worker process plus a background thread draining its stdout
 /// into a channel (so reads can be bounded with `recv_timeout`).
+/// Recycle a worker after this many requests, to bound memory/fd growth from
+/// repeated in-process pytest sessions over a long `watch` session.
+const MAX_WORKER_REQUESTS: u32 = 500;
+
 struct Worker {
     child: Child,
     stdin: ChildStdin,
     lines: Receiver<String>,
+    requests: u32,
 }
 
 impl Worker {
@@ -86,6 +91,7 @@ impl Worker {
             child,
             stdin,
             lines: rx,
+            requests: 0,
         };
         // Block for the readiness handshake (pytest imported).
         let line = worker
@@ -99,6 +105,7 @@ impl Worker {
     /// Send one node id and await its response within `timeout`. Returns `None` if
     /// the worker timed out (hung test) or died mid-request — the caller respawns.
     fn run(&mut self, nodeid: &str, invalidate: &[String], timeout: Duration) -> Option<Response> {
+        self.requests += 1;
         let req = Request { nodeid, invalidate };
         let mut line = serde_json::to_string(&req).ok()?;
         line.push('\n');
@@ -163,6 +170,15 @@ impl WorkerPool {
     pub fn run_batch(&mut self, items: &[TestItem], invalidate: &[String]) -> Vec<TestResult> {
         if items.is_empty() {
             return Vec::new();
+        }
+        // Recycle workers that have served many requests, to bound long-session
+        // memory/fd growth from repeated in-process pytest runs.
+        for w in &mut self.workers {
+            if w.requests >= MAX_WORKER_REQUESTS {
+                if let Ok(fresh) = Worker::spawn(&self.python, &self.worker_py, &self.cwd) {
+                    *w = fresh;
+                }
+            }
         }
         let by_node: HashMap<String, &TestItem> =
             items.iter().map(|t| (t.pytest_nodeid(), t)).collect();

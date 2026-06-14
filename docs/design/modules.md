@@ -1,128 +1,121 @@
 # Module Design
 
-## `main.rs` — Entry Point & Orchestration
+## `main.rs` — Entry point & orchestration
 
-The top-level binary entry point. Owns the CLI definition (via `clap`) and orchestrates the full run pipeline. All other modules are called from here in sequence.
-
-**Key responsibilities:**
-- Parse CLI args and subcommands (`run`, `collect`, `clear`, `coverage`)
-- Resolve test paths from args or defaults
-- Call collector → hasher → impact → runner → reporter in order
-- Propagate exit codes (non-zero on test failure)
-
-**Design principle:** `main.rs` is intentionally thin — it holds the glue, not the logic. Each step is delegated to its module.
+Owns the CLI (`clap`) and wires the pipeline together. Subcommands: default run, `collect`,
+`clear`, `coverage`, and `watch`. Resolves effective settings with precedence **CLI flag >
+`pyproject.toml` > built-in default**, then drives collector → hasher → impact → runner →
+reporter. Intentionally thin — the glue, not the logic.
 
 ---
 
-## `collector.rs` — Test Discovery
+## `config.rs` — Configuration
 
-Walks the file tree and extracts test function names from Python files using regex scanning — no Python interpreter required.
+Parses `[tool.riptide]` from `pyproject.toml`. Every key is optional; unknown keys are
+rejected so typos surface. Keys: `workers`, `python`, `coverage`, `isolate`, `pattern`, `db`,
+`paths`, `timeout`.
 
-**Algorithm:**
-1. Walk directories matching the file pattern (e.g. `test_*.py`)
-2. For each file, scan lines for:
-   - `class Test*:` → enter class context
-   - `def test_*(...):` → emit a `TestItem`
-3. Build pytest-compatible node IDs: `path::Class::function` or `path::function`
+---
 
-**Key type:**
+## `collector.rs` — Test discovery
+
+Regex scan of Python sources — no interpreter needed. Recognises:
+
+- top-level `def test_*` and `async def test_*`
+- `class Test*` methods (pytest convention)
+- `unittest.TestCase` subclasses **by base class**, regardless of name
+- methods of non-test classes are correctly skipped
+
 ```rust
 pub struct TestItem {
-    pub test_id: String,       // full pytest node ID
-    pub file_path: String,     // source file
+    pub test_id: String,        // pytest node id
+    pub file_path: String,
     pub function_name: String,
     pub class_name: Option<String>,
 }
 ```
 
-**Limitations:** Regex-based — cannot handle dynamically generated test functions or unusual indentation. In practice, covers 99% of real-world pytest code.
+Parametrized tests are collected as their base node id; pytest expands them at runtime and the
+runner aggregates the `node_id[param]` cases back together.
 
 ---
 
-## `hasher.rs` — File Fingerprinting
+## `hasher.rs` — File fingerprinting
 
-Computes SHA-256 hashes of Python source files and compares against stored values to detect changes.
+- `hash_file(path)` → SHA-256 hex
+- `hash_all_python_files(root)` → `HashMap<path, hash>` (leading `./` normalized so keys match
+  the collector and coverage)
+- `find_changed_files(current, db)` / `save_hashes(...)`
 
-**Key functions:**
-- `hash_file(path)` → SHA-256 hex string of file contents
-- `hash_all_python_files(root)` → `HashMap<path, hash>` for entire tree
-- `find_changed_files(current, db)` → files whose hash differs from DB
-- `save_hashes(hashes, db)` → persist new hashes after a run
-
-**Design:** Excludes `.git/`, `__pycache__/`, `.venv/`, `venv/` automatically during traversal.
+Skips `.git`, `__pycache__`, `.venv`, `venv`, `node_modules`.
 
 ---
 
-## `db.rs` — Persistence Layer
+## `db.rs` — Persistence
 
-Wraps a `rusqlite::Connection` and provides typed read/write access to the state database. All SQL is inline — no ORM.
-
-**Key methods:**
-- `save_file_hash(path, hash)` / `get_file_hash(path)`
-- `save_test_result(result)` / `get_last_result(test_id)`
-- `save_test_deps(test_id, deps)` / `get_test_deps(test_id)`
-- `save_coverage(run_id, coverage_map)`
-
-**Design:** Uses `INSERT OR REPLACE` for all writes — idempotent and safe to re-run.
+Wraps `rusqlite::Connection`; inline SQL, no ORM. `save_file_hash`/`get_file_hash`,
+`save_test_result`/`get_last_result`, `save_test_deps`/`get_test_deps`,
+`save_coverage`/`get_coverage`. All writes use `INSERT OR REPLACE`.
 
 ---
 
-## `impact.rs` — Affected Test Selection
+## `impact.rs` — Affected-test selection
 
-Given a set of changed files and the stored dep graph, determines which tests need to re-run.
-
-**Key type:**
 ```rust
 pub struct ImpactAnalyzer<'a> {
     db: &'a Database,
     changed_files: Vec<String>,
+    test_files: HashSet<String>,   // tells test-file vs source-file changes apart
 }
 ```
 
-**Decision logic (in order):**
-1. Test file itself changed → run
-2. Any dep file changed → run
-3. No deps stored (first run) → run
-4. Last result was failed/error → run
-5. Otherwise → skip
-
-Returns `(to_run: Vec<TestItem>, skipped: Vec<TestItem>)`.
+A test runs if: its own file changed; it never ran before; a recorded dependency changed; or
+it previously failed/errored. With **no** dependency graph, any *source* change re-runs it
+conservatively. No changes at all → everything skips. ([ADR-007](decisions.md))
 
 ---
 
-## `runner.rs` — Parallel Execution
+## `runner.rs` — Execution
 
-Executes tests using Rayon's parallel iterator. Each test spawns a subprocess and waits for completion.
-
-**Key type:**
 ```rust
 pub struct Runner {
     pub workers: usize,
     pub python_bin: String,
     pub with_coverage: bool,
     pub coverage_dir: PathBuf,
+    pub timeout: Duration,
+    pub isolate: bool,
 }
 ```
 
-**Flow per test:**
-1. Build `Command`: `python -m pytest <nodeid>` (or `coverage run ... -m pytest ...`)
-2. `.output()` — blocks until subprocess exits
-3. Parse stdout/stderr for pass/fail status
-4. If coverage: extract file list from coverage JSON
-5. Return `TestResult`
-
-**Coverage output:** Each test writes `.coverage.<id>` to `.riptide-coverage/`. After all tests, `merge_coverage()` runs `coverage combine` and parses the JSON report.
+- **Batched** (default): one `pytest -rA` process per worker; per-test status parsed from the
+  summary and aggregated across parametrized `node_id[param]` cases. Per-test timeout, `--`
+  argument-injection guard, bounded output capture.
+- **Isolated** (`--isolate`): one process per test (exit-code status).
+- **Coverage**: batched under `coverage run` with `dynamic_context = test_function`; deps
+  extracted from `coverage json --show-contexts` and matched by node-id suffix
+  ([ADR-011](decisions.md)).
 
 ---
 
-## `reporter.rs` — Terminal Output
+## `pool.rs` + `worker.py` — Warm worker pool
 
-Handles all user-visible output. Deliberately separated from runner logic.
+`pool.rs` manages long-lived `worker.py` processes (embedded in the binary) that import pytest
+once and run node ids over newline-delimited JSON. Per-request timeout → kill + respawn;
+crash detection via stdout EOF; a dedicated reader thread per worker avoids pipe deadlock.
+`worker.py` evicts changed first-party modules from `sys.modules` before each run so a warm
+re-run never executes stale code. Powers `riptide watch`.
 
-**Functions:**
-- `print_header(total, skipped, workers, coverage)` — pre-run summary line
-- `print_progress(n, total, result)` — per-test line printed as tests complete
-- `print_summary(results, skipped_tests, elapsed, coverage)` — final table
-- `print_coverage_report(coverage_map)` — coloured bar chart
+---
 
-**Design:** Uses the `colored` crate for ANSI colour. All colour output respects `NO_COLOR` env var via the crate's defaults.
+## `watcher.rs` — File watching
+
+Debounced recursive watch via `notify` + `notify-debouncer-full` (rename-aware), yielding a
+deduplicated batch of changed `.py` paths and ignoring artifact dirs and riptide's own state.
+
+---
+
+## `reporter.rs` — Terminal output
+
+`print_header`, `print_progress`, `print_summary`, coverage report. Uses `colored` (respects
+`NO_COLOR`).

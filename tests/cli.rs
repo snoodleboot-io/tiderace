@@ -190,6 +190,34 @@ fn coverage_contexts_give_precise_impact() {
 }
 
 #[test]
+fn parametrized_and_async_tests_report_correctly() {
+    // A parametrized test (pytest expands to test[1], test[2], …) must aggregate
+    // to a single pass/fail, not show up as an error. An async test must collect.
+    let Some(py) = python_with_pytest() else {
+        eprintln!("skipping: no python with pytest available");
+        return;
+    };
+    let proj = TempDir::new().unwrap();
+    std::fs::create_dir_all(proj.path().join("tests")).unwrap();
+    std::fs::write(
+        proj.path().join("tests/test_param.py"),
+        "import pytest\n\n\n@pytest.mark.parametrize(\"n\", [1, 2, 3])\ndef test_pos(n):\n    assert n > 0\n\n\n@pytest.mark.parametrize(\"n\", [1, -1])\ndef test_mixed(n):\n    assert n > 0\n",
+    )
+    .unwrap();
+
+    riptide(proj.path())
+        .args(["--python", &py, "tests/"])
+        .assert()
+        .failure() // test_mixed[-1] fails
+        .code(1)
+        // all-pass parametrized test is reported passed (not error)
+        .stdout(predicate::str::contains("passed: 1"))
+        .stdout(predicate::str::contains("failed: 1"))
+        // and never miscounted as an error
+        .stdout(predicate::str::contains("errors").not());
+}
+
+#[test]
 fn watch_reruns_impacted_tests_on_change() {
     // Spawn `riptide watch`, let the warm pool prime, change a test file, and
     // confirm a re-run cycle fires. Exercises the pool + notify watcher + watch
