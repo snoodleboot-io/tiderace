@@ -61,14 +61,14 @@ struct Worker {
 
 impl Worker {
     fn spawn(python: &str, worker_py: &Path, cwd: &Path) -> Result<Worker> {
-        let mut child = Command::new(python)
-            .arg(worker_py)
+        let mut cmd = Command::new(python);
+        cmd.arg(worker_py)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("failed to spawn worker process")?;
+            .stderr(Stdio::null());
+        crate::procutil::set_process_group(&mut cmd);
+        let mut child = cmd.spawn().context("failed to spawn worker process")?;
 
         let stdin = child.stdin.take().context("worker stdin missing")?;
         let stdout = child.stdout.take().context("worker stdout missing")?;
@@ -118,8 +118,7 @@ impl Worker {
     }
 
     fn kill(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        crate::procutil::kill_tree(&mut self.child);
     }
 }
 
