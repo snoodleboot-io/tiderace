@@ -43,6 +43,20 @@ This is the documented trade-off in [ADR-009](../design/decisions.md); for runni
     is the point: **tiderace wins the warm/impact loop; it is competitive-but-not-fastest on
     cold full runs.** That is exactly what its design optimises for.
 
+## Real-world libraries
+
+`benchmarks/real_world.sh` runs the same comparison against the *actual* test suites of
+common OSS libraries (cachetools, jmespath, toolz, inflection) — it clones them, installs
+them into a throwaway venv, and times pytest vs tiderace cold/warm:
+
+```bash
+benchmarks/real_world.sh
+```
+
+Representative results (warm = no-change re-run): tiderace's impact loop runs **6–100× faster**
+than a full pytest run where tests have real cost, while a cold full run stays comparable to
+or slower than pytest. Exact numbers vary by machine.
+
 ## Methodology
 
 See `benchmarks/README.md` in the repository for the full workload model, the priming steps
