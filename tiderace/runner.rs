@@ -206,23 +206,34 @@ impl Runner {
             None
         };
 
-        let statuses = match self.exec_chunk(&node_ids, &out_path, cov_data.as_deref()) {
-            Ok(map) => map,
+        let outcome = match self.exec_chunk(&node_ids, &out_path, cov_data.as_deref()) {
+            Ok(o) => o,
             Err(e) => {
                 eprintln!("  {} [BATCH ERROR] {}", "✗".red(), e);
-                HashMap::new()
+                BatchOutcome::default()
             }
         };
         let _ = std::fs::remove_file(&out_path);
+        // The batch produced output iff at least one test reported a by-node-id
+        // outcome; if so, a test missing from the map was skipped (pytest reports
+        // skips by file:line, not node id), otherwise it genuinely didn't run.
+        let batch_ran = !outcome.statuses.is_empty() || !outcome.skipped_files.is_empty();
 
         chunk
             .iter()
             .map(|test| {
                 let node_id = test.pytest_nodeid();
                 // A parametrized test runs as many `nodeid[param]` cases, so we
-                // aggregate every reported case under its base node id. Missing
-                // from the summary => no outcome reported => Error.
-                let status = aggregate_status(&node_id, &statuses).unwrap_or(TestStatus::Error);
+                // aggregate every reported case under its base node id.
+                let status = aggregate_status(&node_id, &outcome.statuses).unwrap_or_else(|| {
+                    // Not reported by node id: a skip (file recorded) after a run
+                    // that produced output, else a true non-run => Error.
+                    if batch_ran && outcome.skipped_files.contains(&test.file_path) {
+                        TestStatus::Skipped
+                    } else {
+                        TestStatus::Error
+                    }
+                });
                 let result = TestResult {
                     test_id: test.test_id.clone(),
                     file_path: test.file_path.clone(),
@@ -246,7 +257,7 @@ impl Runner {
         node_ids: &[String],
         out_path: &Path,
         cov_data: Option<&Path>,
-    ) -> Result<HashMap<String, TestStatus>> {
+    ) -> Result<BatchOutcome> {
         let out_file = File::create(out_path)?;
         let mut cmd = Command::new(&self.python_bin);
         // Optionally wrap pytest in `coverage run` with per-test dynamic contexts.
@@ -277,7 +288,7 @@ impl Runner {
                 // Timed out: kill the whole process group, then report nothing so
                 // every test in the batch becomes an Error.
                 crate::procutil::kill_tree(&mut child);
-                return Ok(HashMap::new());
+                return Ok(BatchOutcome::default());
             }
         }
         Ok(parse_batch_summary(&read_capped(out_path)))
@@ -518,36 +529,56 @@ fn aggregate_status(node_id: &str, statuses: &HashMap<String, TestStatus>) -> Op
     })
 }
 
-/// Parse pytest's `-rA` summary into a node-id -> status map. Lines look like:
-///   `PASSED tests/test_x.py::test_a`
-///   `FAILED tests/test_x.py::test_b - assert False`
-/// The first token is the outcome and the second is the exact node id (any
-/// trailing ` - reason` is ignored).
-fn parse_batch_summary(stdout: &str) -> HashMap<String, TestStatus> {
-    let mut map = HashMap::new();
+/// Parsed result of a batched `-rA` run.
+#[derive(Default)]
+struct BatchOutcome {
+    /// node id -> status, for outcomes pytest reports by node id (pass/fail/error/xfail/xpass).
+    statuses: HashMap<String, TestStatus>,
+    /// Files that had at least one skipped test. pytest reports SKIPPED as
+    /// `SKIPPED [n] path:line: reason` (a file:line, NOT a node id), so skipped
+    /// tests can't be keyed by node id — we record the file and treat any of its
+    /// tests missing from `statuses` (after a run that produced output) as skipped.
+    skipped_files: std::collections::HashSet<String>,
+}
+
+/// Parse pytest's `-rA` summary. Most outcomes are `OUTCOME <node id>[ - reason]`,
+/// but SKIPPED is `SKIPPED [n] <path>:<line>: <reason>` — handled separately.
+fn parse_batch_summary(stdout: &str) -> BatchOutcome {
+    let mut out = BatchOutcome::default();
     for line in stdout.lines() {
         let mut parts = line.splitn(3, ' ');
         let outcome = match parts.next() {
             Some(o) => o,
             None => continue,
         };
+        if outcome == "SKIPPED" {
+            // SKIPPED [n] path:line: reason  — record the file path.
+            let _count = parts.next();
+            if let Some(rest) = parts.next() {
+                if let Some(path) = rest.split(':').next() {
+                    let path = path.trim();
+                    if !path.is_empty() {
+                        out.skipped_files.insert(path.to_string());
+                    }
+                }
+            }
+            continue;
+        }
         let status = match outcome {
             "PASSED" | "XPASS" => TestStatus::Passed,
             "FAILED" => TestStatus::Failed,
             "ERROR" => TestStatus::Error,
-            "SKIPPED" | "XFAIL" => TestStatus::Skipped,
+            "XFAIL" => TestStatus::Skipped,
             _ => continue,
         };
-        // The node id is the second whitespace-free token; a ` - reason` tail
-        // (when present) lands in the third split and is ignored.
         if let Some(node_id) = parts.next() {
             let node_id = node_id.trim();
             if !node_id.is_empty() {
-                map.insert(node_id.to_string(), status);
+                out.statuses.insert(node_id.to_string(), status);
             }
         }
     }
-    map
+    out
 }
 
 /// Heuristic for a passed-but-skipped run: pytest exits 0 for both passed and
@@ -827,39 +858,34 @@ mod tests {
 
     #[test]
     fn batch_summary_parsing() {
+        // Note pytest's real format: skips are `SKIPPED [n] path:line: reason`,
+        // NOT `SKIPPED <node id>` — recorded by file, not node id.
         let out = "\
 ==== short test summary info ====
 PASSED tests/test_mod_0.py::test_compute_0_0
 PASSED tests/test_unit_case.py::ArithmeticCase::test_scale_0
-SKIPPED tests/test_x.py::test_skipme
+SKIPPED [1] tests/test_x.py:55: needs network
 FAILED tests/test_mod_0.py::test_fail_demo - assert False
 ERROR tests/test_y.py::test_broken
 1 failed, 2 passed in 0.10s
 ";
-        let m = parse_batch_summary(out);
+        let o = parse_batch_summary(out);
         assert_eq!(
-            m.get("tests/test_mod_0.py::test_compute_0_0"),
+            o.statuses.get("tests/test_mod_0.py::test_compute_0_0"),
             Some(&TestStatus::Passed)
-        );
-        assert_eq!(
-            m.get("tests/test_unit_case.py::ArithmeticCase::test_scale_0"),
-            Some(&TestStatus::Passed)
-        );
-        assert_eq!(
-            m.get("tests/test_x.py::test_skipme"),
-            Some(&TestStatus::Skipped)
         );
         // The reason after ` - ` must not corrupt the node id key.
         assert_eq!(
-            m.get("tests/test_mod_0.py::test_fail_demo"),
+            o.statuses.get("tests/test_mod_0.py::test_fail_demo"),
             Some(&TestStatus::Failed)
         );
         assert_eq!(
-            m.get("tests/test_y.py::test_broken"),
+            o.statuses.get("tests/test_y.py::test_broken"),
             Some(&TestStatus::Error)
         );
-        // The summary count line is not an outcome line.
-        assert_eq!(m.len(), 5);
+        // Skips are tracked by file, not as a node-id status.
+        assert!(o.skipped_files.contains("tests/test_x.py"));
+        assert_eq!(o.statuses.len(), 4); // 2 passed + 1 failed + 1 error
     }
 
     #[test]
