@@ -4,8 +4,12 @@
 .tiderace.db
 .tiderace-coverage/
 
-# Phase 1 benchmark environment (provisioned by Lane 0)
+# Benchmark / spike environments (provisioned by Lane 0)
 .tiderace-bench-venv/
+.riptide-spike-venv/
+
+# pure-rust-test-engine Phase-1 spike build artifacts (the spike/ sources ARE committed)
+spike/target/
 
 # Session files are per-developer working state, not committed (see core-session.md)
 .prompticorn/sessions/
