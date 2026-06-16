@@ -335,10 +335,11 @@ it ([09 §5](../design/09-assertions.md)). Reconciling 02's `RichDiff` with 09's
 > **Reconciliation note for review:** [02](../design/02-domain-model.md)'s `RichDiff` lists
 > `lhs_repr: String`, `rhs_repr: String`, `note: Option<String>`, `subexprs: Vec<SubExpr>`;
 > [09](../design/09-assertions.md)'s classifier uses `ValueRepr`, `SubexprValue`, `unified_diff`,
-> `fallback_note`. This phase **finalizes** the merged shape above (richer `ValueRepr`,
-> `unified_diff`, `fallback_note` aliasing 02's `note`) and updates `domain/rich_diff.rs` +
-> [02](../design/02-domain-model.md) together (per invariant [02 §10.3](../design/02-domain-model.md) —
-> domain changes edit the type *and* the doc). **Flagged for ratification in §10 (G-RD).**
+> `fallback_note`. **RESOLVED (2026-06-15):** [02-domain-model](../design/02-domain-model.md) has
+> been updated to the canonical merged shape (`op`, `lhs_repr`/`rhs_repr`: `ValueRepr`,
+> `subexprs`: `Vec<SubexprValue>`, `unified_diff`, `fallback_note`), with `SubexprValue`/`ValueRepr`
+> added to 02's vocabulary and 09 marked as referencing 02 as owner. `domain/rich_diff.rs` follows
+> this shape when implemented in this phase.
 
 Invariants: produced **only** on `Failed`/sub-failure; **one `RichDiff` per failing assertion**
 (sub-failures carry one each under the parent `SubResult`); identical shape for bare `assert` and
@@ -377,7 +378,7 @@ cached outcome — no extra cache keys (one-id-one-result, [02 §10](../design/0
 
 | ID | Gap | Disposition |
 |---|---|---|
-| **G-RD** | `RichDiff` field-shape divergence between [02](../design/02-domain-model.md) and [09](../design/09-assertions.md). | §9.1 proposes the merged shape; **ratify before Lane ASSERT freezes the contract.** |
+| **G-RD** | ~~`RichDiff` field-shape divergence between [02](../design/02-domain-model.md) and [09](../design/09-assertions.md).~~ | ✅ **RESOLVED (2026-06-15):** 02 aligned to 09's canonical shape; `SubexprValue`/`ValueRepr` added to 02's vocabulary; 09 references 02 as owner. No longer blocks Lane ASSERT. |
 | **G-1** | **Rich-diff parity edge cases vs pytest** — deeply nested operands, custom `__repr__`, very large dict/list diffs, recursion truncation at `max_depth` (A1). | Differential lane *records* per-edge-case parity; gaps documented in the phase report, not hidden. Truncation depth is a ratifiable default. |
 | **G-2** | **Side-effecting / nondeterministic asserts** where `PurityGuard` must fall back (`queue.pop()`, `time.time()`, RNG). | Corpus includes these on purpose; the gate **proves** fallback fires with the labeled note. Fallback frequency is the ADR-E009 revisit metric (perf lane). **Documented limitation, not a wrong answer.** |
 | **G-3** | **Custom `self.assertX`** on user `TestCase` subclasses (A3/TS3). | Decision: **plain-message fallback** for unknown methods (no guessed comparison shape). Ratify. |
@@ -406,8 +407,8 @@ ValueRepr` · `subexprs: Vec<SubexprValue { source_span: Span, repr: ValueRepr }
 truncated at `max_depth`) · `unified_diff: Option<String>` (Rust) · `fallback_note: Option<String>`
 (Rust, set iff the `PurityGuard` trips; then `subexprs` empty and the original message rides in
 `lhs_repr`). Produced only on failure, identical shape for `assert` and `self.assert*`, one per
-failing assertion. **Open ratification: G-RD** (merging 02's `note`/`String` reprs with 09's
-`ValueRepr`/`unified_diff`/`fallback_note`).
+failing assertion. **G-RD resolved (2026-06-15):** this shape is now the canonical one in both
+[02-domain-model](../design/02-domain-model.md) and [09-assertions](../design/09-assertions.md).
 
 **New disposition mapping finalized** (§9.2, stdlib `TestResult`→`Outcome`, enum stays closed):
 `addSuccess`→`Passed` · `addFailure`→`Failed`+`RichDiff` · `addError`→`Error` · `addSkip`→`Skipped` ·

@@ -191,6 +191,10 @@ classDiagram
 `PurityGuard` policy, and formatting are **Rust**. The `Worker` holds an `AssertionIntrospector`
 exactly as shown in the master diagram ([01-architecture](01-architecture.md), §5).
 
+> `RichDiff`, `SubexprValue`, and `ValueRepr` are domain types **owned by**
+> [02-domain-model](02-domain-model.md); their canonical field shape is defined there and matches
+> the diagram above (single source of truth for vocabulary).
+
 ---
 
 ## 6. Sequence — failure → capture → re-eval → RichDiff (with fallback branch)
