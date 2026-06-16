@@ -1,0 +1,18 @@
+[package]
+name = "spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace so this throwaway spike is never absorbed by the repo-root crate.
+[workspace]
+
+[[bin]]
+name = "spike"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
