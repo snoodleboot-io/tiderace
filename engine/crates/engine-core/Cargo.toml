@@ -1,0 +1,12 @@
+[package]
+name = "engine-core"
+description = "Pure-Rust Python test engine — core library (collection, domain, execution)."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+regex = { workspace = true }
