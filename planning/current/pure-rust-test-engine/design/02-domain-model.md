@@ -176,10 +176,22 @@ classDiagram
 
     class RichDiff {
         +op String
-        +lhs_repr String
-        +rhs_repr String
-        +subexprs Vec~SubExpr~
-        +note Option~String~
+        +lhs_repr ValueRepr
+        +rhs_repr ValueRepr
+        +subexprs Vec~SubexprValue~
+        +unified_diff Option~String~
+        +fallback_note Option~String~
+    }
+
+    class SubexprValue {
+        +source_span Span
+        +repr ValueRepr
+    }
+
+    class ValueRepr {
+        +repr String
+        +type_name String
+        +truncated bool
     }
 
     class RunReport {
@@ -228,6 +240,9 @@ classDiagram
     TestResult *-- Captured : owns
     TestResult --> NodeId : identifies
     TestResult *-- RichDiff : on failure
+    RichDiff *-- SubexprValue : captures
+    RichDiff --> ValueRepr : lhs/rhs
+    SubexprValue --> ValueRepr : repr
     TestResult *-- InputClosure : records actual
 
     RunReport *-- TestResult : aggregates
@@ -258,13 +273,15 @@ type, per conventions.
 | `Outcome` | The closed enumeration of final states (Passed…Error). The whole engine's result alphabet. | `outcome.rs` |
 | `TestResult` | The full result of executing (or cache-serving) one `TestItem`: outcome, duration, captured output, optional `RichDiff`, recorded `InputClosure`. | `test_result.rs` |
 | `Captured` | Captured stdout/stderr/log records for one test. | `captured.rs` |
-| `RichDiff` | The structured assertion-failure explanation produced by the [AssertionIntrospector](09-assertions.md) ([ADR-E009](adr/ADR-E009-lazy-assertion-introspection.md)). | `rich_diff.rs` |
+| `RichDiff` | The structured assertion-failure explanation produced by the [AssertionIntrospector](09-assertions.md) ([ADR-E009](adr/ADR-E009-lazy-assertion-introspection.md)). Canonical field shape, shared verbatim with [09-assertions](09-assertions.md): `op`, `lhs_repr`/`rhs_repr` (`ValueRepr`), `subexprs` (`Vec<SubexprValue>`), `unified_diff`, `fallback_note`. | `rich_diff.rs` |
+| `SubexprValue` | One captured sub-expression of a failing assertion: its source `Span` + `ValueRepr`. | `subexpr_value.rs` |
+| `ValueRepr` | A safe, possibly-truncated representation of a Python value (`repr`, `type_name`, `truncated`) used in diffs. | `value_repr.rs` |
 | `RunReport` | The aggregate over all `TestResult`s for one run: tallies, wall-clock, cache/impact stats, exit code. Consumed by [Reporters](13-cross-cutting.md). | `run_report.rs` |
 | `InputClosure` | The transitive input set whose hash determines a test's cached outcome. *Shape* owned here; *construction/semantics* in [07-cache](07-cache.md). | `input_closure.rs` |
 | `CacheKey` | The content-address derived from an `InputClosure`. Referenced here, **defined fully** in [07-cache](07-cache.md) ([ADR-E004](adr/ADR-E004-content-addressed-cache.md)). | `cache_key.rs` |
 
 > **Supporting value types** (`SourceHash`, `EnvHash`, `Hash`, `Duration` newtype wrappers,
-> `OutcomeTally`, `ParamValue`, `SubExpr`, `LogRecord`, the `*Id` newtypes inside `ScopePath`)
+> `OutcomeTally`, `ParamValue`, `Span`, `LogRecord`, the `*Id` newtypes inside `ScopePath`)
 > are small leaf values; each still gets its own file under `domain/` but is elided from the
 > catalogue above to keep the vocabulary table focused on the nouns other docs cite.
 
