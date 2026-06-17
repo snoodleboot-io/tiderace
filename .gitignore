@@ -8,8 +8,9 @@
 .tiderace-bench-venv/
 .riptide-spike-venv/
 
-# pure-rust-test-engine Phase-1 spike build artifacts (the spike/ sources ARE committed)
+# pure-rust-test-engine build artifacts (sources ARE committed)
 spike/target/
+engine/target/
 
 # Session files are per-developer working state, not committed (see core-session.md)
 .prompticorn/sessions/
