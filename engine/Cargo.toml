@@ -5,8 +5,7 @@
 # legacy orchestrator is retired. Mirrors the layout in design/01-architecture.md.
 [workspace]
 resolver = "2"
-# engine-cli is added in the next Phase-2 increment (Lanes C/D: execution + CLI).
-members = ["crates/engine-core"]
+members = ["crates/engine-core", "crates/engine-cli"]
 
 [workspace.package]
 edition = "2021"

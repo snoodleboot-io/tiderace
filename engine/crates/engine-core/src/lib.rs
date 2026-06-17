@@ -11,5 +11,6 @@
 pub mod collection;
 pub mod domain;
 pub mod error;
+pub mod exec;
 
 pub use error::EngineError;
