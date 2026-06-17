@@ -12,6 +12,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-cli"
+version = "0.0.1"
+dependencies = [
+ "engine-core",
+]
+
+[[package]]
 name = "engine-core"
 version = "0.0.1"
 dependencies = [
