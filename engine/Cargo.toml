@@ -1,0 +1,22 @@
+# Pure-Rust test engine workspace.
+#
+# Isolated under engine/ so it coexists with the legacy `tiderace` crate at the repo root during
+# the rebuild (see planning/current/pure-rust-test-engine/). Promotes to the repo root when the
+# legacy orchestrator is retired. Mirrors the layout in design/01-architecture.md.
+[workspace]
+resolver = "2"
+members = ["crates/engine-core", "crates/engine-cli"]
+
+[workspace.package]
+edition = "2021"
+version = "0.0.1"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+regex = "1"
+
+[profile.release]
+opt-level = 3
