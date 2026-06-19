@@ -1,12 +1,15 @@
 /target
 
-# tiderace runtime state
+# tiderace / riptide runtime state
 .tiderace.db
 .tiderace-coverage/
+.riptide.db
+.riptide-coverage/
 
-# Benchmark / spike environments (provisioned by Lane 0)
+# Benchmark / spike / fixture environments (provisioned by Lane 0)
 .tiderace-bench-venv/
 .riptide-spike-venv/
+.riptide-fx-venv/
 
 # pure-rust-test-engine build artifacts (sources ARE committed)
 spike/target/

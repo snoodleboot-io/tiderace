@@ -38,11 +38,7 @@ impl Worker for ForkWorker {
     fn run(&mut self, items: &[TestItem]) -> Result<Vec<TestResult>> {
         let mut results = Vec::with_capacity(items.len());
         for item in items {
-            let req = ExecRequest {
-                node_id: item.node_id.as_str(),
-                style: item.style.wire(),
-                deadline_ms: self.deadline_ms,
-            };
+            let req = ExecRequest::bare(item.node_id.as_str(), item.style.wire(), self.deadline_ms);
             let start = Instant::now();
             let resp = self.wellspring.run_one(&req)?;
             let duration_ms = start.elapsed().as_millis() as u64;

@@ -4,14 +4,46 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{EngineError, Result};
+use crate::fixtures::{FixtureArgs, FixtureInstance};
 
 /// A request to execute one test in a forked child of the Wellspring.
+///
+/// **Phase 3 extension (contract-frozen).** The Phase 2 wire fields (`node_id`, `style`,
+/// `deadline_ms`) are unchanged. Phase 3 adds the fixture fields the forked child needs —
+/// `post_fork` (Function-scope instances to set up in-child), `reinit` (fork-fragile resource node
+/// ids to rebuild post-fork, W11), and `fixture_args` (the assembled argument map). All three are
+/// `#[serde(skip_serializing_if = ...)]` so a **fixtureless** request serializes byte-identically to
+/// the Phase 2 frame — the length-prefixed JSON framing itself is unchanged (Phase 2 CONTRACT §3).
 #[derive(Debug, Serialize)]
 pub struct ExecRequest<'a> {
     pub node_id: &'a str,
     /// Wire token for the test style (`pytest_func` / `pytest_method` / `unittest_method`).
     pub style: &'a str,
     pub deadline_ms: u64,
+    /// Function-scope fixture instances to set up in the forked child, topo order (design 05 §5.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_fork: Vec<FixtureInstance>,
+    /// `reinit_after_fork` fixture node ids to rebuild in-child (W11).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reinit: Vec<String>,
+    /// The assembled argument map the body is invoked with.
+    #[serde(default, skip_serializing_if = "FixtureArgs::is_empty")]
+    pub fixture_args: FixtureArgs,
+}
+
+impl<'a> ExecRequest<'a> {
+    /// A Phase-2-shaped (fixtureless) request: the three wire fields, empty fixture fields. Keeps
+    /// existing call sites concise and the frame byte-identical to Phase 2.
+    pub fn bare(node_id: &'a str, style: &'a str, deadline_ms: u64) -> Self {
+        Self {
+            node_id,
+            style,
+            deadline_ms,
+            post_fork: Vec::new(),
+            reinit: Vec::new(),
+            fixture_args: FixtureArgs::new(),
+        }
+    }
 }
 
 /// The child's reported outcome for one test.
@@ -60,11 +92,7 @@ mod tests {
 
     #[test]
     fn frame_roundtrips_request_to_response_shape() {
-        let req = ExecRequest {
-            node_id: "m.py::t",
-            style: "pytest_func",
-            deadline_ms: 5000,
-        };
+        let req = ExecRequest::bare("m.py::t", "pytest_func", 5000);
         let mut buf = Vec::new();
         write_frame(&mut buf, &req).unwrap();
         // Header is the LE length of the JSON payload.
