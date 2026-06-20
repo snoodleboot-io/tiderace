@@ -308,3 +308,27 @@ never edit them; they only overwrite their owned files below. WM and FALLBACK bo
    onto the frozen trait this phase; `SubprocessWorker::capabilities()` is an inherent method instead.
    Flag: a later phase may widen the `Worker` trait (batch + plan) — that is a Phase 2-contract change,
    out of scope here.
+
+---
+
+## 11. Phase 3 implementation actuals (post-freeze, for Phases 4–6)
+
+The frozen interfaces in §1–§9 were implemented **without shape changes**. Two facts consumers need:
+
+1. **`SubprocessWorker::with_target(python, shim, root)`** was **added** (an extension, not a break):
+   the frozen `new(deadline_ms, pool_size)` ctor carries no launch context, so a builder supplies the
+   interpreter/shim/corpus-root before `Worker::run`. The no-COW path drives the shim in a new
+   `--no-fork` mode (same fixture engine, in-process) — result-identical to the fork path.
+
+2. **Live fixture discovery currently lives in the shim, not Rust.** The live execution path
+   (`RegexCollector` → `Worker::run`) has no Python-introspecting collector feeding Rust `Fixture`s,
+   so the shim autonomously discovers `@pytest.fixture` defs and resolves closures/scopes/autouse/
+   override/parametrization itself, mirroring the Rust model. The Rust `FixtureGraph` / `LayeredResolver`
+   / `WatermarkStack` / `FixturePlan` are the **frozen contract + the unit-/pure-acceptance-tested
+   model** Phases 4–6 consume. **Open seam:** a native discovery collector that feeds the Rust resolver
+   into the live path (replacing the shim's marker read with `@riptide.fixture`, ADR-E001) — a clean
+   later-phase addition, not a reshape.
+
+3. `closure_hash` uses a self-contained FNV-1a-based mix over the length-prefixed transitive closure
+   (no new crypto-hash dependency); the frozen `[u8; 32]` shape lets Phase 5 swap the mixing for a
+   cryptographic hash without moving the type.
