@@ -314,8 +314,9 @@ def _teardown(gen) -> None:
 class Engine:
     """Parent-side scope state: wider-than-function fixtures live here, inherited by forked children."""
 
-    def __init__(self, reg: Registry):
+    def __init__(self, reg: Registry, no_fork: bool = False):
         self.reg = reg
+        self.no_fork = no_fork  # no-COW fallback path (SubprocessWorker / Windows / --no-fork)
         self.active: list[_Active] = []  # in setup order (widest → narrowest)
 
     def _value(self, name: str, module_key: str):
@@ -372,6 +373,15 @@ class Engine:
         return {"node_id": node_id, "outcome": outcome, "detail": detail}
 
     def _fork_run(self, node_id, style, requested, closure, combo, deadline_ms) -> tuple[str, str]:
+        if self.no_fork:
+            # No-COW fallback: run the test in THIS process (no isolation, but the same fixture
+            # engine → result-identical outcomes; §8 boundary 3). Function fixtures are set up and
+            # torn down per test in-process; wider scopes still live once in the parent.
+            try:
+                return self._child_exec(node_id, style, requested, closure, combo)
+            except BaseException as exc:  # noqa: BLE001 — any in-process test error → Outcome::Error
+                return "error", "".join(traceback.format_exception_only(type(exc), exc))
+
         read_fd, write_fd = os.pipe()
         pid = os.fork()
         if pid == 0:  # ---- CHILD: pristine COW copy with all wider fixtures already warm ----
@@ -507,10 +517,11 @@ def _preimport(root: str) -> None:
 
 def serve() -> int:
     root = sys.argv[1]
+    no_fork = "--no-fork" in sys.argv[2:]
     sys.path.insert(0, root)
     _preimport(root)
     reg = _discover(root)
-    engine = Engine(reg)
+    engine = Engine(reg, no_fork=no_fork)
     _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
     try:
         while True:

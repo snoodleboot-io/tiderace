@@ -17,6 +17,19 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
+
+/// Serializes the live, corpus-launching scenarios. They drive real wellsprings and one of them
+/// (`run_engine_scope_counts`) sets the **process-global** `FX_CORPUS_PROBE_DIR`; cargo runs tests
+/// in parallel threads, so without this lock a concurrently-launched wellspring would inherit the
+/// leaked env var and double-count the shared probe. Poison-tolerant: a panicking live test must not
+/// cascade-poison the others.
+static LIVE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquire the live-scenario serialization guard (held for the duration of an engine/oracle run).
+pub fn live_guard() -> MutexGuard<'static, ()> {
+    LIVE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 use engine_core::domain::{NodeId, Scope, ScopePath};
 use engine_core::fixtures::{Fixture, ParamValue};

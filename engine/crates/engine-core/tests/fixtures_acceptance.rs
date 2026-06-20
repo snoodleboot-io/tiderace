@@ -113,6 +113,7 @@ fn module_fixture_body_runs_once_function_per_test() {
         eprintln!("SKIP: .riptide-fx-venv not found — run the Phase-3 Lane-0 env gate first");
         return;
     };
+    let _live = fx_support::live_guard(); // serialize corpus-launching scenarios (env isolation)
 
     // Oracle: stock pytest over the corpus, parsed scope-count probe.
     let oracle = run_pytest_oracle(&python);
@@ -364,6 +365,7 @@ fn forked_child_gets_fresh_sqlite_connection() {
         eprintln!("SKIP: .riptide-fx-venv not found — run the Phase-3 Lane-0 env gate first");
         return;
     };
+    let _live = fx_support::live_guard(); // serialize corpus-launching scenarios (env isolation)
 
     // The two sqlite-resource tests must both pass under fork (each child reopens the
     // connection and sees the seeded rows): if a child wrongly inherited the parent's
@@ -414,6 +416,7 @@ fn subprocess_worker_outcomes_and_teardown_match_fork() {
         eprintln!("SKIP: .riptide-fx-venv not found — run the Phase-3 Lane-0 env gate first");
         return;
     };
+    let _live = fx_support::live_guard(); // serialize corpus-launching scenarios (env isolation)
 
     let fork_results = sorted_outcomes(run_engine_on_corpus(&python, /* fork */ true));
     let subprocess_results = sorted_outcomes(run_engine_on_corpus(&python, /* fork */ false));
@@ -469,7 +472,11 @@ fn run_engine_on_corpus(
             .expect("launch fork worker");
         worker.run(&items).expect("fork run")
     } else {
-        let mut worker = SubprocessWorker::new(5_000, num_cpus_or_one());
+        let mut worker = SubprocessWorker::new(5_000, num_cpus_or_one()).with_target(
+            python.to_str().unwrap(),
+            &shim_path(),
+            &root,
+        );
         worker.run(&items).expect("subprocess run")
     }
 }

@@ -1,55 +1,180 @@
 //! `SubprocessWorker` (W12) — the no-COW fallback `Worker` for Windows / `--no-fork` / fork-unsafe
 //! stacks (design 05 §7, ADR-E008).
 //!
-//! With no COW it cannot inherit snapshot state, so it takes the no-COW path: re-run the batch's
-//! **wider-than-Function** scope setup **once per worker**, run each test's Function setup/body/
-//! teardown sequentially, then run wider-scope finalizers **once** at batch end. It is required to
-//! be **result-identical** to the fork path (the contract invariant verified at §8 boundary 3).
+//! With no COW it cannot inherit snapshot state, so it takes the no-COW path: a warm `python`+shim
+//! process runs the batch's **wider-than-Function** scope setup **once** (in-process, not snapshotted),
+//! runs each test's Function setup/body/teardown **in that same process** (no fork), and runs the
+//! wider-scope finalizers **once** at batch end. Because it drives the *same* fixture engine as the
+//! fork path (the shim's `--no-fork` mode), it is **result-identical** to `ForkWorker` — the contract
+//! invariant verified at §8 boundary 3.
 //!
-//! **Contract seam.** Struct shape + `Worker` impl + `capabilities` signature frozen here; the
-//! no-COW execution logic is implemented by Lane FALLBACK (subagent fb-subproc).
+//! Phase 3 executes the batch sequentially in a single no-fork wellspring (the no-COW path's
+//! *correctness* is the deliverable; `pool_size`-way partitioning for throughput is a Phase 6
+//! scheduling concern — adding it is a pure extension).
 
-use crate::domain::{TestItem, TestResult};
-use crate::error::Result;
+use std::io::BufReader;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::Instant;
+
+use serde_json::Value;
+
+use crate::domain::{Outcome, TestItem, TestResult};
+use crate::error::{EngineError, Result};
+use crate::exec::shim_protocol::{read_frame, write_frame, ExecRequest, ExecResponse};
 use crate::exec::worker::Worker;
 use crate::exec::worker_caps::WorkerCaps;
 
-/// No-fork fallback executor: a warm `python`+shim process pool, scope setup re-run per worker.
-// `deadline_ms` is written by `new` and read by the no-COW execution loop Lane FALLBACK
-// (fb-subproc) fills in; allowed dead until that scaffold is replaced (W12).
-#[allow(dead_code)]
+/// No-fork fallback executor: a warm `python`+shim process, scope setup re-run (not snapshotted).
 #[derive(Debug)]
 pub struct SubprocessWorker {
-    /// Per-test wall-clock budget (ms) before `kill_tree` and an `Outcome::Error`.
+    /// Per-test wall-clock budget (ms) before an `Outcome::Error`.
     deadline_ms: u64,
-    /// Pool size (warm worker processes); also the parallel-test ceiling advertised in caps.
+    /// Pool size (advertised parallel-test ceiling). Phase 3 runs sequentially; see module docs.
     pool_size: usize,
+    /// The interpreter, shim, and corpus root to launch against (set via [`Self::with_target`]).
+    target: Option<Target>,
+}
+
+#[derive(Debug, Clone)]
+struct Target {
+    python: String,
+    shim: PathBuf,
+    root: PathBuf,
 }
 
 impl SubprocessWorker {
     /// Construct a fallback worker with a deadline and pool size.
-    ///
-    /// Defined (trivial field init) so lanes/tests can construct one without a scaffold.
     pub fn new(deadline_ms: u64, pool_size: usize) -> Self {
         Self {
             deadline_ms,
             pool_size,
+            target: None,
         }
     }
 
+    /// Point the worker at an interpreter + shim + corpus root (the no-COW analogue of
+    /// [`crate::exec::ForkWorker::launch`]'s arguments). Required before [`Worker::run`].
+    pub fn with_target(mut self, python: impl Into<String>, shim: &Path, root: &Path) -> Self {
+        self.target = Some(Target {
+            python: python.into(),
+            shim: shim.to_path_buf(),
+            root: root.to_path_buf(),
+        });
+        self
+    }
+
     /// Advertise no-COW capabilities so the scheduler prefers larger batches / pure-LPT balancing.
-    ///
-    /// Defined (pure derivation) — `supports_cow == false` is the load-bearing fact and is not a
-    /// lane decision.
     pub fn capabilities(&self) -> WorkerCaps {
         WorkerCaps::subprocess(self.pool_size)
+    }
+
+    /// Launch the no-fork wellspring (`python <shim> <root> --no-fork`) and complete the handshake.
+    fn launch(target: &Target) -> Result<NoForkProc> {
+        let mut child = Command::new(&target.python)
+            .arg(&target.shim)
+            .arg(&target.root)
+            .arg("--no-fork")
+            // Pin native thread pools (threaded BLAS/OMP is a hazard even without fork).
+            .env("OPENBLAS_NUM_THREADS", "1")
+            .env("OMP_NUM_THREADS", "1")
+            .env("MKL_NUM_THREADS", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|e| EngineError::Exec(format!("failed to launch subprocess worker: {e}")))?;
+
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| EngineError::Exec("subprocess worker stdin unavailable".into()))?;
+        let mut stdout = BufReader::new(
+            child
+                .stdout
+                .take()
+                .ok_or_else(|| EngineError::Exec("subprocess worker stdout unavailable".into()))?,
+        );
+        let ready: Value = read_frame(&mut stdout)?
+            .ok_or_else(|| EngineError::Exec("subprocess worker sent no ready frame".into()))?;
+        if ready.get("ready").and_then(Value::as_bool) != Some(true) {
+            return Err(EngineError::Exec(format!(
+                "subprocess worker failed to warm: {ready}"
+            )));
+        }
+        Ok(NoForkProc {
+            child,
+            stdin: Some(stdin),
+            stdout,
+        })
     }
 }
 
 impl Worker for SubprocessWorker {
-    fn run(&mut self, _items: &[TestItem]) -> Result<Vec<TestResult>> {
-        unimplemented!(
-            "LANE: Lane FALLBACK (fb-subproc) implements SubprocessWorker::run — W12 (no-COW scope re-run, result-identical to fork)"
-        )
+    fn run(&mut self, items: &[TestItem]) -> Result<Vec<TestResult>> {
+        let target = self.target.clone().ok_or_else(|| {
+            EngineError::Exec("SubprocessWorker has no target; call with_target".into())
+        })?;
+        let mut proc = SubprocessWorker::launch(&target)?;
+        let mut results = Vec::with_capacity(items.len());
+        for item in items {
+            let req = ExecRequest::bare(item.node_id.as_str(), item.style.wire(), self.deadline_ms);
+            let start = Instant::now();
+            let resp: ExecResponse = proc.run_one(&req)?;
+            let duration_ms = start.elapsed().as_millis() as u64;
+            results.push(TestResult::new(
+                item.node_id.clone(),
+                Outcome::from_wire(&resp.outcome),
+                duration_ms,
+                resp.detail,
+            ));
+        }
+        Ok(results)
+    }
+}
+
+/// A live no-fork wellspring process + its pipe (mirrors `Wellspring`, minus the fork).
+struct NoForkProc {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl NoForkProc {
+    fn run_one(&mut self, req: &ExecRequest) -> Result<ExecResponse> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| EngineError::Exec("subprocess worker already shut down".into()))?;
+        write_frame(stdin, req)?;
+        read_frame(&mut self.stdout)?
+            .ok_or_else(|| EngineError::Exec("subprocess worker closed mid-run".into()))
+    }
+}
+
+impl Drop for NoForkProc {
+    fn drop(&mut self) {
+        drop(self.stdin.take()); // EOF → shim exits + runs wider-scope finalizers once
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capabilities_report_no_cow() {
+        let caps = SubprocessWorker::new(5_000, 4).capabilities();
+        assert!(!caps.supports_cow, "the fallback path has no COW");
+        assert_eq!(caps.max_parallel, 4);
+    }
+
+    #[test]
+    fn run_without_target_is_an_error_not_a_panic() {
+        let mut w = SubprocessWorker::new(5_000, 1);
+        assert!(
+            w.run(&[]).is_err(),
+            "no target → typed error, never a panic"
+        );
     }
 }
