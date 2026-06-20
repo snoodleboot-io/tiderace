@@ -1,9 +1,8 @@
 use std::path::Path;
-use std::time::Instant;
 
-use crate::domain::{Outcome, TestItem, TestResult};
+use crate::domain::{TestItem, TestResult};
 use crate::error::Result;
-use crate::exec::shim_protocol::ExecRequest;
+use crate::exec::transport::run_batch;
 use crate::exec::wellspring::Wellspring;
 use crate::exec::worker::Worker;
 
@@ -36,19 +35,7 @@ impl ForkWorker {
 
 impl Worker for ForkWorker {
     fn run(&mut self, items: &[TestItem]) -> Result<Vec<TestResult>> {
-        let mut results = Vec::with_capacity(items.len());
-        for item in items {
-            let req = ExecRequest::bare(item.node_id.as_str(), item.style.wire(), self.deadline_ms);
-            let start = Instant::now();
-            let resp = self.wellspring.run_one(&req)?;
-            let duration_ms = start.elapsed().as_millis() as u64;
-            results.push(TestResult::new(
-                item.node_id.clone(),
-                Outcome::from_wire(&resp.outcome),
-                duration_ms,
-                resp.detail,
-            ));
-        }
-        Ok(results)
+        let deadline_ms = self.deadline_ms;
+        run_batch(self.wellspring.transport_mut(), items, deadline_ms)
     }
 }

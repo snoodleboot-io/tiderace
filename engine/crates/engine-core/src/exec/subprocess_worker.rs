@@ -14,14 +14,11 @@
 
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::time::Instant;
+use std::process::{Child, Command, Stdio};
 
-use serde_json::Value;
-
-use crate::domain::{Outcome, TestItem, TestResult};
+use crate::domain::{TestItem, TestResult};
 use crate::error::{EngineError, Result};
-use crate::exec::shim_protocol::{read_frame, write_frame, ExecRequest, ExecResponse};
+use crate::exec::transport::{run_batch, Live, PipeTransport, ShimTransport};
 use crate::exec::worker::Worker;
 use crate::exec::worker_caps::WorkerCaps;
 
@@ -88,24 +85,14 @@ impl SubprocessWorker {
             .stdin
             .take()
             .ok_or_else(|| EngineError::Exec("subprocess worker stdin unavailable".into()))?;
-        let mut stdout = BufReader::new(
-            child
-                .stdout
-                .take()
-                .ok_or_else(|| EngineError::Exec("subprocess worker stdout unavailable".into()))?,
-        );
-        let ready: Value = read_frame(&mut stdout)?
-            .ok_or_else(|| EngineError::Exec("subprocess worker sent no ready frame".into()))?;
-        if ready.get("ready").and_then(Value::as_bool) != Some(true) {
-            return Err(EngineError::Exec(format!(
-                "subprocess worker failed to warm: {ready}"
-            )));
-        }
-        Ok(NoForkProc {
-            child,
-            stdin: Some(stdin),
-            stdout,
-        })
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| EngineError::Exec("subprocess worker stdout unavailable".into()))?;
+
+        let mut transport = PipeTransport::new(stdin, BufReader::new(stdout));
+        transport.ready()?;
+        Ok(NoForkProc { child, transport })
     }
 }
 
@@ -115,45 +102,19 @@ impl Worker for SubprocessWorker {
             EngineError::Exec("SubprocessWorker has no target; call with_target".into())
         })?;
         let mut proc = SubprocessWorker::launch(&target)?;
-        let mut results = Vec::with_capacity(items.len());
-        for item in items {
-            let req = ExecRequest::bare(item.node_id.as_str(), item.style.wire(), self.deadline_ms);
-            let start = Instant::now();
-            let resp: ExecResponse = proc.run_one(&req)?;
-            let duration_ms = start.elapsed().as_millis() as u64;
-            results.push(TestResult::new(
-                item.node_id.clone(),
-                Outcome::from_wire(&resp.outcome),
-                duration_ms,
-                resp.detail,
-            ));
-        }
-        Ok(results)
+        run_batch(&mut proc.transport, items, self.deadline_ms)
     }
 }
 
-/// A live no-fork wellspring process + its pipe (mirrors `Wellspring`, minus the fork).
+/// A live no-fork wellspring process + its framed pipe (mirrors `Wellspring`, minus the fork).
 struct NoForkProc {
     child: Child,
-    stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
-}
-
-impl NoForkProc {
-    fn run_one(&mut self, req: &ExecRequest) -> Result<ExecResponse> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| EngineError::Exec("subprocess worker already shut down".into()))?;
-        write_frame(stdin, req)?;
-        read_frame(&mut self.stdout)?
-            .ok_or_else(|| EngineError::Exec("subprocess worker closed mid-run".into()))
-    }
+    transport: Live,
 }
 
 impl Drop for NoForkProc {
     fn drop(&mut self) {
-        drop(self.stdin.take()); // EOF → shim exits + runs wider-scope finalizers once
+        self.transport.close_input(); // EOF → shim exits + runs wider-scope finalizers once
         let _ = self.child.wait();
     }
 }

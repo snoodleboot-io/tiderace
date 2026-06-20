@@ -1,19 +1,18 @@
 use std::io::BufReader;
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-
-use serde_json::Value;
+use std::process::{Child, Command, Stdio};
 
 use crate::error::{EngineError, Result};
-use crate::exec::shim_protocol::{read_frame, write_frame, ExecRequest, ExecResponse};
+use crate::exec::shim_protocol::{ExecRequest, ExecResponse};
+use crate::exec::transport::{Live, PipeTransport, ShimTransport};
 
 /// A warm Python parent process: imports the project once, then forks a pristine copy-on-write
-/// child per test (ADR-E003). Owns the Rust↔shim pipe.
+/// child per test (ADR-E003). Owns the Rust↔shim [`PipeTransport`].
 pub struct Wellspring {
     child: Child,
-    /// `Option` so [`Drop`] can close stdin (→ shim EOF/exit) *before* reaping, avoiding deadlock.
-    stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
+    /// The framed pipe to the shim. Its write half is closed on [`Drop`] (→ shim EOF/exit) *before*
+    /// the child is reaped, avoiding a shutdown deadlock.
+    transport: Live,
     pid: i64,
 }
 
@@ -42,22 +41,14 @@ impl Wellspring {
             .stdout
             .take()
             .ok_or_else(|| EngineError::Exec("wellspring stdout unavailable".into()))?;
-        let mut stdout = BufReader::new(stdout);
 
-        let ready: Value = read_frame(&mut stdout)?
-            .ok_or_else(|| EngineError::Exec("wellspring sent no ready frame".into()))?;
-        if ready.get("ready").and_then(Value::as_bool) != Some(true) {
-            return Err(EngineError::Exec(format!(
-                "wellspring failed to warm: {ready}"
-            )));
-        }
-        let pid = ready.get("pid").and_then(Value::as_i64).unwrap_or(-1);
+        let mut transport = PipeTransport::new(stdin, BufReader::new(stdout));
+        let ready = transport.ready()?;
 
         Ok(Self {
             child,
-            stdin: Some(stdin),
-            stdout,
-            pid,
+            transport,
+            pid: ready.pid,
         })
     }
 
@@ -68,20 +59,19 @@ impl Wellspring {
 
     /// Run one test; the shim forks a pristine child to execute it.
     pub fn run_one(&mut self, req: &ExecRequest) -> Result<ExecResponse> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| EngineError::Exec("wellspring already shut down".into()))?;
-        write_frame(stdin, req)?;
-        read_frame(&mut self.stdout)?
-            .ok_or_else(|| EngineError::Exec("wellspring closed mid-run".into()))
+        self.transport.exchange(req)
+    }
+
+    /// The shim transport, for the batch run loop ([`crate::exec::transport::run_batch`]).
+    pub(crate) fn transport_mut(&mut self) -> &mut Live {
+        &mut self.transport
     }
 }
 
 impl Drop for Wellspring {
     fn drop(&mut self) {
         // Close stdin first (EOF → shim exits cleanly), THEN reap — order matters to avoid a hang.
-        drop(self.stdin.take());
+        self.transport.close_input();
         let _ = self.child.wait();
     }
 }
