@@ -63,6 +63,16 @@ disappears, `fork()` is retained only where it earns isolation. This is the genu
 execution path. It is **flagged for human ratification** and should land as its own follow-up once the
 seam (above) has proven out.
 
+**Feasibility: proven (GO).** A throwaway PyO3 0.23 spike ([`spike-inproc/`](../../../../../spike-inproc/RESULTS.md),
+not in engine-core) embeds one CPython 3.11.15 and, by FFI, runs `pytest.main(...)` and a `unittest`
+suite in-process — verdicts extracted as Rust values, the exact `exchange` shape. Critically it imports
+and hammers **`_decimal`**, the precise single-phase-init C-ext that core-dumped ADR-010's
+*subinterpreters*, with **no crash** — confirming that hazard is multi-interpreter-only. The ADR-010
+"missing headers" wall was incidental (a uv standalone ships `libpython` + headers, no sudo).
+**The open question ② must answer is therefore NOT "can we embed" (yes) but "isolation under an embedded
+interpreter"** — fork-from-embedded (retain the watermark model) vs. per-test module reset. ② replaces
+the pipe/JSON *control plane*, not the fork-based *isolation*.
+
 ### Not the subinterpreter path
 
 [ADR-010](../../../../../docs/design/decisions.md) rejected **N PEP-684 subinterpreters per process**
