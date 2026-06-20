@@ -8,21 +8,25 @@
 ADR-010 rejected **N PEP-684 subinterpreters per process** — single-phase-init C extensions
 (`_decimal`, numpy, pandas, …) corrupt/segfault when a *second* interpreter re-inits them. ② is a
 **different** shape: **one** main interpreter, embedded via PyO3, with the Rust↔Python control plane as
-**FFI calls returning native values** instead of JSON frames over pipes. The spike asks one question:
-*does one embedded interpreter, hosted by Rust, run pytest AND the C-ext that crashed subinterpreters?*
+**FFI calls returning native values** instead of JSON frames over pipes.
+
+**No pytest.** Per [ADR-E001](../planning/current/pure-rust-test-engine/design/adr/ADR-E001-pure-rust-engine-no-pytest.md)
+the Rust side *is* the framework; CPython only executes user test/fixture *bodies*. So the spike drives
+riptide's OWN executor — import the module, call the bare `test_*` object, catch `AssertionError` —
+exactly what `engine/py-shim/shim.py` does today, just in-process. The question: *does one embedded
+interpreter, hosted by Rust, run riptide's own executor AND the C-ext that crashed subinterpreters?*
 
 ## How to reproduce
 
 ```bash
-# A CPython that ships libpython + headers (uv standalone 3.11.15 here); a venv on it for pytest.
+# A CPython that ships libpython + headers (uv standalone 3.11.15 here). No pytest needed —
+# the native executor uses only stdlib (importlib, unittest, _decimal).
 BASE=.../uv/python/cpython-3.11.15-linux-x86_64-gnu
-"$BASE/bin/python3" -m venv /tmp/inproc-spike-venv && /tmp/inproc-spike-venv/bin/pip install pytest
+"$BASE/bin/python3" -m venv /tmp/inproc-spike-venv     # venv just gives PyO3 a clean prefix
 
 cd spike-inproc
 RUSTFLAGS="-L native=$BASE/lib" PYO3_PYTHON=/tmp/inproc-spike-venv/bin/python cargo build
-LD_LIBRARY_PATH="$BASE/lib" \
-  PYTHONPATH=/tmp/inproc-spike-venv/lib/python3.11/site-packages \
-  ./target/debug/inproc-spike
+LD_LIBRARY_PATH="$BASE/lib" ./target/debug/inproc-spike
 ```
 
 ## Result (exit 0)
@@ -32,16 +36,21 @@ LD_LIBRARY_PATH="$BASE/lib" \
 [A] _decimal C-ext in-process (ADR-010's segfault module):
     Decimal(1.1)+Decimal(2.2) = 3.3
     5000-term Decimal reduction → 29-digit result, NO crash ✓
-[B1] in-process unittest → Rust values: ran=3 failed=1 errored=0
-[B2] in-process pytest.main(["-q", ...]) → exit code 0 (0 = all passed)
+[B1] in-process unittest.TestCase.run() → Rust values: ran=3 failed=1 errored=0
+[B2] riptide native executor in-process (NO pytest) → Rust values:
+     test_addition          passed
+     test_intentional_fail  failed  (sum is 6, not 7)
+     test_upper             passed
 === VERDICT: GO ===
 ```
 
 ## What this proves
 
-- **PyO3 embeds one CPython and Rust drives it by FFI** — `pytest.main(...)` and a `unittest` suite run
-  *as function calls*, and their verdicts come back as **Rust values** (ints), not bytes over a pipe.
-  This is exactly the `InProcessTransport::exchange` shape ② plugs behind the `ShimTransport` seam.
+- **PyO3 embeds one CPython and Rust drives riptide's OWN executor by FFI — no pytest.** Rust imports the
+  user module and calls the bare `test_*` bodies (catching `AssertionError`), exactly as
+  `engine/py-shim/shim.py` does, and the per-test `(name, outcome, detail)` come back as **Rust values**,
+  not bytes over a pipe. This is the `InProcessTransport::exchange` shape ② plugs behind `ShimTransport`.
+  Stdlib `unittest.TestCase.run()` is driven the same way (ADR-E001's unittest path).
 - **ADR-010's failure mode does not occur with one interpreter.** `_decimal` — the precise module that
   produced `mpd_setminalloc ... a second time → munmap_chunk(): invalid pointer → core dump` under
   subinterpreters — imports and runs heavy arithmetic with no crash. The single-phase-init hazard is a
