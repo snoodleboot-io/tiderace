@@ -16,39 +16,49 @@ exactly what doesn't — so the next build items are **data-driven**, not guesse
 python3 conformance.py vendor/click vendor/cachetools
 ```
 
-## Results (first pass)
+## Results
 
-| repo | pin | test files | mapped | can't-map | auto-map |
-|---|---|---:|---:|---:|---:|
-| pallets/click | `8.1.7` (874ca2b) | 21 | 101 | 43 | **70%** |
-| tkem/cachetools | `v5.5.0` (6c78a8f) | 12 | 0 | 0 | n/a |
+| repo | pin | test files | mapped | can't-map | auto-map (first pass) | auto-map (post-B1) |
+|---|---|---:|---:|---:|---:|---:|
+| pallets/click | `8.1.7` (874ca2b) | 21 | 134 | 10 | 70% | **93%** |
+| tkem/cachetools | `v5.5.0` (6c78a8f) | 12 | 0 | 0 | n/a | n/a |
 
 **cachetools is a pure `unittest.TestCase` suite** — *nothing pytest-specific to migrate*. riptide
 already drives it via stdlib `unittest.TestCase.run()` (ADR-E001), so it runs **as-is, no migration**.
 Useful confirmation that the unittest path needs no surface work.
 
-**click — can't-map distribution (43 total):**
+### B1 delivered — native builtin resources (2026-06-21)
+
+`riptide.builtins` (`MonkeyPatch`/`TmpPath`/`Capsys`/`Capfd`) now ships and `migrate` maps the five
+builtin requests to typed params + injects `from riptide.builtins import …` (see
+[`engine/py-riptide/riptide/builtins/`](../engine/py-riptide/riptide/builtins/), proof
+[`proof_n5_builtins.py`](../engine/py-riptide/proof_n5_builtins.py)). The shim auto-registers them
+globally, so they resolve by type (the migrated form) or by name (the pytest form).
+
+**Measured effect on click:** `70% → 93%` auto-map; can't-map `43 → 10`. The entire **pytest-builtin
+bucket (33) is gone** — `monkeypatch` 21 · `tmp_path` 4 · `capfd` 4 · `capsys` 2 · `tmpdir` 2 all map
+now (`tmpdir` mapped with a py.path caveat).
+
+**click — remaining can't-map distribution (10 total):**
 
 | category | count | share |
 |---|---:|---:|
-| pytest builtin | 33 | 77% |
-| usefixtures | 6 | 14% |
-| untyped provider | 3 | 7% |
-| request introspection | 1 | 2% |
-
-**Which builtins (the 33):** `monkeypatch` 21 · `tmp_path` 4 · `capfd` 4 · `capsys` 2 · `tmpdir` 2.
-`monkeypatch` + `tmp_path` alone are **25/33 (76%)** of builtin blockers.
+| usefixtures | 6 | 60% |
+| untyped provider | 3 | 30% |
+| request introspection | 1 | 10% |
 
 ## Conclusion → next build item (data-driven)
 
-The dominant migration blocker is **pytest builtins**, and within them **`monkeypatch`** (64% of builtin
-blockers; ~49% of *all* click can't-map). So the next increment is **native riptide builtin resources**,
-ordered by this data:
+The builtin blocker is **eliminated**. The remaining click gaps are exactly the next-ranked Track-B
+items, now the dominant share:
 
-1. `monkeypatch` (21) → 2. `tmp_path` (4) → 3. `capfd`/`capsys` (6) → 4. `tmpdir` (2, legacy alias)
+1. **`usefixtures` (6, 60%)** — B2: native `@riptide.uses(Provider)` / autouse mapping.
+2. **untyped provider (3, 30%)** — B3: infer a provider's type from its body when the annotation is
+   absent.
+3. request introspection (1, 10%) — B4: low-priority; decide a narrow native equivalent vs. permanent
+   can't-map.
 
-Shipping the first two would lift click from **70% → ~90%** auto-map; all five → **~95%+**. `usefixtures`
-(14%) is the next surface gap after builtins.
+So the next increment after B1 is **B2 (usefixtures)**, then **B3 (type inference)**.
 
 ## Caveats
 

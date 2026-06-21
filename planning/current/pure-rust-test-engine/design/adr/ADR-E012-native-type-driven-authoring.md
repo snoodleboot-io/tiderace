@@ -147,6 +147,14 @@ dropped):
 - **N4 — `riptide migrate`**: the codemod + mapping table + can't-map report.
 - **N5 — conformance**: migrate a real OSS suite, measure auto-map rate, grow the can't-map list from
   reality.
+- **B1 — native builtin resources** (ROADMAP-v2; delivered 2026-06-21): `riptide.builtins` ships
+  `monkeypatch`/`tmp_path`/`capsys`/`capfd` as ordinary function-scoped yield providers, auto-registered
+  globally by the shim. **Decision — builtins are injected by *distinct* types, not bare stdlib types:**
+  `MonkeyPatch`, `Capsys`, `Capfd`, and `TmpPath(pathlib.Path)` (a real `Path` subclass). A bare `Path`
+  parameter would collide with user providers and wrongly capture *every* `Path` param, which violates
+  the unambiguous-type-DI rule above. `migrate` rewrites builtin requests to typed params + injects the
+  import; `tmpdir` maps to `TmpPath` with a py.path caveat. Measured: click `70% → 93%` auto-map
+  (`conformance/CONFORMANCE.md`).
 
 ## Revisit trigger
 

@@ -49,7 +49,7 @@ one-line ADR/doc note if a decision was made.
 | Native surface (`@provides`/`@cases`/marks, type-DI) | ✅ N1–N4 |
 | `riptide migrate` codemod + report | ✅ |
 | Conformance harness (instrument) | ✅ |
-| **Builtins (monkeypatch/tmp_path/…)** | ⬜ **measured #1 gap** |
+| **Builtins (monkeypatch/tmp_path/…)** | ✅ done (click 70%→93%) |
 | usefixtures, async providers, provider-params | ⬜ |
 | Migration run-through-engine tier | ⬜ |
 | ② in-process/FFI backend | 🟡 spiked GO, design pending |
@@ -124,17 +124,19 @@ one-line ADR/doc note if a decision was made.
 
 ## 3. Track B — Adoption / fidelity gaps
 
-### B1 — Native builtin resources  ⬜  ← **recommended first (data-backed)**
-*Conformance: builtins are **77%** of click's can't-map; `monkeypatch` 21 + `tmp_path` 4 = 76% of those.*
+### B1 — Native builtin resources  ✅ **done (2026-06-21)**
+*Conformance: builtins were **77%** of click's can't-map; `monkeypatch` 21 + `tmp_path` 4 = 76% of those.*
+*Delivered: `engine/py-riptide/riptide/builtins/`; proof `proof_n5_builtins.py`; [ADR-E012](design/adr/ADR-E012-native-type-driven-authoring.md) B1 note.*
 
-- [ ] `riptide.builtins.monkeypatch` — `@provides`-style, function-scoped, **with teardown** (undo on yield-exit)
-  - API: `setattr`/`delattr`/`setitem`/`setenv`/`syspath_prepend`/`chdir`; injected as `mp: MonkeyPatch`
-  - Done: a test mutating env/attr via it is isolated; teardown restores; proof script (no pytest)
-- [ ] `riptide.builtins.tmp_path` — function-scoped `pathlib.Path` to a fresh temp dir (cleaned on teardown)
-- [ ] `capsys` / `capfd` — capture provider returning a `.readouterr()`-shaped object
-- [ ] `tmpdir` — legacy alias over `tmp_path` (py.path-ish), or flag as deprecated
-- [ ] **Teach `migrate`** to map these builtins to the riptide providers (stop flagging them)
-  - Done: re-run conformance → **click auto-map 70% → ~90%** (monkeypatch+tmp_path), ~95% with all five
+- [x] `riptide.builtins.monkeypatch` — `@provides`-style, function-scoped, **with teardown** (undo on yield-exit)
+  - API: `setattr`/`delattr`/`setitem`/`delitem`/`setenv`/`delenv`/`syspath_prepend`/`chdir`; injected as `mp: MonkeyPatch`
+  - Done: proof shows env/attr mutation isolated + teardown restores (no pytest), through the real shim
+- [x] `riptide.builtins.tmp_path` — function-scoped `TmpPath(pathlib.Path)` to a fresh temp dir (cleaned on teardown)
+- [x] `capsys` / `capfd` — `Capsys`/`Capfd` capture providers returning a `.readouterr()` `CaptureResult`
+- [x] `tmpdir` — legacy alias mapped by `migrate` to `TmpPath` (with a py.path caveat)
+- [x] **Teach `migrate`** to map these builtins to the riptide providers (stop flagging them)
+  - Done: re-ran conformance → **click auto-map 70% → 93%** (can't-map 43→10; entire builtin bucket eliminated)
+  - **Decision:** builtins injected by *distinct* types (not bare `pathlib.Path`) to keep type-DI unambiguous
 
 ### B2 — `usefixtures` handling  ⬜  *(14% of click can't-map)*
 - [ ] Native `@riptide.uses(Provider)` (by type) and/or autouse mapping

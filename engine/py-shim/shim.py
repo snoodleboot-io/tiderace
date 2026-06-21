@@ -313,7 +313,20 @@ def _discover(root: str) -> Registry:
         type_index.setdefault(spec.provides, []).append(spec.name)
     for obj, location in native:
         reg.add(_native_fixture_def(obj, location, type_index))
+    _register_builtins(reg)
     return reg
+
+
+def _register_builtins(reg: Registry) -> None:
+    """Register riptide's always-available builtin resources (ROADMAP-v2 B1: monkeypatch/tmp_path/
+    capsys/capfd) at the root location (""), so every test can request them — by type (the migrated
+    form, `mp: MonkeyPatch`) or by name (the pytest form, `monkeypatch`), with no per-tree import."""
+    try:
+        import riptide.builtins as builtins_pkg
+    except Exception:  # noqa: BLE001 — riptide not importable ⇒ no builtins (pure-pytest fallback)
+        return
+    for obj in builtins_pkg.providers():
+        reg.add(_native_fixture_def(obj, "", {}))
 
 
 def _import_conftest(path: str, rel_dir: str):

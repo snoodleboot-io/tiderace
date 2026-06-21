@@ -17,10 +17,23 @@ import ast
 import sys
 from dataclasses import dataclass, field
 
+# pytest builtins riptide now provides natively (ROADMAP-v2 B1): name -> riptide.builtins type. A
+# request for one is rewritten to a typed param (`monkeypatch` -> `monkeypatch: MonkeyPatch`) wired by
+# type, and the matching `from riptide.builtins import ...` is injected. `tmpdir` maps to `TmpPath`
+# (pathlib) — its legacy py.path methods (`.join`, `.strpath`, …) still need a manual port, so it's
+# mapped *with a caveat*, not silently.
+BUILTIN_PROVIDERS = {
+    "monkeypatch": "MonkeyPatch",
+    "tmp_path": "TmpPath",
+    "tmpdir": "TmpPath",
+    "capsys": "Capsys",
+    "capfd": "Capfd",
+}
+
 # pytest builtins riptide has no native equivalent for (yet) — requesting one can't auto-map.
 BUILTIN_FIXTURES = {
-    "request", "tmp_path", "tmp_path_factory", "tmpdir", "tmpdir_factory", "monkeypatch",
-    "capsys", "capfd", "caplog", "recwarn", "pytestconfig", "cache", "doctest_namespace",
+    "request", "tmp_path_factory", "tmpdir_factory",
+    "caplog", "recwarn", "pytestconfig", "cache", "doctest_namespace",
 }
 
 
@@ -120,6 +133,7 @@ class _Migrator(ast.NodeTransformer):
     def __init__(self, fixture_types: dict, report: Report):
         self.fixture_types = fixture_types
         self.report = report
+        self.used_builtins: set = set()  # riptide.builtins type names that need importing
 
     def visit_Import(self, node: ast.Import):
         names = []
@@ -225,6 +239,14 @@ class _Migrator(ast.NodeTransformer):
         for arg in node.args.args:
             if arg.arg not in param_names or arg.arg in ("self", "cls") or arg.annotation is not None:
                 continue
+            if arg.arg in BUILTIN_PROVIDERS:
+                tname = BUILTIN_PROVIDERS[arg.arg]
+                arg.annotation = ast.Name(id=tname, ctx=ast.Load())
+                self.used_builtins.add(tname)
+                caveat = " — port py.path calls (.join/.strpath) to pathlib" if arg.arg == "tmpdir" else ""
+                self.report.mapped(node.lineno, f"builtin `{arg.arg}` → `{arg.arg}: {tname}` "
+                                   f"(riptide.builtins, type-DI) in {node.name}{caveat}")
+                continue
             if arg.arg in BUILTIN_FIXTURES:
                 self.report.cant(node.lineno, f"test `{node.name}` requests pytest builtin `{arg.arg}` — "
                                  "no riptide equivalent yet; provide your own resource")
@@ -255,9 +277,30 @@ def migrate_source(src: str) -> tuple[str, Report]:
     tree = ast.parse(src)
     report = Report()
     fixture_types = _fixture_types(tree)
-    new_tree = _Migrator(fixture_types, report).visit(tree)
+    migrator = _Migrator(fixture_types, report)
+    new_tree = migrator.visit(tree)
+    _inject_builtins_import(new_tree, migrator.used_builtins)
     ast.fix_missing_locations(new_tree)
     return ast.unparse(new_tree), report
+
+
+def _inject_builtins_import(tree: ast.Module, used: set) -> None:
+    """Add `from riptide.builtins import <types>` after the module docstring + any `__future__`
+    imports (which must stay first), so migrated builtin params resolve by type."""
+    if not used:
+        return
+    node = ast.ImportFrom(
+        module="riptide.builtins",
+        names=[ast.alias(name=n, asname=None) for n in sorted(used)],
+        level=0,
+    )
+    idx = 0
+    body = tree.body
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        idx = 1  # keep the module docstring first
+    while idx < len(body) and isinstance(body[idx], ast.ImportFrom) and body[idx].module == "__future__":
+        idx += 1  # `from __future__ import ...` must precede other imports
+    body.insert(idx, node)
 
 
 def format_report(report: Report, path: str = "<source>") -> str:
