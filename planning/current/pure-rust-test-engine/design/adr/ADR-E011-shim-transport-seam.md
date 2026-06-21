@@ -58,7 +58,8 @@ Code style per project conventions: `transport.rs` holds the seam; typed `Engine
 
 `ShimTransport` is the seam a future **`InProcessTransport`** plugs behind with **no `Worker` change**:
 ship the kernel as a compiled extension (PyO3/maturin, abi3) loaded **into one** Python interpreter and
-drive pytest by **function call** instead of pipe frame — the JSON-framing-over-pipes control plane
+drive **riptide's own executor** (calling user test/fixture bodies — never pytest, per ADR-E001) by
+**function call** instead of pipe frame — the JSON-framing-over-pipes control plane
 disappears, `fork()` is retained only where it earns isolation. This is the genuinely "rust-native"
 execution path. It is **flagged for human ratification** and should land as its own follow-up once the
 seam (above) has proven out.
