@@ -8,6 +8,7 @@
 //! Execution ([`exec`]) is wired in the same phase; later phases add fixtures, cache, scheduler,
 //! daemon, and reporters behind the trait seams.
 
+pub mod cache;
 pub mod collection;
 pub mod coverage;
 pub mod domain;

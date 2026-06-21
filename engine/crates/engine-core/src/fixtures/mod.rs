@@ -27,7 +27,7 @@ mod param_value;
 mod scope_layer;
 mod shim_handle;
 
-pub use closure_hash::ClosureHash;
+pub use closure_hash::{ClosureHash, ClosureHasher};
 pub use finalizer::Finalizer;
 pub use fixture::Fixture;
 pub use fixture_args::FixtureArgs;
