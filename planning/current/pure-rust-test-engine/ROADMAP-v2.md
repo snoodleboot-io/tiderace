@@ -78,21 +78,23 @@ one-line ADR/doc note if a decision was made.
 - [ ] **Purity guard** — detect/flag tests that mutate shared (module/session) state across forks
   - Done: a shared-state-mutating test is flagged (design 09); no false positives on the corpus
 
-### Phase 5 — Coverage + cache  ⬜  ← **recommended next spine segment**
+### Phase 5 — Coverage + cache  🟢 **core delivered (2026-06-21)**
 *Designs: [07-cache](design/07-cache.md), [11-coverage-impact](design/11-coverage-impact.md), [13-cross-cutting](design/13-cross-cutting.md); [ADR-E004](design/adr/ADR-E004-content-addressed-cache.md), [ADR-E006](design/adr/ADR-E006-coverage-sys-monitoring.md). Consumes Phase-3 `ClosureHash`.*
+*Commits: `4b83948` (coverage→DepGraph→Impact), `7115a05` (cache). Proof `proof_n6_coverage.py`; integration `tests/cache_impact_integration.rs`.*
 
-- [ ] **Coverage via `sys.monitoring`** (3.12+) with `settrace` fallback (≤3.11)
-  - Per-test line coverage captured in the shim child; streamed to Rust
-  - Done: per-test covered-line sets recorded; differential vs `coverage.py` on the corpus
-- [ ] **`DepGraph`** — file → tests that touch it (built from coverage)
-  - Done: editing one source file yields exactly its dependent tests
-- [ ] **`ImpactAnalyzer`** — select tests by changed files × DepGraph (port/adapt legacy `impact.rs` logic)
-  - Done: warm run with no changes skips all; one change re-runs only impacted (integration test)
-- [ ] **Content-addressed cache** — store + index keyed on Phase-3 `ClosureHash` (+ source hash)
-  - `Cache` trait (ADR-E005 seam), `TieredCache(Local, Remote)`, `NullCache`
-  - Done: identical inputs → cache hit (no re-run); a changed closure → miss
-- [ ] **`SandboxHooks`** — impurity detection (network/fs/clock) to keep cache sound
-  - Done: an impure test is detected and excluded from caching with a clear reason
+- [x] **Coverage via `sys.monitoring`** (3.12+) with `settrace` fallback (≤3.11)
+  - Per-test line coverage captured in the shim child; streamed to Rust (additive `coverage` wire field)
+  - Done: per-test covered-line sets recorded (`proof_n6`); ⏳ remaining: differential vs `coverage.py` on the corpus + flip capture default-on
+- [x] **`DepGraph`** — file → tests that touch it (built from coverage); forward + reverse edges, re-record supersedes
+- [x] **`ImpactAnalyzer`** — select tests by changed files × DepGraph (line-level; supersedes file-only legacy `impact.rs`)
+  - Done: warm run with no changes skips all; one change re-runs only impacted (unit + integration test)
+- [x] **Content-addressed cache** — `CacheKey` over closure (ClosureHash + source-content hash + coverage closure + env)
+  - `Cache` trait (ADR-E005 seam), `TieredCache(Local, Remote)`, `LocalCache`, `NullCache`
+  - Done: identical inputs → hit; changed source/closure/env → miss (15 unit tests)
+- [x] **`SandboxHooks` / `Purity`** — impurity policy seam; impure tests excluded from caching with a reason
+  - Done: `Purity::impure(reason)` is never cached; `NoSandbox` default trusts the coverage closure
+  - ⏳ remaining: actual fs/clock/network *interception* collector (ADR-E004 stage 2, conservative-by-default holds until then)
+- [ ] ⏳ **Live-loop wiring** — cache consult (hit→impact-skip→run) inside the worker loop + source content hashing + DepGraph persistence → lands with the Phase-6 daemon that owns the persistent run loop
 
 ### Phase 6 — Scheduler + daemon  ⬜
 *Designs: [06-scheduler](design/06-scheduler.md), [08-daemon](design/08-daemon.md); [ADR-E007](design/adr/ADR-E007-warm-daemon.md), [ADR-E010](design/adr/ADR-E010-locality-scheduler.md). Consumes Phase-3 `Watermark.rss_bytes` via `MemoryGovernor`.*
