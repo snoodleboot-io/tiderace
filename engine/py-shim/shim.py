@@ -236,6 +236,10 @@ class Registry:
         """`param_name -> provider_name` for a test/provider, wired by type (name fallback)."""
         return _bind_by_type(func, self.by_type)
 
+    def is_provider(self, name) -> bool:
+        """Whether `name` is a discovered provider (vs. a bare test param filled by @cases)."""
+        return name in self.by_name
+
     def resolve(self, name: str, module_key: str) -> FixtureDef | None:
         """Nearest-override: among defs of `name` visible to `module_key`, pick the most specific
         (a same-file module def beats a conftest; a deeper conftest beats a shallower one)."""
@@ -452,7 +456,13 @@ class Engine:
         if skip_reason is not None:  # short-circuit BEFORE any fixture setup
             return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason}
 
-        closure = _closure(self.reg, module_key, requested)
+        # Split requested params: fixtures (resolved by the graph) vs. bare params filled positionally
+        # by @riptide.cases. Without this, a parametrized test's params look like missing fixtures.
+        fixture_requested = {p: t for p, t in requested.items() if self.reg.is_provider(t)}
+        case_params = [p for p in requested if p not in fixture_requested]
+        case_kwargs_list = [dict(zip(case_params, c.values)) for c in self._cases(node_id, style)] or [{}]
+
+        closure = _closure(self.reg, module_key, fixture_requested)
         parametrized = [d for d in closure if d.params]
         if parametrized:
             axes = [[(d.name, p) for p in d.params] for d in parametrized]
@@ -463,18 +473,22 @@ class Engine:
         outcomes: list[tuple[str, str]] = []
         for combo in combos:
             self._sync_wider(closure, node_id)
-            outcomes.append(self._fork_run(node_id, style, requested, closure, combo, deadline_ms))
+            for case_kwargs in case_kwargs_list:
+                outcomes.append(
+                    self._fork_run(node_id, style, fixture_requested, closure, combo, deadline_ms, case_kwargs)
+                )
         outcome, detail = _aggregate(outcomes)
         outcome, detail = _apply_xfail(marks, outcome, detail)
         return {"node_id": node_id, "outcome": outcome, "detail": detail}
 
-    def _fork_run(self, node_id, style, requested, closure, combo, deadline_ms) -> tuple[str, str]:
+    def _fork_run(self, node_id, style, requested, closure, combo, deadline_ms, case_kwargs=None) -> tuple[str, str]:
+        case_kwargs = case_kwargs or {}
         if self.no_fork:
             # No-COW fallback: run the test in THIS process (no isolation, but the same fixture
             # engine → result-identical outcomes; §8 boundary 3). Function fixtures are set up and
             # torn down per test in-process; wider scopes still live once in the parent.
             try:
-                return self._child_exec(node_id, style, requested, closure, combo)
+                return self._child_exec(node_id, style, requested, closure, combo, case_kwargs)
             except BaseException as exc:  # noqa: BLE001 — any in-process test error → Outcome::Error
                 return "error", "".join(traceback.format_exception_only(type(exc), exc))
 
@@ -483,7 +497,7 @@ class Engine:
         if pid == 0:  # ---- CHILD: pristine COW copy with all wider fixtures already warm ----
             os.close(read_fd)
             try:
-                outcome, detail = self._child_exec(node_id, style, requested, closure, combo)
+                outcome, detail = self._child_exec(node_id, style, requested, closure, combo, case_kwargs)
                 os.write(write_fd, json.dumps({"outcome": outcome, "detail": detail[:4000]}).encode())
             except BaseException:  # noqa: BLE001 — never hang the child on the way out
                 pass
@@ -518,9 +532,10 @@ class Engine:
         res = json.loads(data.decode())
         return res["outcome"], res.get("detail", "")
 
-    def _child_exec(self, node_id, style, requested, closure, combo) -> tuple[str, str]:
+    def _child_exec(self, node_id, style, requested, closure, combo, case_kwargs=None) -> tuple[str, str]:
         """In the forked child: set up function-scope fixtures (incl. parametrized + reinit-after-fork
-        resources, which thus get a FRESH handle per child), run the body, tear down in reverse."""
+        resources, which thus get a FRESH handle per child), run the body, tear down in reverse.
+        `case_kwargs` are the @riptide.cases values bound to the test's bare params."""
         module_key = _module_key(node_id)
         local: dict[str, object] = {}
         gens: list = []
@@ -539,6 +554,8 @@ class Engine:
                 local[d.name] = val
                 gens.append(gen)
             test_args = {param: value_of(prov) for param, prov in requested.items()}
+            if case_kwargs:
+                test_args.update(case_kwargs)
             return _invoke(node_id, style, test_args)
         finally:
             for gen in reversed(gens):
@@ -570,6 +587,18 @@ class Engine:
         else:
             func = getattr(module, node_id.partition("::")[2])
         return list(getattr(func, "__riptide_marks__", ()))
+
+    def _cases(self, node_id: str, style: str) -> list:
+        """The native `@riptide.cases` variants on a test, read by attribute. unittest has none."""
+        if style == "unittest_method":
+            return []
+        module = importlib.import_module(_module_name(_module_key(node_id)))
+        if style == "pytest_method":
+            cls, method = _class_method(node_id)
+            func = getattr(getattr(module, cls), method)
+        else:
+            func = getattr(module, node_id.partition("::")[2])
+        return list(getattr(func, "__riptide_cases__", ()))
 
     def teardown_all(self) -> None:
         while self.active:

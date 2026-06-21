@@ -66,6 +66,15 @@ CORPUS = textwrap.dedent(
     @riptide.xfail(reason="fixed now", strict=True)
     def test_xpass_strict():
         assert True                    # unexpected pass under strict → failed
+
+    @riptide.cases([(2, 3, 5), (0, 0, 0)])
+    def test_add(a, b, exp):           # bare params filled by @cases (no fixtures)
+        assert a + b == exp
+
+    @riptide.cases([(1,), (2,)])
+    def test_cases_plus_fixture(n, store: Db):   # @cases AND a type-DI fixture together
+        store.add(n)
+        assert store.count() >= 1
     '''
 )
 
@@ -98,6 +107,8 @@ def main() -> int:
             "test_skip_if": "skipped",
             "test_xfails": "xfail",
             "test_xpass_strict": "failed",  # strict xpass
+            "test_add": "passed",           # both cases pass (worst-wins aggregation)
+            "test_cases_plus_fixture": "passed",  # @cases value + type-DI fixture together
         }
         results = {}
         print("\n[run]")
