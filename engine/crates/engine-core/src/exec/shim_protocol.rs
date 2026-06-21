@@ -47,6 +47,12 @@ impl<'a> ExecRequest<'a> {
 }
 
 /// The child's reported outcome for one test.
+///
+/// **Phase 5 extension (additive, Phase-3 CONTRACT §6).** `coverage` is the per-test executed-source
+/// footprint (`relative_path -> sorted lines`) the shim captures under `--coverage` (ADR-E006); it is
+/// `#[serde(default)]`, so a capture-off response is byte-identical to the Phase 2/3 frame and old
+/// consumers ignore it. Fold it into a [`crate::coverage::CoverageReport`] via
+/// [`crate::coverage::CoverageReport::from_wire`].
 #[derive(Debug, Deserialize)]
 pub struct ExecResponse {
     pub node_id: String,
@@ -54,6 +60,9 @@ pub struct ExecResponse {
     pub outcome: String,
     #[serde(default)]
     pub detail: String,
+    /// Per-test touched source: `relative_path -> sorted line numbers` (empty unless capture is on).
+    #[serde(default)]
+    pub coverage: std::collections::BTreeMap<String, Vec<u32>>,
 }
 
 /// Write a length-prefixed (u32 LE) JSON frame.

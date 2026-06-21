@@ -417,12 +417,78 @@ def _teardown(gen) -> None:
         pass
 
 
+class _Coverage:
+    """Per-test executed-source capture inside the fork child (ADR-E006, design 11). Uses PEP 669
+    `sys.monitoring` LINE events on CPython 3.12+ (disabling each location once seen, so overhead is
+    low enough to leave on), falling back to `sys.settrace` on ≤3.11. Records `{rel_source_path:
+    set(line)}` for `.py` files under `root` — the test's dependency footprint the DepGraph/cache key
+    consume. A no-op when disabled, so the default path is byte-identical to before."""
+
+    _TOOL_ID = 5  # sys.monitoring tool slot (0..5 available); 5 avoids coverage.py/profiler clashes
+
+    def __init__(self, root: str | None, enabled: bool):
+        self.enabled = enabled and root is not None
+        self.root = os.path.abspath(root) if root else ""
+        self.touched: dict[str, set] = {}
+        self._mon = getattr(sys, "monitoring", None) if self.enabled else None
+        self._prev_trace = None
+        self._stopped = False  # makes stop() idempotent (called once for the report, once in finally)
+
+    def _want(self, path: str | None) -> bool:
+        return bool(path) and path.endswith(".py") and os.path.abspath(path).startswith(self.root)
+
+    def start(self) -> None:
+        if not self.enabled:
+            return
+        if self._mon is not None:
+            mon, tid, events = self._mon, self._TOOL_ID, self._mon.events
+
+            def on_line(code, line_no):
+                fn = code.co_filename
+                if self._want(fn):
+                    self.touched.setdefault(os.path.abspath(fn), set()).add(line_no)
+                return mon.DISABLE  # per-location disable ⇒ each line fires at most once (cheap)
+
+            mon.use_tool_id(tid, "riptide")
+            mon.register_callback(tid, events.LINE, on_line)
+            mon.set_events(tid, events.LINE)
+        else:  # ≤3.11 fallback
+            def tracer(frame, event, arg):
+                if event == "line":
+                    fn = frame.f_code.co_filename
+                    if self._want(fn):
+                        self.touched.setdefault(os.path.abspath(fn), set()).add(frame.f_lineno)
+                return tracer
+
+            self._prev_trace = sys.gettrace()
+            sys.settrace(tracer)
+
+    def stop(self) -> dict:
+        if not self.enabled or self._stopped:
+            return self._report() if self.enabled else {}
+        self._stopped = True
+        if self._mon is not None:
+            mon, tid = self._mon, self._TOOL_ID
+            mon.set_events(tid, 0)
+            mon.register_callback(tid, mon.events.LINE, None)
+            mon.free_tool_id(tid)
+        else:
+            sys.settrace(self._prev_trace)
+        return self._report()
+
+    def _report(self) -> dict:
+        return {os.path.relpath(p, self.root): sorted(lines) for p, lines in self.touched.items()}
+
+
 class Engine:
     """Parent-side scope state: wider-than-function fixtures live here, inherited by forked children."""
 
-    def __init__(self, reg: Registry, no_fork: bool = False):
+    def __init__(self, reg: Registry, no_fork: bool = False, root: str | None = None,
+                 coverage: bool = False):
         self.reg = reg
         self.no_fork = no_fork  # no-COW fallback path (SubprocessWorker / Windows / --no-fork)
+        self.root = root  # corpus root, for coverage path relativization
+        self.coverage = coverage  # ADR-E006: capture per-test executed-source footprint
         self.active: list[_Active] = []  # in setup order (widest → narrowest)
 
     def _value(self, name: str, module_key: str):
@@ -484,17 +550,25 @@ class Engine:
             combos = [{}]
 
         outcomes: list[tuple[str, str]] = []
+        coverage: dict[str, set] = {}  # union of touched lines across all variants of this node
         for combo in combos:
             self._sync_wider(closure, node_id)
             for case_kwargs in case_kwargs_list:
-                outcomes.append(
-                    self._fork_run(node_id, style, fixture_requested, closure, combo, deadline_ms, case_kwargs)
-                )
+                oc, detail, cov = self._fork_run(
+                    node_id, style, fixture_requested, closure, combo, deadline_ms, case_kwargs)
+                outcomes.append((oc, detail))
+                for path, lines in cov.items():
+                    coverage.setdefault(path, set()).update(lines)
         outcome, detail = _aggregate(outcomes)
         outcome, detail = _apply_xfail(marks, outcome, detail)
-        return {"node_id": node_id, "outcome": outcome, "detail": detail}
+        resp = {"node_id": node_id, "outcome": outcome, "detail": detail}
+        if coverage:  # additive field (Phase-3 CONTRACT §6); omitted when capture is off/empty
+            resp["coverage"] = {path: sorted(lines) for path, lines in coverage.items()}
+        return resp
 
-    def _fork_run(self, node_id, style, requested, closure, combo, deadline_ms, case_kwargs=None) -> tuple[str, str]:
+    def _fork_run(self, node_id, style, requested, closure, combo, deadline_ms, case_kwargs=None) -> tuple:
+        """Run one (combo, case) variant; returns `(outcome, detail, coverage)` (coverage `{}` unless
+        enabled). The child streams its coverage map back through the result pipe alongside the outcome."""
         case_kwargs = case_kwargs or {}
         if self.no_fork:
             # No-COW fallback: run the test in THIS process (no isolation, but the same fixture
@@ -503,15 +577,19 @@ class Engine:
             try:
                 return self._child_exec(node_id, style, requested, closure, combo, case_kwargs)
             except BaseException as exc:  # noqa: BLE001 — any in-process test error → Outcome::Error
-                return "error", "".join(traceback.format_exception_only(type(exc), exc))
+                return "error", "".join(traceback.format_exception_only(type(exc), exc)), {}
 
         read_fd, write_fd = os.pipe()
         pid = os.fork()
         if pid == 0:  # ---- CHILD: pristine COW copy with all wider fixtures already warm ----
             os.close(read_fd)
             try:
-                outcome, detail = self._child_exec(node_id, style, requested, closure, combo, case_kwargs)
-                os.write(write_fd, json.dumps({"outcome": outcome, "detail": detail[:4000]}).encode())
+                outcome, detail, coverage = self._child_exec(
+                    node_id, style, requested, closure, combo, case_kwargs)
+                payload = {"outcome": outcome, "detail": detail[:4000]}
+                if coverage:
+                    payload["coverage"] = coverage
+                os.write(write_fd, json.dumps(payload).encode())
             except BaseException:  # noqa: BLE001 — never hang the child on the way out
                 pass
             finally:
@@ -527,7 +605,7 @@ class Engine:
                 pass
             os.waitpid(pid, 0)
             os.close(read_fd)
-            return "error", "timeout"
+            return "error", "timeout", {}
         data = b""
         while True:
             chunk = os.read(read_fd, 65536)
@@ -538,17 +616,18 @@ class Engine:
         _, status = os.waitpid(pid, 0)
         if not data:
             if os.WIFSIGNALED(status):
-                return "error", f"child killed by signal {os.WTERMSIG(status)}"
+                return "error", f"child killed by signal {os.WTERMSIG(status)}", {}
             if os.WIFEXITED(status) and os.WEXITSTATUS(status) != 0:
-                return "error", f"child exited {os.WEXITSTATUS(status)}"
-            return "error", "no result from child"
+                return "error", f"child exited {os.WEXITSTATUS(status)}", {}
+            return "error", "no result from child", {}
         res = json.loads(data.decode())
-        return res["outcome"], res.get("detail", "")
+        return res["outcome"], res.get("detail", ""), res.get("coverage", {})
 
-    def _child_exec(self, node_id, style, requested, closure, combo, case_kwargs=None) -> tuple[str, str]:
+    def _child_exec(self, node_id, style, requested, closure, combo, case_kwargs=None) -> tuple:
         """In the forked child: set up function-scope fixtures (incl. parametrized + reinit-after-fork
         resources, which thus get a FRESH handle per child), run the body, tear down in reverse.
-        `case_kwargs` are the @riptide.cases values bound to the test's bare params."""
+        `case_kwargs` are the @riptide.cases values bound to the test's bare params. Returns
+        `(outcome, detail, coverage)` where coverage is `{rel_path: [lines]}` (empty unless enabled)."""
         module_key = _module_key(node_id)
         local: dict[str, object] = {}
         gens: list = []
@@ -558,6 +637,8 @@ class Engine:
                 return local[name]
             return self._value(name, module_key)
 
+        cov = _Coverage(self.root, self.coverage)
+        cov.start()  # capture the per-test footprint: fixture setup + body, this test only (ADR-E006)
         try:
             for d in closure:
                 if d.rank != 0:
@@ -569,8 +650,10 @@ class Engine:
             test_args = {param: value_of(prov) for param, prov in requested.items()}
             if case_kwargs:
                 test_args.update(case_kwargs)
-            return _invoke(node_id, style, test_args)
+            outcome, detail = _invoke(node_id, style, test_args)
+            return outcome, detail, cov.stop()
         finally:
+            cov.stop()  # idempotent — frees the monitoring tool id even if setup raised
             for gen in reversed(gens):
                 _teardown(gen)
 
@@ -692,10 +775,11 @@ def _preimport(root: str) -> None:
 def serve() -> int:
     root = sys.argv[1]
     no_fork = "--no-fork" in sys.argv[2:]
+    coverage = "--coverage" in sys.argv[2:] or os.environ.get("RIPTIDE_COVERAGE") == "1"
     sys.path.insert(0, root)
     _preimport(root)
     reg = _discover(root)
-    engine = Engine(reg, no_fork=no_fork)
+    engine = Engine(reg, no_fork=no_fork, root=root, coverage=coverage)
     _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
     try:
         while True:

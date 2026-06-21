@@ -119,8 +119,7 @@ impl<W: Write, R: Read> ShimTransport for PipeTransport<W, R> {
             .as_mut()
             .ok_or_else(|| EngineError::Exec("shim already shut down".into()))?;
         write_frame(stdin, req)?;
-        read_frame(&mut self.stdout)?
-            .ok_or_else(|| EngineError::Exec("shim closed mid-run".into()))
+        read_frame(&mut self.stdout)?.ok_or_else(|| EngineError::Exec("shim closed mid-run".into()))
     }
 }
 
@@ -188,6 +187,7 @@ mod tests {
                 node_id: req.node_id.to_string(),
                 outcome,
                 detail,
+                coverage: Default::default(),
             })
         }
     }
@@ -247,12 +247,23 @@ mod tests {
             let mut from_engine = BufReader::new(req_r);
             let mut to_engine = resp_w;
             // Handshake first, exactly like the real shim.
-            write_frame(&mut to_engine, &serde_json::json!({"ready": true, "pid": 4242})).unwrap();
-            while let Some(req) =
-                read_frame::<_, Value>(&mut from_engine).expect("read req frame")
+            write_frame(
+                &mut to_engine,
+                &serde_json::json!({"ready": true, "pid": 4242}),
+            )
+            .unwrap();
+            while let Some(req) = read_frame::<_, Value>(&mut from_engine).expect("read req frame")
             {
-                let node = req.get("node_id").and_then(Value::as_str).unwrap().to_string();
-                let outcome = if node.contains("bad") { "failed" } else { "passed" };
+                let node = req
+                    .get("node_id")
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .to_string();
+                let outcome = if node.contains("bad") {
+                    "failed"
+                } else {
+                    "passed"
+                };
                 write_frame(
                     &mut to_engine,
                     &serde_json::json!({"node_id": node, "outcome": outcome, "detail": ""}),

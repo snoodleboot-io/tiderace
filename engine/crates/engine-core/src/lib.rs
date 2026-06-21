@@ -9,9 +9,11 @@
 //! daemon, and reporters behind the trait seams.
 
 pub mod collection;
+pub mod coverage;
 pub mod domain;
 pub mod error;
 pub mod exec;
 pub mod fixtures;
+pub mod impact;
 
 pub use error::EngineError;
