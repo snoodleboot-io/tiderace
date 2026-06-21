@@ -28,13 +28,18 @@ import itertools
 
 from ._errors import RiptideDefinitionError, RiptideError, RiptideResolutionError
 from ._resolve import build_type_index, provided_type, resolve_params
-from ._spec import SCOPES, Case, ProviderSpec
+from ._spec import SCOPES, Case, Mark, ProviderSpec
 
 __all__ = [
     "provides",
     "cases",
+    "skip",
+    "skip_if",
+    "xfail",
+    "tag",
     "ProviderSpec",
     "Case",
+    "Mark",
     "RiptideError",
     "RiptideDefinitionError",
     "RiptideResolutionError",
@@ -77,6 +82,42 @@ def cases(arg=None, *, ids=None, **kwargs):
 
     def deco(fn):
         fn.__riptide_cases__ = _normalize_cases(arg, kwargs, ids)
+        return fn
+
+    return deco
+
+
+def _add_mark(fn, mark: Mark):
+    """Append `mark` to `fn.__riptide_marks__` (creating it), or — when `fn` is None (the decorator was
+    called with arguments) — return a decorator that will."""
+    if fn is None:
+        return lambda f: _add_mark(f, mark)
+    marks = fn.__dict__.setdefault("__riptide_marks__", [])
+    marks.append(mark)
+    return fn
+
+
+def skip(_fn=None, *, reason: str = ""):
+    """Always skip this test — `@riptide.skip` or `@riptide.skip(reason=...)`."""
+    return _add_mark(_fn, Mark(kind="skip", reason=reason))
+
+
+def skip_if(condition, *, reason: str = ""):
+    """Skip when `condition` is truthy — `@riptide.skip_if(sys.platform == 'win32', reason=...)`."""
+    return _add_mark(None, Mark(kind="skip_if", condition=bool(condition), reason=reason))
+
+
+def xfail(_fn=None, *, reason: str = "", strict: bool = False):
+    """Expect failure — a fail/error becomes `xfail`; a pass becomes `xpass` (a failure if `strict`)."""
+    return _add_mark(_fn, Mark(kind="xfail", reason=reason, strict=strict))
+
+
+def tag(*names: str):
+    """Attach selection tag(s) — `@riptide.tag("slow", "db")`. Metadata only; no execution effect."""
+
+    def deco(fn):
+        for n in names:
+            _add_mark(fn, Mark(kind="tag", name=n))
         return fn
 
     return deco

@@ -28,3 +28,16 @@ class Case:
     id: str
     index: int
     values: tuple
+
+
+@dataclass(frozen=True)
+class Mark:
+    """One native mark stamped (appended) onto a test as `__riptide_marks__`. `kind` is the discriminator
+    the shim acts on: `skip`/`skip_if` short-circuit before setup; `xfail` inverts the outcome; `tag` is
+    selection metadata only (the Rust collector filters on it later — no execution effect)."""
+
+    kind: str  # "skip" | "skip_if" | "xfail" | "tag"
+    reason: str = ""
+    condition: bool = True  # skip_if: whether the skip applies
+    strict: bool = False  # xfail: an unexpected pass becomes a failure
+    name: str = ""  # tag: the tag label

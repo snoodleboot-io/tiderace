@@ -34,6 +34,7 @@ import signal
 import struct
 import sys
 import traceback
+import typing
 import unittest
 
 _STDIN = 0
@@ -101,19 +102,32 @@ def _is_ancestor_dir(loc: str, test_dir: str) -> bool:
 
 # --------------------------------------------------------------------------- fixture model
 class FixtureDef:
-    """A discovered fixture definition + the location it was declared at."""
+    """A discovered fixture definition + the location it was declared at.
 
-    __slots__ = ("name", "scope", "params", "autouse", "func", "location", "deps", "is_yield")
+    `bindings` maps each of the function's parameter *names* to the *provider name* that satisfies it.
+    For pytest-authored fixtures the two are identical (name-DI); for riptide-native providers they may
+    differ (the param is wired by **type**, ADR-E012), so callers must build kwargs from `bindings`,
+    not from raw parameter names. `deps` (provider names — the registry keys the closure walks) is
+    derived from the bindings."""
 
-    def __init__(self, name, scope, params, autouse, func, location):
+    __slots__ = (
+        "name", "scope", "params", "autouse", "func", "location", "deps", "is_yield",
+        "bindings", "provides_type",
+    )
+
+    def __init__(self, name, scope, params, autouse, func, location, bindings=None, provides_type=None):
         self.name = name
         self.scope = scope if isinstance(scope, str) else "function"
         self.params = list(params) if params else None
         self.autouse = bool(autouse)
         self.func = func
         self.location = location  # module key ('tests/m.py') for module fixtures, or dir for conftest
-        sig = list(inspect.signature(func).parameters)
-        self.deps = [p for p in sig if p != "request"]
+        self.provides_type = provides_type  # native: the type this provider is injected by (else None)
+        if bindings is None:
+            sig = list(inspect.signature(func).parameters)
+            bindings = {p: p for p in sig if p != "request"}  # pytest/name-DI: identity
+        self.bindings = bindings  # param_name -> provider_name
+        self.deps = list(bindings.values())
         self.is_yield = inspect.isgeneratorfunction(func)
 
     @property
@@ -138,6 +152,61 @@ def _is_fixture(obj) -> bool:
     return hasattr(obj, "_fixture_function_marker") and hasattr(obj, "_fixture_function")
 
 
+def _is_native_provider(obj) -> bool:
+    """A riptide-native provider (ADR-E012) — carries the riptide-owned marker, not pytest's."""
+    return hasattr(obj, "__riptide_provider__")
+
+
+def _safe_type_hints(func) -> dict:
+    try:
+        return typing.get_type_hints(func, include_extras=True)
+    except Exception:  # noqa: BLE001 — an unresolved annotation ⇒ treat as untyped (name fallback)
+        return {}
+
+
+def _provider_for_type(annotation, type_index: dict):
+    """The single provider name registered for `annotation`'s type, or None (0 or >1 ⇒ name fallback).
+    `Annotated[T, "name"]` disambiguates. Strict ambiguity errors are the `riptide` package's job at
+    author time; the shim stays lenient so mixed/compat suites keep running."""
+    key, want = annotation, None
+    if typing.get_origin(annotation) is typing.Annotated:
+        key, *meta = typing.get_args(annotation)
+        want = next((m for m in meta if isinstance(m, str)), None)
+    candidates = list(type_index.get(key, ()))
+    if want is not None:
+        candidates = [c for c in candidates if c == want]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _bind_by_type(func, type_index: dict) -> dict:
+    """`param_name -> provider_name`, wired by TYPE (ADR-E012). Falls back to the param *name* when the
+    parameter is untyped or its type has no unique provider — which makes pytest-authored suites
+    (untyped fixture args, empty type index) resolve exactly as before."""
+    hints = _safe_type_hints(func)
+    out = {}
+    for pname in inspect.signature(func).parameters:
+        if pname in ("self", "cls", "request"):
+            continue
+        annotation = hints.get(pname)
+        provider = _provider_for_type(annotation, type_index) if annotation is not None else None
+        out[pname] = provider if provider is not None else pname
+    return out
+
+
+def _native_fixture_def(obj, location: str, type_index: dict) -> FixtureDef:
+    spec = obj.__riptide_provider__
+    return FixtureDef(
+        name=spec.name,
+        scope=spec.scope,
+        params=None,  # native parametrization is test-level (@riptide.cases), not provider-level
+        autouse=spec.autouse,
+        func=obj,
+        location=location,
+        bindings=_bind_by_type(obj, type_index),  # provider→provider deps, by type
+        provides_type=spec.provides,
+    )
+
+
 def _fixture_def(obj, location: str) -> FixtureDef:
     marker = obj._fixture_function_marker
     return FixtureDef(
@@ -156,9 +225,16 @@ class Registry:
 
     def __init__(self):
         self.by_name: dict[str, list[FixtureDef]] = {}
+        self.by_type: dict[type, list[str]] = {}  # native: provided-type -> [provider name]
 
     def add(self, fdef: FixtureDef) -> None:
         self.by_name.setdefault(fdef.name, []).append(fdef)
+        if fdef.provides_type is not None:
+            self.by_type.setdefault(fdef.provides_type, []).append(fdef.name)
+
+    def bind_params(self, func) -> dict:
+        """`param_name -> provider_name` for a test/provider, wired by type (name fallback)."""
+        return _bind_by_type(func, self.by_type)
 
     def resolve(self, name: str, module_key: str) -> FixtureDef | None:
         """Nearest-override: among defs of `name` visible to `module_key`, pick the most specific
@@ -198,6 +274,7 @@ class Registry:
 
 def _discover(root: str) -> Registry:
     reg = Registry()
+    native: list[tuple] = []  # (provider obj, location) — resolved in a second pass (see below)
     for current, _dirs, files in sorted(os.walk(root)):
         rel_dir = os.path.relpath(current, root)
         rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
@@ -219,8 +296,19 @@ def _discover(root: str) -> Registry:
             if module is None:
                 continue
             for obj in vars(module).values():
-                if _is_fixture(obj):
+                if _is_native_provider(obj):  # native-first (ADR-E012); pytest is compat fallback
+                    native.append((obj, location))
+                elif _is_fixture(obj):
                     reg.add(_fixture_def(obj, location))
+
+    # Native providers wire by type, so provider→provider deps need the FULL type set first: build the
+    # type index, then build the defs (a two-pass the name-DI pytest path doesn't need).
+    type_index: dict = {}
+    for obj, _loc in native:
+        spec = obj.__riptide_provider__
+        type_index.setdefault(spec.provides, []).append(spec.name)
+    for obj, location in native:
+        reg.add(_native_fixture_def(obj, location, type_index))
     return reg
 
 
@@ -237,9 +325,10 @@ def _import_conftest(path: str, rel_dir: str):
 
 
 # --------------------------------------------------------------------------- closure
-def _closure(reg: Registry, module_key: str, requested: list[str]) -> list[FixtureDef]:
+def _closure(reg: Registry, module_key: str, requested: dict) -> list[FixtureDef]:
     """Resolved fixture closure for a test, dependencies-before-dependents (topo). Includes
-    requested fixtures, all in-scope autouse fixtures, and their transitive deps."""
+    requested fixtures (the provider names of `requested`'s param→provider bindings), all in-scope
+    autouse fixtures, and their transitive deps."""
     ordered: list[FixtureDef] = []
     seen: set[str] = set()
     visiting: set[str] = set()
@@ -260,8 +349,8 @@ def _closure(reg: Registry, module_key: str, requested: list[str]) -> list[Fixtu
 
     for d in reg.autouse_for(module_key):
         visit(d.name)
-    for name in requested:
-        visit(name)
+    for provider_name in requested.values():
+        visit(provider_name)
     return ordered
 
 
@@ -344,7 +433,8 @@ class Engine:
             key = _instance_key(d, node_id)
             if key in live:
                 continue
-            args = {dep: self._value(dep, _module_key(node_id)) for dep in d.deps}
+            mk = _module_key(node_id)
+            args = {param: self._value(prov, mk) for param, prov in d.bindings.items()}
             value, gen = _setup_fixture(d, args, None)
             self.active.append(_Active(d, key, value, gen))
             live.add(key)
@@ -352,10 +442,15 @@ class Engine:
     def run(self, node_id: str, style: str, deadline_ms: int) -> dict:
         module_key = _module_key(node_id)
         try:
-            requested = _test_requested(node_id, style)
+            requested = self._requested(node_id, style)
+            marks = self._marks(node_id, style)
         except Exception as exc:  # noqa: BLE001 — import/collection failure for this node
             return {"node_id": node_id, "outcome": "error",
                     "detail": "".join(traceback.format_exception_only(type(exc), exc))}
+
+        skip_reason = _skip_decision(marks)
+        if skip_reason is not None:  # short-circuit BEFORE any fixture setup
+            return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason}
 
         closure = _closure(self.reg, module_key, requested)
         parametrized = [d for d in closure if d.params]
@@ -370,6 +465,7 @@ class Engine:
             self._sync_wider(closure, node_id)
             outcomes.append(self._fork_run(node_id, style, requested, closure, combo, deadline_ms))
         outcome, detail = _aggregate(outcomes)
+        outcome, detail = _apply_xfail(marks, outcome, detail)
         return {"node_id": node_id, "outcome": outcome, "detail": detail}
 
     def _fork_run(self, node_id, style, requested, closure, combo, deadline_ms) -> tuple[str, str]:
@@ -438,33 +534,69 @@ class Engine:
             for d in closure:
                 if d.rank != 0:
                     continue  # wider scopes are already live in inherited parent memory
-                args = {dep: value_of(dep) for dep in d.deps}
+                args = {param: value_of(prov) for param, prov in d.bindings.items()}
                 val, gen = _setup_fixture(d, args, combo.get(d.name))
                 local[d.name] = val
                 gens.append(gen)
-            test_args = {name: value_of(name) for name in requested}
+            test_args = {param: value_of(prov) for param, prov in requested.items()}
             return _invoke(node_id, style, test_args)
         finally:
             for gen in reversed(gens):
                 _teardown(gen)
+
+    def _requested(self, node_id: str, style: str) -> dict:
+        """The resources a test requests, as `param_name -> provider_name` bindings. Native params
+        resolve by **type** (ADR-E012); untyped params fall back to name (the pytest path), so a
+        pytest-authored test with `(db, cache)` args binds identically to before."""
+        module = importlib.import_module(_module_name(_module_key(node_id)))
+        if style == "unittest_method":
+            return {}  # unittest methods drive their own setUp/tearDown; no DI in Phase 3
+        if style == "pytest_method":
+            cls, method = _class_method(node_id)
+            func = getattr(getattr(module, cls), method)
+        else:
+            func = getattr(module, node_id.partition("::")[2])
+        return self.reg.bind_params(func)
+
+    def _marks(self, node_id: str, style: str) -> list:
+        """The native marks (`__riptide_marks__`) on a test, read by attribute — the riptide-owned
+        analogue of pytest's marker read. unittest methods carry none."""
+        if style == "unittest_method":
+            return []
+        module = importlib.import_module(_module_name(_module_key(node_id)))
+        if style == "pytest_method":
+            cls, method = _class_method(node_id)
+            func = getattr(getattr(module, cls), method)
+        else:
+            func = getattr(module, node_id.partition("::")[2])
+        return list(getattr(func, "__riptide_marks__", ()))
 
     def teardown_all(self) -> None:
         while self.active:
             _teardown(self.active.pop().gen)
 
 
-def _test_requested(node_id: str, style: str) -> list[str]:
-    """The fixture names a test requests = its signature parameters (minus self/cls)."""
-    module = importlib.import_module(_module_name(_module_key(node_id)))
-    if style == "unittest_method":
-        return []  # unittest methods drive their own setUp/tearDown; no DI in Phase 3
-    if style == "pytest_method":
-        cls, method = _class_method(node_id)
-        func = getattr(getattr(module, cls), method)
-        params = list(inspect.signature(func).parameters)
-        return [p for p in params if p not in ("self", "cls")]
-    func = getattr(module, node_id.partition("::")[2])
-    return list(inspect.signature(func).parameters)
+def _skip_decision(marks: list):
+    """The skip reason if any `skip` / active `skip_if` mark applies, else None."""
+    for m in marks:
+        if m.kind == "skip" or (m.kind == "skip_if" and m.condition):
+            return m.reason or m.kind
+    return None
+
+
+def _apply_xfail(marks: list, outcome: str, detail: str):
+    """Fold an `xfail` mark into the outcome: a fail/error becomes `xfail`; a pass becomes `xpass`
+    (or `failed` when the mark is `strict`). No xfail mark ⇒ unchanged."""
+    xf = next((m for m in marks if m.kind == "xfail"), None)
+    if xf is None:
+        return outcome, detail
+    if outcome in ("failed", "error"):
+        return "xfail", xf.reason or detail
+    if outcome == "passed":
+        if xf.strict:
+            return "failed", f"[xpass strict] {xf.reason}".strip()
+        return "xpass", xf.reason
+    return outcome, detail  # skipped stays skipped
 
 
 def _invoke(node_id: str, style: str, args: dict) -> tuple[str, str]:
