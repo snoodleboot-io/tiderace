@@ -50,8 +50,10 @@ one-line ADR/doc note if a decision was made.
 | `riptide migrate` codemod + report | ✅ |
 | Conformance harness (instrument) | ✅ |
 | **Builtins (monkeypatch/tmp_path/…)** | ✅ done (click 70%→93%) |
-| usefixtures, async providers, provider-params | ⬜ |
-| Migration run-through-engine tier | ⬜ |
+| **Type-inference for untyped fixtures (B3)** | ✅ done (total 79%→85%) |
+| **Corpus breadth (B7: +Flask +anyio, 4 repos)** | ✅ done |
+| **Run-through tier (B6)** | 🟢 harness + cachetools 215/215 100%; migrated pytest repos pending venv |
+| usefixtures (B2), request (B4), async/provider-params (B5) | ⬜ (long tail; 10/18/15% of remaining) |
 | ② in-process/FFI backend | 🟡 spiked GO, design pending |
 
 ---
@@ -153,14 +155,15 @@ one-line ADR/doc note if a decision was made.
 - [ ] Provider-level parametrization (`@provides` that fans out) — currently can't-map in `migrate`
   - Done: each has a proof; `migrate` parametrized-fixture bucket addressed
 
-### B6 — Migration **run-through-engine** tier  ⬜  *(the heavier conformance step)*
-- [ ] Per-repo venv + deps install; run the **migrated** suite through the shim/engine
-- [ ] Compare outcomes to a pytest oracle run (differential) → an *execution* pass-rate, not just auto-map
-  - Done: `conformance/` reports run-through pass-rate for ≥1 repo; gaps filed as engine bugs
+### B6 — Migration **run-through-engine** tier  🟢 **harness + first repo done (2026-06-21)**
+*`conformance/runthrough.py`; first target cachetools.*
+- [x] Run a suite through the shim/engine and diff per-test outcomes vs an oracle → **execution pass-rate**
+- [x] First repo (cachetools, pure unittest, no migration needed): **215/215 = 100%** match vs the stock-unittest oracle; zero divergences (validates Phase-4 unittest fidelity end-to-end)
+  - ⏳ remaining: the **migrated pytest** suites (click/flask/anyio) need a per-repo venv + deps install; pointing the harness at them is the continuous next step (will surface engine gaps to file)
 
-### B7 — Conformance corpus breadth  ⬜
-- [ ] Add a fixture-heavy **app** suite (Flask) and an **async** lib to `manifest.tsv` (pinned SHAs)
-  - Done: the can't-map distribution is re-measured across ≥4 repos before locking builtin semantics
+### B7 — Conformance corpus breadth  ✅ **done (2026-06-21)**
+- [x] Added a fixture-heavy **app** suite (Flask `3.0.3`) and an **async** lib (anyio `4.4.0`) to `manifest.tsv` (pinned SHAs)
+  - Done: can't-map distribution re-measured across **4 repos** (83 files); re-ranked the gaps (→ B3, now done)
 
 ---
 

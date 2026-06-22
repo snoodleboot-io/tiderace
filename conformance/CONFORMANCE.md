@@ -80,6 +80,22 @@ flagged). Proof: [`proof_b3_inference.py`](../engine/py-riptide/proof_b3_inferen
 untyped-fixture-param 27→10). The remaining 21 untyped providers are the unconfident shapes correctly
 left for the human.
 
+### B6 delivered — run-through tier (2026-06-21)
+
+Beyond the static auto-map %, [`runthrough.py`](runthrough.py) *executes* a real suite **through
+riptide's engine** and diffs every test's outcome against an oracle → an **execution pass-rate** (the
+number adoption actually turns on). First target: **cachetools** (pure `unittest`, so no migration —
+isolates the *execution* path; oracle = stock `unittest` `TestSuite`, which honors `setUpClass`).
+
+```bash
+python3 runthrough.py vendor/cachetools --src vendor/cachetools/src
+```
+
+**Result: 215 tests executed through the engine, 215/215 = 100% match, zero divergences.** The engine
+reproduces stock unittest exactly on a real OSS suite — validating the Phase-4 unittest fidelity work
+end-to-end. (Next run-through targets — the migrated pytest suites click/flask/anyio — need a per-repo
+venv + deps and will surface engine gaps to file as the migrated-execution path matures.)
+
 ## Conclusion → next build item (data-driven)
 
 Re-ranked after B3 (61 can't-map): `untyped provider` 21 (34% — the unconfident remainder),
