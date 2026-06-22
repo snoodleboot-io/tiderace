@@ -41,8 +41,8 @@ one-line ADR/doc note if a decision was made.
 | 3 Fixtures + watermarks | ✅ done | merged to `main_v2` |
 | 4 Full styles + assertions | 🟢 **core done** | marks/`@cases` + RichDiff + async + unittest fidelity done; purity guard deferred to sandbox |
 | 5 Coverage + cache | 🟢 **core done** | coverage→DepGraph→impact + content-addressed cache done; live-loop wiring with Phase-6 daemon |
-| 6 Scheduler + daemon | ⬜ | watch / warm daemon |
-| 7 Compat + reporting + hardening | ⬜ | compat → migration (started); reporters/hardening remain |
+| 6 Scheduler + daemon | 🟡 **scheduler done** | LocalityScheduler done; warm daemon / FS-watch need new deps (notify, JSON-RPC) |
+| 7 Compat + reporting + hardening | 🟡 **reporters started** | terminal/JUnit/JSON done; GitHub/SARIF + plugin host + perf + Windows remain |
 
 | Track B item | Status |
 |---|---|
