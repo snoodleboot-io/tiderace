@@ -138,10 +138,11 @@ one-line ADR/doc note if a decision was made.
 - [ ] `migrate`: `@pytest.mark.usefixtures("x")` → `@riptide.uses(<TypeOfX>)` when the type is known; flag otherwise
   - Done: conformance usefixtures bucket shrinks measurably
 
-### B3 — Migration type-inference for untyped fixtures  ⬜  *(7%)*
-- [ ] In `migrate`, infer a provider's type from its body (`return X()` / `yield X()`) when annotation absent
-- [ ] Emit the inferred annotation (`-> X`) instead of flagging, when confident; flag when not
-  - Done: untyped-provider bucket shrinks; no wrong inferences (precision over recall)
+### B3 — Migration type-inference for untyped fixtures  ✅ **done (2026-06-21)**  *(was 65% of gaps across 4 repos)*
+*Proof `proof_b3_inference.py`; measured TOTAL 79%→85%, Flask 66%→79%.*
+- [x] In `migrate`, infer a provider's type from its body (`return X()` / `yield X()`, resolving one level through a local assignment) when annotation absent
+- [x] Emit the inferred annotation (`-> X`) instead of flagging, when confident; flag when not
+  - Done: untyped-provider + untyped-fixture-param buckets shrank (Flask 25→19 / 27→10); precision-tested — lowercase factories / bare names / conflicting returns never mis-annotated
 
 ### B4 — `request` introspection  ⬜  *(2% — low priority)*
 - [ ] Decide a narrow native equivalent (e.g. `Request` with `.param`/`.node`) vs. permanent can't-map

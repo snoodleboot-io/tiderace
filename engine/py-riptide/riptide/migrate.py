@@ -92,17 +92,83 @@ def _is_generator(fn: ast.FunctionDef) -> bool:
 
 
 def _provided_type_src(fn: ast.FunctionDef) -> str | None:
-    """The provided type, as source, inferred from the return annotation (unwrapping
-    `Iterator[T]`/`Generator[T, ...]` for yield fixtures). None ⇒ can't infer."""
+    """The provided type, as source, from the return annotation (unwrapping `Iterator[T]`/
+    `Generator[T, ...]` for yield fixtures). When the annotation is absent, fall back to **inferring**
+    it from the body (B3). None ⇒ can't determine (caller flags it)."""
     ret = fn.returns
     if ret is None:
-        return None
+        return _infer_type_src(fn)
     if _is_generator(fn) and isinstance(ret, ast.Subscript):
         inner = ret.slice
         if isinstance(inner, ast.Tuple):  # Generator[T, S, R] -> T
             return ast.unparse(inner.elts[0])
         return ast.unparse(inner)  # Iterator[T] -> T
     return ast.unparse(ret)
+
+
+def _infer_type_src(fn: ast.FunctionDef) -> str | None:
+    """Infer a provider's type from what it returns/yields, when untyped (B3 — migration type
+    inference). **Precision over recall**: only confident shapes are inferred, so `migrate` never
+    emits a *wrong* annotation. Inferred:
+      • `return/yield ClassName(...)` → `ClassName` (Name/Attribute whose final segment is
+        Capitalized — the PEP 8 class convention; lowercase factory calls are NOT inferred);
+      • a literal → its builtin type (`str`/`int`/`float`/`bool`/`bytes`/`list`/`dict`/`set`/`tuple`).
+    A returned/yielded local name is resolved one level through a simple assignment (the very common
+    `d = Db(); yield d` shape). Multiple conflicting shapes, or anything else (an unresolved name, a
+    lowercase call) ⇒ None (flag it)."""
+    own = _own_nodes(fn)
+    assigns = _simple_assignments(own)
+    inferred = set()
+    for value in _return_values(own):
+        node = assigns.get(value.id, value) if isinstance(value, ast.Name) else value
+        inferred.add(_infer_one(node))
+    inferred.discard(None)
+    return inferred.pop() if len(inferred) == 1 else None
+
+
+def _own_nodes(fn: ast.FunctionDef) -> list:
+    """All AST nodes belonging to `fn` itself — excluding those inside nested defs/lambdas (whose
+    statements belong to a different callable and would poison inference)."""
+    nested = {id(n) for d in ast.walk(fn) if isinstance(d, (ast.FunctionDef, ast.AsyncFunctionDef,
+              ast.Lambda)) and d is not fn for n in ast.walk(d)}
+    return [n for n in ast.walk(fn) if id(n) not in nested]
+
+
+def _return_values(own: list) -> list:
+    """The `return`/`yield` value expressions among `own` nodes."""
+    out = []
+    for node in own:
+        if isinstance(node, ast.Return) and node.value is not None:
+            out.append(node.value)
+        elif isinstance(node, ast.Yield) and node.value is not None:
+            out.append(node.value)
+    return out
+
+
+def _simple_assignments(own: list) -> dict:
+    """`name -> value node` for single-target `name = <expr>` assignments (last write wins)."""
+    m: dict = {}
+    for node in own:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            m[node.targets[0].id] = node.value
+    return m
+
+
+_LITERAL_NODES = {ast.List: "list", ast.Dict: "dict", ast.Set: "set", ast.Tuple: "tuple"}
+
+
+def _infer_one(node) -> str | None:
+    """The inferred type-source for one return/yield value, or None when not confidently inferable."""
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Name) and func.id[:1].isupper():
+            return func.id  # `Db()` -> Db
+        if isinstance(func, ast.Attribute) and func.attr[:1].isupper():
+            return ast.unparse(func)  # `mod.Client()` -> mod.Client
+        return None  # lowercase call ⇒ a factory, return type unknown — don't guess
+    if isinstance(node, ast.Constant):
+        return type(node.value).__name__ if node.value is not None else None
+    return _LITERAL_NODES.get(type(node))
 
 
 # --------------------------------------------------------------------------- pass 1: fixture types
@@ -184,8 +250,14 @@ class _Migrator(ast.NodeTransformer):
                     ast.Call(func=_attr("riptide", "provides"), args=[], keywords=keep), deco))
                 self.report.mapped(node.lineno, f"@pytest.fixture → @riptide.provides ({node.name})")
                 if node.returns is None:
-                    self.report.cant(node.lineno, f"provider `{node.name}` has no return type — riptide wires by "
-                                     f"type; add `-> <Type>` (e.g. `def {node.name}() -> Db:`)")
+                    inferred = _infer_type_src(node)  # B3: infer the type from the body
+                    if inferred is not None:
+                        node.returns = ast.parse(inferred, mode="eval").body
+                        self.report.mapped(node.lineno, f"provider `{node.name}`: return type inferred "
+                                           f"→ `-> {inferred}` (B3)")
+                    else:
+                        self.report.cant(node.lineno, f"provider `{node.name}` has no return type — riptide wires by "
+                                         f"type; add `-> <Type>` (e.g. `def {node.name}() -> Db:`)")
             else:
                 new_decos.append(deco)
         node.decorator_list = new_decos

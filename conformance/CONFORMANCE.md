@@ -18,12 +18,13 @@ python3 conformance.py vendor/click vendor/cachetools
 
 ## Results
 
-| repo | pin | test files | mapped | can't-map | auto-map (post-B1) |
-|---|---|---:|---:|---:|---:|
-| pallets/click | `8.1.7` (874ca2b) | 21 | 134 | 10 | **93%** |
-| tkem/cachetools | `v5.5.0` (6c78a8f) | 12 | 0 | 0 | n/a |
-| pallets/flask | `3.0.3` (c12a5d8) | 29 | 111 | 58 | **66%** |
-| agronholm/anyio | `4.4.0` (053e8f0) | 21 | 67 | 17 | **80%** |
+| repo | pin | test files | mapped | can't-map | auto-map (post-B1) | auto-map (post-B3) |
+|---|---|---:|---:|---:|---:|---:|
+| pallets/click | `8.1.7` (874ca2b) | 21 | 135 | 9 | 93% | **94%** |
+| tkem/cachetools | `v5.5.0` (6c78a8f) | 12 | 0 | 0 | n/a | n/a |
+| pallets/flask | `3.0.3` (c12a5d8) | 29 | 134 | 35 | 66% | **79%** |
+| agronholm/anyio | `4.4.0` (053e8f0) | 21 | 67 | 17 | 80% | **80%** |
+| **TOTAL** | | **83** | **336** | **61** | 79% | **85%** |
 
 **cachetools is a pure `unittest.TestCase` suite** — *nothing pytest-specific to migrate*. riptide
 already drives it via stdlib `unittest.TestCase.run()` (ADR-E001), so it runs **as-is, no migration**.
@@ -67,16 +68,25 @@ now (`tmpdir` mapped with a py.path caveat).
 | untyped provider | 3 | 30% |
 | request introspection | 1 | 10% |
 
-## Conclusion → next build item (data-driven, re-ranked by the 4-repo breadth)
+### B3 delivered — migration type-inference (2026-06-21)
 
-The builtin blocker is **eliminated**. With Flask + anyio in the corpus the dominant gap **flipped to
-untyped fixtures** — `untyped provider` (33%) + `untyped fixture param` (32%) = **65% of all can't-map**.
-So the next increment is **B3 (migration type-inference for untyped fixtures)**: infer a provider's
-type from its body (`return X()` / `yield X()`) and emit `-> X` instead of flagging; once the provider
-is typed, its dependent test params type-resolve too — addressing *both* top buckets at once.
+`migrate` now infers an untyped provider's type from its body (`return/yield ClassName(...)`,
+resolving one level through a local `x = ClassName()` assignment, plus literal types), emitting `-> X`
+instead of flagging — which also types the dependent test params. **Precision over recall**: lowercase
+factory calls, unresolved names, and conflicting returns are never given a wrong annotation (they stay
+flagged). Proof: [`proof_b3_inference.py`](../engine/py-riptide/proof_b3_inference.py).
 
-After B3: **B5 parametrized fixtures** (11%) and **B4 request introspection** (13%), then **B2
-usefixtures** (now only 7%).
+**Measured: TOTAL 79% → 85%** (can't-map 61); **Flask 66% → 79%** (untyped-provider 25→19,
+untyped-fixture-param 27→10). The remaining 21 untyped providers are the unconfident shapes correctly
+left for the human.
+
+## Conclusion → next build item (data-driven)
+
+Re-ranked after B3 (61 can't-map): `untyped provider` 21 (34% — the unconfident remainder),
+`request introspection` 11 (18%, **B4**), `untyped fixture param` 10 (16%), `parametrized fixture` 9
+(15%, **B5**), `usefixtures` 6 (10%, **B2**). The next *capability* lever is the migration
+**run-through tier (B6)** — turning auto-map % into an *execution* pass-rate — and then **B5/B4/B2**
+for the long tail.
 
 ### (superseded) post-B1 click-only ranking
 
