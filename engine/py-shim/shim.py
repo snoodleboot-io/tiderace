@@ -731,22 +731,13 @@ def _invoke(node_id: str, style: str, args: dict) -> tuple[str, str]:
     module = importlib.import_module(_module_name(_module_key(node_id)))
     try:
         if style == "unittest_method":
-            cls_name, method = _class_method(node_id)
-            result = unittest.TestResult()
-            module.__dict__[cls_name](method).run(result)
-            if result.errors:
-                return "error", result.errors[0][1]
-            if result.failures:
-                return "failed", result.failures[0][1]
-            if result.skipped:
-                return "skipped", result.skipped[0][1]
-            return "passed", ""
+            return _invoke_unittest(module, node_id)
         if style == "pytest_method":
             cls_name, method = _class_method(node_id)
             instance = getattr(module, cls_name)()
-            getattr(instance, method)(**args)
+            _maybe_await(getattr(instance, method)(**args))
             return "passed", ""
-        getattr(module, node_id.partition("::")[2])(**args)
+        _maybe_await(getattr(module, node_id.partition("::")[2])(**args))
         return "passed", ""
     except AssertionError as exc:
         plain = "".join(traceback.format_exception_only(type(exc), exc))
@@ -756,6 +747,53 @@ def _invoke(node_id: str, style: str, args: dict) -> tuple[str, str]:
         return "skipped", str(exc)
     except Exception as exc:  # noqa: BLE001 — any test error maps to Outcome::Error
         return "error", "".join(traceback.format_exception_only(type(exc), exc))
+
+
+def _maybe_await(result):
+    """Drive an `async def test_*` to completion (Phase 4). A sync test returns a plain value (passed
+    straight through); a coroutine is run on a fresh event loop per test — isolation is free since each
+    test is its own fork child. Async *providers* are deferred to Track B (B5)."""
+    if inspect.iscoroutine(result):
+        import asyncio
+
+        asyncio.run(result)
+
+
+def _invoke_unittest(module, node_id: str) -> tuple[str, str]:
+    """Run one `unittest.TestCase` method with fuller fidelity (Phase 4): honor `setUpClass`/
+    `tearDownClass` (which `TestCase.run()` alone does NOT call), and map `@expectedFailure` /
+    unexpected-success / `subTest` to the right node outcome.
+
+    Class setup/teardown run per test here (correctness over the once-per-class optimization — the
+    fork model would re-run them per child anyway; a class-scope mapping is a later refinement)."""
+    cls_name, method = _class_method(node_id)
+    cls = module.__dict__[cls_name]
+    result = unittest.TestResult()
+    ran_setup = False
+    try:
+        cls.setUpClass()
+        ran_setup = True
+        cls(method).run(result)
+    except unittest.SkipTest as exc:  # setUpClass may skip the whole class
+        return "skipped", str(exc)
+    finally:
+        if ran_setup:
+            try:
+                cls.tearDownClass()
+            except Exception:  # noqa: BLE001 — teardown error must not mask the test outcome
+                pass
+
+    if result.errors:
+        return "error", result.errors[0][1]
+    if result.failures:  # includes subTest failures (each recorded with its sub-description)
+        return "failed", result.failures[0][1]
+    if getattr(result, "unexpectedSuccesses", None):
+        return "failed", "unexpected success: a test marked @expectedFailure passed"
+    if getattr(result, "expectedFailures", None):
+        return "xfail", result.expectedFailures[0][1]
+    if result.skipped:
+        return "skipped", result.skipped[0][1]
+    return "passed", ""
 
 
 # --------------------------------------------------------------------------- lazy assertion introspection
