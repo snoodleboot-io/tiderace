@@ -161,12 +161,12 @@ one-line ADR/doc note if a decision was made.
 ## 4. The side-bet — ② in-process / FFI backend
 *[ADR-E011 ②](design/adr/ADR-E011-shim-transport-seam.md); spike `spike-inproc/` = GO. Independent of Tracks A/B — rides the `ShimTransport` seam.*
 
-- [ ] **Isolation design** (the one open question): fork-from-embedded vs. per-test module reset — pick one, ADR it
-- [ ] `InProcessTransport: ShimTransport` in (or beside) `engine-core` — third backend, no `Worker` change
+- [x] **Isolation design** — ratified [ADR-E013](design/adr/ADR-E013-inprocess-isolation.md): **fork-from-embedded** (keep the ADR-E003 COW model; ② swaps the *control plane*, not isolation, preserving cache soundness). Per-test reset/subinterpreters **parked** with a revisit trigger.
+- [ ] `InProcessTransport: ShimTransport` in (or beside) `engine-core` — third backend, no `Worker` change (needs `pyo3`/libpython; fork-safety constraint per E013: single-threaded parent at the fork point)
 - [ ] `PyConfig` home/venv plumbing (kill the spike's cosmetic warnings)
 - [ ] Broader C-ext smoke (numpy/pandas/pydantic-core) in one interpreter
 - [ ] Benchmark vs the subprocess `PipeTransport` baseline (prove the syscall win)
-  - Done: a ratified isolation ADR + a working backend behind the seam + a perf delta
+  - Done: ✅ ratified isolation ADR + ⏳ a working backend behind the seam + a perf delta
 
 ---
 
