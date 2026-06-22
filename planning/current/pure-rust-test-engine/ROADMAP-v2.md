@@ -94,28 +94,19 @@ one-line ADR/doc note if a decision was made.
 ### Phase 6 — Scheduler + daemon  ⬜
 *Designs: [06-scheduler](design/06-scheduler.md), [08-daemon](design/08-daemon.md); [ADR-E007](design/adr/ADR-E007-warm-daemon.md), [ADR-E010](design/adr/ADR-E010-locality-scheduler.md). Consumes Phase-3 `Watermark.rss_bytes` via `MemoryGovernor`.*
 
-- [ ] **`LocalityScheduler`** — duration-aware LPT balancing + scope-locality (group by deepest shared watermark)
-  - Done: makespan beats naive round-robin on an uneven corpus; locality reduces re-setup count
-- [ ] **Warm daemon** — JSON-RPC server over `engine-core`, long-lived wellspring pool
-  - Done: a second request in a session pays no import; crash → respawn (reuse Phase-2b robustness)
-- [ ] **FS watch + invalidation** — `notify` debounced; conftest/provider change recycles correctly
-  - Done: editing a provider re-runs its dependents; editing a test re-runs that test only
-- [ ] **`tiderace watch`** native mode — sub-second impacted re-runs against the warm pool
-  - Done: edit→save→result loop under the daemon, native engine (no pytest)
+- [x] **`LocalityScheduler`** — duration-aware LPT balancing + scope-locality (5 tests; makespan ≤ round-robin on uneven durations; a module co-locates; dominant group splits)
+- [x] **FS watch + invalidation** — `engine-daemon`: content-hash `Invalidator` (conftest/config/C-ext recycle; test→recollect; source→impact; identical bytes→no-op) + `notify`-backed `FsWatcher` + noise-filtering `Debouncer`
+- [🟢] **Warm daemon brain** — `Session` composes invalidation→impact→cache into the minimum re-run (`ChangeOutcome`); RPC protocol types (`RpcRequest`/`RpcResponse`). ⏳ remaining: the socket server + process lifecycle (start/reuse/health) glue, integration-tested e2e
+- [ ] ⏳ **`tiderace watch`** native mode — the thin client over the daemon (needs the socket/lifecycle glue above)
 
-### Phase 7 — Reporting + hardening (compat → migration)  ⬜
+### Phase 7 — Reporting + hardening (compat → migration)  🟡 **reporters done**
 *Designs: [12-plugin-host](design/12-plugin-host.md), [13-cross-cutting](design/13-cross-cutting.md); [ADR-E008](design/adr/ADR-E008-cross-platform.md). Note: "pytest-compat layer" is **replaced** by Track B migration.*
 
-- [ ] **Reporters** — terminal (default) + JUnit XML + JSON + GitHub annotations + SARIF (`Reporter` seam)
-  - Done: each format validated against its schema/consumer on the corpus
+- [x] **Reporters** — terminal + JUnit XML + JSON + GitHub annotations + SARIF, all behind the `Reporter` seam (8 tests; each validated against its consumer's shape)
 - [ ] **Plugin host** — riptide's own hook host (trait-based), not pytest's; `PyPluginAdapter` boundary
-  - Done: a sample native plugin observes start/finish hooks
-- [ ] **Conformance suite** (formalize Track-B harness) — pass-rate metric vs real OSS suites
-  - Done: `conformance/` extended to run **migrated** suites through the engine (not just migrate)
-- [ ] **Perf hardening** — batching, governor tuning, startup
-  - Done: cold/warm numbers in `benchmarks/RESULTS.md`, native engine
-- [ ] **Windows `SubprocessWorker` validation** — the no-fork path on Windows CI
-  - Done: acceptance scenarios green on Windows runner
+- [x] **Conformance suite** (B6) — `conformance/runthrough.py` runs a suite **through the engine** vs an oracle; cachetools 215/215 = 100%. ⏳ extend to the migrated pytest repos (needs per-repo venvs)
+- [ ] ⏳ **Perf hardening** — batching, governor tuning, startup → `benchmarks/RESULTS.md`
+- [ ] ⛔ **Windows `SubprocessWorker` validation** — needs a Windows CI runner (not available in this env)
 
 ---
 
