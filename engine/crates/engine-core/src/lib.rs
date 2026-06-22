@@ -16,5 +16,6 @@ pub mod error;
 pub mod exec;
 pub mod fixtures;
 pub mod impact;
+pub mod scheduler;
 
 pub use error::EngineError;
