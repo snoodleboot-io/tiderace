@@ -3,3 +3,5 @@
 # name	url	tag	sha
 click	https://github.com/pallets/click.git	8.1.7	874ca2bc1c30d93a4ac6e36a15ed685eafe89097
 cachetools	https://github.com/tkem/cachetools.git	v5.5.0	6c78a8ff67b21834c3873cc918d87b2c5cb22e5c
+flask	https://github.com/pallets/flask.git	3.0.3	c12a5d874c5a014495eb2db8a73f40037bc813ac
+anyio	https://github.com/agronholm/anyio.git	4.4.0	053e8f0a0f7b0f4a47a012eb5c6b1d9d84344e6a
