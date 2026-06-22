@@ -39,8 +39,8 @@ one-line ADR/doc note if a decision was made.
 | 1 Fork/Wellspring spike | ✅ done | GO |
 | 2 Workspace + domain + collection | ✅ done | |
 | 3 Fixtures + watermarks | ✅ done | merged to `main_v2` |
-| 4 Full styles + assertions | 🟡 **partial** | native marks/`@cases` done (Track B); **assertions/async/unittest-fidelity remain** |
-| 5 Coverage + cache | ⬜ | the headline differentiator |
+| 4 Full styles + assertions | 🟢 **core done** | marks/`@cases` + RichDiff + async + unittest fidelity done; purity guard deferred to sandbox |
+| 5 Coverage + cache | 🟢 **core done** | coverage→DepGraph→impact + content-addressed cache done; live-loop wiring with Phase-6 daemon |
 | 6 Scheduler + daemon | ⬜ | watch / warm daemon |
 | 7 Compat + reporting + hardening | ⬜ | compat → migration (started); reporters/hardening remain |
 
@@ -58,25 +58,18 @@ one-line ADR/doc note if a decision was made.
 
 ## 2. Track A — Capability phases (remaining)
 
-### Phase 4 — Full styles + assertions  🟡 partial
-*Designs: [09-assertions](design/09-assertions.md), [10-test-styles](design/10-test-styles.md); [ADR-E009](design/adr/ADR-E009-lazy-assertion-introspection.md).*
+### Phase 4 — Full styles + assertions  🟢 **core delivered (2026-06-21)**
+*Designs: [09-assertions](design/09-assertions.md), [10-test-styles](design/10-test-styles.md); [ADR-E009](design/adr/ADR-E009-lazy-assertion-introspection.md). Proofs: `proof_n7_assertions.py`, `proof_n8_async_unittest.py`.*
 
 - [x] Native parametrization — `@riptide.cases` through the fork engine
 - [x] Native marks — `@skip`/`@skip_if`/`@xfail`(+strict)/`@tag`, shim-honored
-- [ ] **Lazy assertion introspection + RichDiff** (the big one)
-  - Rewrite/inspect plain `assert` to produce a structured `RichDiff` (operands, op, per-element diff)
-  - Lazy: only materialize the diff on failure (no cost on pass) — ADR-E009
-  - Wire `RichDiff` into the `ExecEvent::AssertionFailure` path (shim → Rust)
-  - Done: a failing `assert a == b` reports operand values + a diff; covered by unit + a live test
-- [ ] **Async tests** — `async def test_*`
-  - Detect coroutine tests in the shim; drive an event loop per test; same outcome mapping
-  - Decide async **providers** (`async def` + `await`) — or defer to Track B (async providers item)
-  - Done: an `async def test_` passes/fails correctly through the engine
-- [ ] **unittest fidelity** — `subTest`, `expectedFailure`, `setUpClass`/`tearDownClass`
-  - Phase-3 unittest is method-granularity with no DI; extend result mapping for subTest/expectedFailure
-  - Done: a `TestCase` using `subTest` + `@expectedFailure` maps to correct per-node outcomes
-- [ ] **Purity guard** — detect/flag tests that mutate shared (module/session) state across forks
-  - Done: a shared-state-mutating test is flagged (design 09); no false positives on the corpus
+- [x] **Lazy assertion introspection + RichDiff** (the big one) — ADR-E009
+  - Failing `assert` re-evaluated once in the live frame → operand source + values + element/line/key diff
+  - Lazy: passes cost nothing; purity guard (double-eval) falls back on side-effecting/non-reproducing asserts
+  - Done: failing `assert a == b` reports operands + a diff (`proof_n7`); ⏳ structured `RichDiff` Rust type + reporter wiring lands with Phase 7 reporters (currently rendered into `detail`)
+- [x] **Async tests** — `async def test_*` driven on a per-test event loop (`proof_n8`); async providers deferred to Track B (B5)
+- [x] **unittest fidelity** — `setUpClass`/`tearDownClass` honored; `@expectedFailure`→xfail, unexpected-success→failed, `subTest` failure→failed (`proof_n8`)
+- [ ] ⏳ **Purity guard** (deferred) — cross-fork shared-state-mutation detection. The impurity *policy* seam already exists (`cache::{Purity, SandboxHooks}`, Phase 5d); the *runtime detector* that feeds it is the ADR-E004 stage-2 sandbox (fs/clock/net/state interception) — a substantial standalone effort, sequenced with that sandbox rather than here. Conservative-by-default holds until then.
 
 ### Phase 5 — Coverage + cache  🟢 **core delivered (2026-06-21)**
 *Designs: [07-cache](design/07-cache.md), [11-coverage-impact](design/11-coverage-impact.md), [13-cross-cutting](design/13-cross-cutting.md); [ADR-E004](design/adr/ADR-E004-content-addressed-cache.md), [ADR-E006](design/adr/ADR-E006-coverage-sys-monitoring.md). Consumes Phase-3 `ClosureHash`.*
