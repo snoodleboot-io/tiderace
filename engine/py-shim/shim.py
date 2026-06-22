@@ -23,11 +23,14 @@ the marker read (ADR-E001).
 """
 from __future__ import annotations
 
+import ast
+import difflib
 import importlib
 import importlib.util
 import inspect
 import itertools
 import json
+import linecache
 import os
 import select
 import signal
@@ -746,11 +749,135 @@ def _invoke(node_id: str, style: str, args: dict) -> tuple[str, str]:
         getattr(module, node_id.partition("::")[2])(**args)
         return "passed", ""
     except AssertionError as exc:
-        return "failed", "".join(traceback.format_exception_only(type(exc), exc))
+        plain = "".join(traceback.format_exception_only(type(exc), exc))
+        rich = _introspect_assertion(exc)  # lazy: only a FAILED assert pays this (ADR-E009)
+        return "failed", (rich + plain) if rich else plain
     except unittest.SkipTest as exc:
         return "skipped", str(exc)
     except Exception as exc:  # noqa: BLE001 — any test error maps to Outcome::Error
         return "error", "".join(traceback.format_exception_only(type(exc), exc))
+
+
+# --------------------------------------------------------------------------- lazy assertion introspection
+_CMP_OPS = {
+    ast.Eq: "==", ast.NotEq: "!=", ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">=",
+    ast.In: "in", ast.NotIn: "not in", ast.Is: "is", ast.IsNot: "is not",
+}
+
+
+def _introspect_assertion(exc: AssertionError) -> str | None:
+    """Rich diff for a failed bare `assert`, built by RE-EVALUATING the failing expression once with
+    the live frame's locals/globals (ADR-E009 — lazy: passes cost nothing). Returns a formatted block
+    (operand source + values + an element/line diff), or `None` to fall back to the plain message when
+    it is unsafe/unsupported (re-eval raises → side-effecting or non-reproducing; not a single compare).
+    """
+    tb = exc.__traceback__
+    if tb is None:
+        return None
+    while tb.tb_next is not None:  # deepest frame = where the assert raised
+        tb = tb.tb_next
+    frame, lineno, filename = tb.tb_frame, tb.tb_lineno, tb.tb_frame.f_code.co_filename
+
+    node = _find_assert(filename, lineno)
+    if node is None or not isinstance(node.test, ast.Compare) or len(node.test.ops) != 1:
+        return None  # only single comparisons are introspected in this pass
+    cmp = node.test
+    op = _CMP_OPS.get(type(cmp.ops[0]))
+    if op is None:
+        return None
+    try:
+        left = _eval_stable(cmp.left, frame, filename)
+        right = _eval_stable(cmp.comparators[0], frame, filename)
+    except Exception:  # noqa: BLE001 — re-eval failed/unstable (impure/non-reproducing) → fall back
+        return None
+
+    lines = [
+        "assertion failed (riptide rich diff):",
+        f"    {ast.unparse(cmp.left)} {op} {ast.unparse(cmp.comparators[0])}",
+        f"    left  = {_short_repr(left)}",
+        f"    right = {_short_repr(right)}",
+    ]
+    diff = _value_diff(left, right)
+    if diff:
+        lines.append("    diff:")
+        lines.extend(f"      {d}" for d in diff)
+    return "\n".join(lines) + "\n"
+
+
+def _find_assert(filename: str, lineno: int):
+    """The `ast.Assert` node at (or spanning) `lineno` in `filename`, or None."""
+    src = "".join(linecache.getlines(filename))
+    if not src:
+        return None
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert):
+            end = getattr(node, "end_lineno", node.lineno)
+            if node.lineno <= lineno <= (end or node.lineno):
+                return node
+    return None
+
+
+class _NonReproducing(Exception):
+    """Raised when an operand yields a different value on re-eval (side-effecting / nondeterministic),
+    so the introspector falls back to the plain message instead of reporting a misleading diff."""
+
+
+def _eval_stable(node, frame, filename):
+    """Evaluate one operand in the failing frame's scope, **twice**, and only trust it if both evals
+    agree — the ADR-E009 purity guard. A differing value (e.g. a counter/RNG/clock call) means the
+    expression doesn't reproduce, so we refuse to build a diff that would misreport what failed."""
+    code = compile(ast.Expression(body=node), filename, "eval")
+    first = eval(code, frame.f_globals, frame.f_locals)  # noqa: S307 — our own re-eval, same scope
+    second = eval(code, frame.f_globals, frame.f_locals)  # noqa: S307
+    if not _reproduces(first, second):
+        raise _NonReproducing()
+    return first
+
+
+def _reproduces(a, b) -> bool:
+    """Whether two re-evals are equal. Conservative: any `==` that raises ⇒ treat as non-reproducing."""
+    try:
+        return bool(a == b)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _short_repr(value, limit: int = 300) -> str:
+    try:
+        r = repr(value)
+    except Exception:  # noqa: BLE001
+        r = f"<unreprable {type(value).__name__}>"
+    return r if len(r) <= limit else r[:limit] + f"… (+{len(r) - limit} chars)"
+
+
+def _value_diff(left, right) -> list[str]:
+    """A small per-element / per-line diff for the common container/string cases (empty otherwise)."""
+    if isinstance(left, str) and isinstance(right, str):
+        d = list(difflib.unified_diff(left.splitlines(), right.splitlines(), "left", "right", lineterm=""))
+        return d[:40]
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        out = []
+        if len(left) != len(right):
+            out.append(f"length {len(left)} != {len(right)}")
+        for i, (a, b) in enumerate(zip(left, right)):
+            if a != b:
+                out.append(f"[{i}] {_short_repr(a, 80)} != {_short_repr(b, 80)}")
+            if len(out) >= 20:
+                break
+        return out
+    if isinstance(left, dict) and isinstance(right, dict):
+        out = []
+        for k in sorted(set(left) | set(right), key=repr):
+            if left.get(k) != right.get(k):
+                out.append(f"[{_short_repr(k, 40)}] {_short_repr(left.get(k), 60)} != {_short_repr(right.get(k), 60)}")
+            if len(out) >= 20:
+                break
+        return out
+    return []
 
 
 def _aggregate(outcomes: list[tuple[str, str]]) -> tuple[str, str]:
