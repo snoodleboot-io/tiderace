@@ -13,9 +13,15 @@
 mod fs_watcher;
 mod invalidator;
 mod rpc_method;
+mod rpc_server;
 mod session;
+#[cfg(unix)]
+mod socket;
 
 pub use fs_watcher::{Debouncer, FsWatcher};
 pub use invalidator::{Invalidation, Invalidator};
 pub use rpc_method::{RpcRequest, RpcResponse, RpcResult};
+pub use rpc_server::{read_frame, serve_connection, write_frame, RpcHandler};
 pub use session::{ChangeOutcome, Session};
+#[cfg(unix)]
+pub use socket::serve_unix_socket;
