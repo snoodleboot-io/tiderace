@@ -55,6 +55,40 @@ jobs:
       - name: Release build
         run: cargo build --release
 
+  engine-windows:
+    # ADR-E008 capability matrix: validate the pure-Rust ENGINE workspace (engine/) compiles and its
+    # unit/lib + daemon logic passes on Windows, which has no fork(). The fork-based live integration
+    # tests self-skip without the fx venv (deliberately not provisioned here), so this gate covers
+    # compile + clippy + fmt + unit/lib/daemon. The no-fork SubprocessWorker *acceptance* on Windows
+    # (driving the --no-fork shim against a real Python) is the remaining Phase-7 piece in ROADMAP-v2.
+    name: engine · windows · build · lint · unit
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine/target
+          key: ${{ runner.os }}-engine-cargo-${{ hashFiles('engine/Cargo.lock') }}
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy (warnings as errors)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Unit + lib + daemon tests (fork integration self-skips without the venv)
+        run: cargo test --all
+      - name: Release build
+        run: cargo build --release
+
   coverage:
     # Gate at the 80% line target. `watcher.rs` (the notify blocking event loop) is
     # excluded from the denominator: it can only run inside a long-lived `tiderace

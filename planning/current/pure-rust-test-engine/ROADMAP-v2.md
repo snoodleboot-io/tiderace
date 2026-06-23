@@ -109,7 +109,7 @@ one-line ADR/doc note if a decision was made.
 - [x] **Plugin host** — `hooks::HookHost`: registers `Hook` plugins, dispatches typed `HookEvent`s by static call (no `pluggy`), `Priority`+stable order resolved once (2 tests: a sample plugin observes all events; priority ordering). `PyPluginAdapter` (Python-plugin FFI bridge) deferred to ②.
 - [x] **Conformance suite** (B6) — `conformance/runthrough.py` runs a suite **through the engine** vs an oracle; cachetools 215/215 = 100%. ⏳ extend to the migrated pytest repos (needs per-repo venvs)
 - [ ] ⏳ **Perf hardening** — batching, governor tuning, startup → `benchmarks/RESULTS.md`
-- [ ] ⛔ **Windows `SubprocessWorker` validation** — needs a Windows CI runner (not available in this env)
+- [🟢] **Windows validation** — `engine-windows` CI job added (`.github/workflows/ci.yml`): `windows-latest` builds the engine workspace + runs clippy/fmt + `cargo test --all` (pure-Rust unit/lib/daemon pass; fork integration self-skips without the venv). Engine compiles cross-platform (only `cache_key` has unix code, with a `cfg(not(unix))` fallback). ⏳ remaining: the no-fork `SubprocessWorker` *acceptance* against a real Python on Windows (drive the `--no-fork` shim) — and confirming the job green on its first CI run
 
 ---
 
