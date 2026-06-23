@@ -103,7 +103,7 @@ one-line ADR/doc note if a decision was made.
 *Designs: [12-plugin-host](design/12-plugin-host.md), [13-cross-cutting](design/13-cross-cutting.md); [ADR-E008](design/adr/ADR-E008-cross-platform.md). Note: "pytest-compat layer" is **replaced** by Track B migration.*
 
 - [x] **Reporters** — terminal + JUnit XML + JSON + GitHub annotations + SARIF, all behind the `Reporter` seam (8 tests; each validated against its consumer's shape)
-- [ ] **Plugin host** — riptide's own hook host (trait-based), not pytest's; `PyPluginAdapter` boundary
+- [x] **Plugin host** — `hooks::HookHost`: registers `Hook` plugins, dispatches typed `HookEvent`s by static call (no `pluggy`), `Priority`+stable order resolved once (2 tests: a sample plugin observes all events; priority ordering). `PyPluginAdapter` (Python-plugin FFI bridge) deferred to ②.
 - [x] **Conformance suite** (B6) — `conformance/runthrough.py` runs a suite **through the engine** vs an oracle; cachetools 215/215 = 100%. ⏳ extend to the migrated pytest repos (needs per-repo venvs)
 - [ ] ⏳ **Perf hardening** — batching, governor tuning, startup → `benchmarks/RESULTS.md`
 - [ ] ⛔ **Windows `SubprocessWorker` validation** — needs a Windows CI runner (not available in this env)

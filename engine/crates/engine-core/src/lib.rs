@@ -15,6 +15,7 @@ pub mod domain;
 pub mod error;
 pub mod exec;
 pub mod fixtures;
+pub mod hooks;
 pub mod impact;
 pub mod reporter;
 pub mod scheduler;
