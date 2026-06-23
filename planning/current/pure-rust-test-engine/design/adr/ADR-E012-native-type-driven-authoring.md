@@ -156,8 +156,27 @@ dropped):
   import; `tmpdir` maps to `TmpPath` with a py.path caveat. Measured: click `70% → 93%` auto-map
   (`conformance/CONFORMANCE.md`).
 
+## B4 — `request` introspection decision (2026-06-23)
+
+Conformance showed `request` usage splits into three cases; the native answer is decided per case
+rather than offering a broad `Request` object:
+
+- **`request.param`** — **supported** natively via provider-level params (B5, `@riptide.provides(params=...)`).
+  `migrate` no longer flags `request` on a parametrized provider.
+- **`request.getfixturevalue(...)`** — **permanent can't-map.** Dynamic, name-keyed fixture lookup is
+  the exact spooky-action type-DI rejects; the migration tells the user to request the provider as a
+  typed parameter instead.
+- **other `request.*`** (`node`, `config`, `addfinalizer`, …) — **manual port** (flagged). A narrow
+  native `Request` is deliberately *not* introduced now; `addfinalizer` maps to yield-teardown, and
+  node/config introspection is rare enough to leave to a hand-port until data says otherwise.
+
+Measured: clearing the `request.param` false-positives lifted anyio `89% → 99%`, total `87% → 89%`.
+
 ## Revisit trigger
 
 If real-world migration shows the type-annotation burden (#1) stalls adoption, add an opt-in
 name-fallback resolver (`@provides(name=)` + a name-matched arg) as a *disambiguation* affordance —
 without making implicit name-DI the default. Identity stays "wire by type."
+
+If the "other `request.*`" bucket grows on a broader corpus, revisit introducing a **narrow** native
+`Request` (`.node`/`.config` read-only) — but never `getfixturevalue` (which would reopen name-DI).

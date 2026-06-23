@@ -185,6 +185,16 @@ def _fixture_types(tree: ast.Module) -> dict:
     return out
 
 
+def _request_attrs(node: ast.FunctionDef) -> set:
+    """The set of attributes accessed on a `request` parameter (`request.param` → {"param"}). Used to
+    decide whether a fixture's `request` usage is the supported `request.param` or deeper introspection."""
+    attrs = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "request":
+            attrs.add(n.attr)
+    return attrs
+
+
 def _parametrize_argnames(deco: ast.Call) -> list:
     if not deco.args:
         return []
@@ -233,6 +243,7 @@ class _Migrator(ast.NodeTransformer):
     # ---- fixture → provider ----
     def _fixture(self, node: ast.FunctionDef):
         new_decos = []
+        parametrized = False
         for deco in node.decorator_list:
             dotted = _dotted(deco)
             if dotted in ("pytest.fixture", "fixture"):
@@ -246,6 +257,7 @@ class _Migrator(ast.NodeTransformer):
                 if (params := _kwarg(deco, "params")) is not None:
                     # B5: provider-level params carry over natively (read via `request.param`).
                     keep.append(ast.keyword(arg="params", value=params))
+                    parametrized = True
                     self.report.mapped(node.lineno, f"provider `{node.name}` params= carried over (B5)")
                 new_decos.append(ast.copy_location(
                     ast.Call(func=_attr("riptide", "provides"), args=[], keywords=keep), deco))
@@ -263,8 +275,24 @@ class _Migrator(ast.NodeTransformer):
                 new_decos.append(deco)
         node.decorator_list = new_decos
         if any(a.arg == "request" for a in node.args.args):
-            self.report.cant(node.lineno, f"fixture `{node.name}` uses `request` — port to typed deps / yield teardown")
+            self._classify_request(node, parametrized)
         return node
+
+    def _classify_request(self, node: ast.FunctionDef, parametrized: bool) -> None:
+        """B4 decision (ADR-E012 revisit): `request.param` on a `params=` provider is **supported**
+        natively (B5) → no action. `request.getfixturevalue` is a dynamic lookup with no type-DI
+        equivalent → **permanent** can't-map. Any other `request.*` introspection → manual port."""
+        attrs = _request_attrs(node)
+        if "getfixturevalue" in attrs:
+            self.report.cant(node.lineno, f"provider `{node.name}` uses `request.getfixturevalue` — "
+                             "dynamic fixture lookup has no type-DI equivalent (permanent); request the "
+                             "provider as a typed parameter instead")
+        elif parametrized and attrs <= {"param"}:
+            pass  # request.param on a parametrized provider is the supported B5 path — nothing to flag
+        else:
+            shown = ", ".join(f"request.{a}" for a in sorted(attrs)) or "request"
+            self.report.cant(node.lineno, f"provider `{node.name}` uses {shown} — only `request.param` "
+                             "(on a `params=` provider) is supported; port other introspection manually")
 
     # ---- test: marks + type-annotate fixture params ----
     def _test(self, node: ast.FunctionDef):

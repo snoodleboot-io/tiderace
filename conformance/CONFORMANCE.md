@@ -18,13 +18,18 @@ python3 conformance.py vendor/click vendor/cachetools
 
 ## Results
 
-| repo | pin | test files | mapped | can't-map | auto-map (post-B1) | auto-map (post-B3) |
-|---|---|---:|---:|---:|---:|---:|
-| pallets/click | `8.1.7` (874ca2b) | 21 | 135 | 9 | 93% | **94%** |
-| tkem/cachetools | `v5.5.0` (6c78a8f) | 12 | 0 | 0 | n/a | n/a |
-| pallets/flask | `3.0.3` (c12a5d8) | 29 | 134 | 35 | 66% | **79%** |
-| agronholm/anyio | `4.4.0` (053e8f0) | 21 | 67 | 17 | 80% | **80%** |
-| **TOTAL** | | **83** | **336** | **61** | 79% | **85%** |
+| repo | pin | test files | can't-map | first pass | post-B1 | post-B3 | **post-B5/B4** |
+|---|---|---:|---:|---:|---:|---:|---:|
+| pallets/click | `8.1.7` (874ca2b) | 9 | 70% | 93% | 94% | **94%** |
+| tkem/cachetools | `v5.5.0` (6c78a8f) | 0 | n/a | n/a | n/a | n/a |
+| pallets/flask | `3.0.3` (c12a5d8) | 33 | — | 66% | 79% | **80%** |
+| agronholm/anyio | `4.4.0` (053e8f0) | 1 | — | 80% | 80% | **99%** |
+| **TOTAL** | | **43** | — | 79% | 85% | **89%** |
+
+*Progression: first pass 70% (click only) → B1 builtins → B3 type-inference (79%→85%) → B5 provider
+params + B4 request decision (85%→**89%**, can't-map 61→43). B2 usefixtures shipped but corpus-neutral
+(its targets are untyped). Remaining 43: untyped providers/params (the unconfident inference remainder),
+6 usefixtures (untyped targets), 3 unsupported builtins, 1 from-pytest import.*
 
 **cachetools is a pure `unittest.TestCase` suite** — *nothing pytest-specific to migrate*. riptide
 already drives it via stdlib `unittest.TestCase.run()` (ADR-E001), so it runs **as-is, no migration**.

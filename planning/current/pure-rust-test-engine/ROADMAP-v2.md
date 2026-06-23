@@ -138,9 +138,9 @@ one-line ADR/doc note if a decision was made.
 - [x] Emit the inferred annotation (`-> X`) instead of flagging, when confident; flag when not
   - Done: untyped-provider + untyped-fixture-param buckets shrank (Flask 25→19 / 27→10); precision-tested — lowercase factories / bare names / conflicting returns never mis-annotated
 
-### B4 — `request` introspection  ⬜  *(2% — low priority)*
-- [ ] Decide a narrow native equivalent (e.g. `Request` with `.param`/`.node`) vs. permanent can't-map
-  - Done: a documented decision in ADR-E012's revisit section
+### B4 — `request` introspection  ✅ **done (2026-06-23)**  *(decision in [ADR-E012](design/adr/ADR-E012-native-type-driven-authoring.md))*
+- [x] Decided per case: `request.param` → **supported** (B5); `request.getfixturevalue` → **permanent** can't-map (dynamic name lookup); other `request.*` → manual port. No broad `Request` object (revisit trigger recorded).
+  - Done: `migrate` stops flagging `request.param` on `params=` providers → anyio **89%→99%**, total **87%→89%**
 
 ### B5 — Async + provider-level params  🟢 **provider-params done (2026-06-23)**
 *Proof `proof_b5_provider_params.py`; measured TOTAL 85%→87%, anyio 80%→89%.*
