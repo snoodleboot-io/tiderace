@@ -53,8 +53,11 @@ one-line ADR/doc note if a decision was made.
 | **Type-inference for untyped fixtures (B3)** | ✅ done (total 79%→85%) |
 | **Corpus breadth (B7: +Flask +anyio, 4 repos)** | ✅ done |
 | **Run-through tier (B6)** | 🟢 harness + cachetools 215/215 100%; migrated pytest repos pending venv |
-| usefixtures (B2), request (B4), async/provider-params (B5) | ⬜ (long tail; 10/18/15% of remaining) |
-| ② in-process/FFI backend | 🟡 spiked GO, design pending |
+| **usefixtures (B2)** | ✅ done (capability; corpus-neutral — untyped targets) |
+| **request introspection (B4)** | ✅ done (decision; anyio 89%→99%) |
+| **provider-params (B5)** | ✅ done (anyio→99%); async providers remain |
+| **Migrate conformance** | **89% across 4 repos** (anyio 99%, click 94%, flask 80%) |
+| ② in-process/FFI backend | 🟡 isolation ADR ratified (E013); impl pending (`pyo3`) |
 
 ---
 
