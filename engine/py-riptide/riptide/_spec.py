@@ -18,6 +18,7 @@ class ProviderSpec:
     autouse: bool
     name: str
     is_yield: bool
+    params: tuple = ()  # provider-level parametrization (B5): the provider fans out, one value per param
 
 
 @dataclass(frozen=True)

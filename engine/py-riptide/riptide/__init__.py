@@ -50,9 +50,12 @@ __all__ = [
 ]
 
 
-def provides(_fn=None, *, scope: str = "function", autouse: bool = False, name=None, type=None):
+def provides(_fn=None, *, scope: str = "function", autouse: bool = False, name=None, type=None, params=None):
     """Declare a resource (riptide's fixture). The provided type is `type=` or the function's return
-    annotation (unwrapping `Iterator[T]`/`Generator[T, ...]` for yield-style teardown)."""
+    annotation (unwrapping `Iterator[T]`/`Generator[T, ...]` for yield-style teardown).
+
+    `params=[...]` fans the provider out (B5 — the native form of `@pytest.fixture(params=...)`): the
+    test runs once per value, which the provider reads via a `request` parameter (`request.param`)."""
 
     def deco(fn):
         ptype = type or provided_type(fn)
@@ -71,6 +74,7 @@ def provides(_fn=None, *, scope: str = "function", autouse: bool = False, name=N
             autouse=autouse,
             name=name or fn.__name__,
             is_yield=inspect.isgeneratorfunction(fn),
+            params=tuple(params) if params else (),
         )
         return fn
 

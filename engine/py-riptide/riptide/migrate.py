@@ -243,9 +243,10 @@ class _Migrator(ast.NodeTransformer):
                     keep.append(ast.keyword(arg="autouse", value=autouse))
                 if (name := _kwarg(deco, "name")) is not None:
                     keep.append(ast.keyword(arg="name", value=name))
-                if _kwarg(deco, "params") is not None:
-                    self.report.cant(node.lineno, f"fixture `{node.name}` is parametrized (`params=`) — "
-                                     "provider-level params aren't in riptide yet; convert to @riptide.cases on tests")
+                if (params := _kwarg(deco, "params")) is not None:
+                    # B5: provider-level params carry over natively (read via `request.param`).
+                    keep.append(ast.keyword(arg="params", value=params))
+                    self.report.mapped(node.lineno, f"provider `{node.name}` params= carried over (B5)")
                 new_decos.append(ast.copy_location(
                     ast.Call(func=_attr("riptide", "provides"), args=[], keywords=keep), deco))
                 self.report.mapped(node.lineno, f"@pytest.fixture → @riptide.provides ({node.name})")

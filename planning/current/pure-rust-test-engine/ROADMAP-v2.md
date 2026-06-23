@@ -142,10 +142,11 @@ one-line ADR/doc note if a decision was made.
 - [ ] Decide a narrow native equivalent (e.g. `Request` with `.param`/`.node`) vs. permanent can't-map
   - Done: a documented decision in ADR-E012's revisit section
 
-### B5 — Async + provider-level params  ⬜
-- [ ] Async providers (`async def @provides` + `await` in body) — pairs with Phase-4 async tests
-- [ ] Provider-level parametrization (`@provides` that fans out) — currently can't-map in `migrate`
-  - Done: each has a proof; `migrate` parametrized-fixture bucket addressed
+### B5 — Async + provider-level params  🟢 **provider-params done (2026-06-23)**
+*Proof `proof_b5_provider_params.py`; measured TOTAL 85%→87%, anyio 80%→89%.*
+- [ ] Async providers (`async def @provides` + `await` in body) — pairs with Phase-4 async tests *(remaining)*
+- [x] Provider-level parametrization — `@riptide.provides(params=[...])` fans the test out (value via `request.param`); `migrate` carries `params=` over instead of flagging
+  - Done: proof shows fan-out across params + worst-wins aggregation; the **parametrized-fixture can't-map bucket cleared** (anyio 8→0, total can't-map 61→52)
 
 ### B6 — Migration **run-through-engine** tier  🟢 **harness + first repo done (2026-06-21)**
 *`conformance/runthrough.py`; first target cachetools.*

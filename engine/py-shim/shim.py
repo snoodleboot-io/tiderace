@@ -200,8 +200,9 @@ def _native_fixture_def(obj, location: str, type_index: dict) -> FixtureDef:
     spec = obj.__riptide_provider__
     return FixtureDef(
         name=spec.name,
+        # B5: provider-level params fan the provider out (read via `request.param`); `()` ⇒ unparametrized.
+        params=list(spec.params) if getattr(spec, "params", ()) else None,
         scope=spec.scope,
-        params=None,  # native parametrization is test-level (@riptide.cases), not provider-level
         autouse=spec.autouse,
         func=obj,
         location=location,
