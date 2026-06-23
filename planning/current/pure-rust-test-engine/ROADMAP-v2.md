@@ -126,10 +126,11 @@ one-line ADR/doc note if a decision was made.
   - Done: re-ran conformance → **click auto-map 70% → 93%** (can't-map 43→10; entire builtin bucket eliminated)
   - **Decision:** builtins injected by *distinct* types (not bare `pathlib.Path`) to keep type-DI unambiguous
 
-### B2 — `usefixtures` handling  ⬜  *(14% of click can't-map)*
-- [ ] Native `@riptide.uses(Provider)` (by type) and/or autouse mapping
-- [ ] `migrate`: `@pytest.mark.usefixtures("x")` → `@riptide.uses(<TypeOfX>)` when the type is known; flag otherwise
-  - Done: conformance usefixtures bucket shrinks measurably
+### B2 — `usefixtures` handling  ✅ **done (2026-06-22)**  *(capability shipped; corpus bucket gated upstream — see note)*
+*Proof `proof_b2_uses.py`.*
+- [x] Native `@riptide.uses(Provider)` — by type; the shim sets the provider up (and tears it down) in the closure without injecting it
+- [x] `migrate`: `@pytest.mark.usefixtures("x")` → `@riptide.uses(<TypeOfX>)` when the referenced fixture's type is known; flag otherwise
+  - **Honest finding:** the corpus's usefixtures bucket did **not** shrink — click's 6 all reference *untyped* fixtures, so they're blocked upstream by inference precision (B3), not by usefixtures support. The capability is delivered + proven; the bucket clears once those fixtures become typeable.
 
 ### B3 — Migration type-inference for untyped fixtures  ✅ **done (2026-06-21)**  *(was 65% of gaps across 4 repos)*
 *Proof `proof_b3_inference.py`; measured TOTAL 79%→85%, Flask 66%→79%.*

@@ -33,6 +33,7 @@ from ._spec import SCOPES, Case, Mark, ProviderSpec
 __all__ = [
     "provides",
     "cases",
+    "uses",
     "skip",
     "skip_if",
     "xfail",
@@ -82,6 +83,24 @@ def cases(arg=None, *, ids=None, **kwargs):
 
     def deco(fn):
         fn.__riptide_cases__ = _normalize_cases(arg, kwargs, ids)
+        return fn
+
+    return deco
+
+
+def uses(*types: type):
+    """Depend on provider(s) **by type** for their side effects, without binding them as parameters —
+    the native analogue of `@pytest.mark.usefixtures`. Each type is set up (and torn down) around the
+    test like any provider, but no value is passed in. Stamps `__riptide_uses__` (a list of types) that
+    the shim resolves to provider names and folds into the test's closure.
+
+        @riptide.uses(SeededDb)           # SeededDb's provider runs; nothing injected
+        def test_reads_seeded_rows():
+            ...
+    """
+
+    def deco(fn):
+        fn.__dict__.setdefault("__riptide_uses__", []).extend(types)
         return fn
 
     return deco

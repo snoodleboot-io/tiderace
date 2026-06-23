@@ -295,9 +295,20 @@ class _Migrator(ast.NodeTransformer):
                 new_decos.append(ast.copy_location(_call("riptide", "xfail", _kwarg(deco, "reason")), deco))
                 self.report.mapped(node.lineno, f"@pytest.mark.xfail → @riptide.xfail ({node.name})")
             elif dotted in ("pytest.mark.usefixtures", "mark.usefixtures"):
-                names = ", ".join(a.value for a in deco.args if isinstance(a, ast.Constant))
-                self.report.cant(node.lineno, f"`usefixtures({names!r})` — string names carry no type; "
-                                 "request them as typed params or mark the provider autouse=True")
+                names = [a.value for a in deco.args if isinstance(a, ast.Constant)]
+                types = [self.fixture_types.get(n) for n in names]
+                if names and all(t is not None for t in types):
+                    # @pytest.mark.usefixtures("a","b") → @riptide.uses(A, B), wired by type (B2)
+                    args = [ast.parse(t, mode="eval").body for t in types]
+                    new_decos.append(ast.copy_location(
+                        ast.Call(func=_attr("riptide", "uses"), args=args, keywords=[]), deco))
+                    self.report.mapped(node.lineno, f"@pytest.mark.usefixtures({names}) → "
+                                       f"@riptide.uses({', '.join(types)}) ({node.name})")
+                else:
+                    unknown = [n for n, t in zip(names, types) if t is None]
+                    self.report.cant(node.lineno, f"`usefixtures({unknown})` in `{node.name}` — those "
+                                     "fixtures are untyped/unknown, so no type to wire; annotate the "
+                                     "provider's return type or mark it autouse")
             elif dotted.startswith("pytest.mark.") or dotted.startswith("mark."):
                 tagname = dotted.rsplit(".", 1)[-1]
                 new_decos.append(ast.copy_location(

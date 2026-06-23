@@ -345,10 +345,11 @@ def _import_conftest(path: str, rel_dir: str):
 
 
 # --------------------------------------------------------------------------- closure
-def _closure(reg: Registry, module_key: str, requested: dict) -> list[FixtureDef]:
+def _closure(reg: Registry, module_key: str, requested: dict, extra: list | None = None) -> list[FixtureDef]:
     """Resolved fixture closure for a test, dependencies-before-dependents (topo). Includes
-    requested fixtures (the provider names of `requested`'s param→provider bindings), all in-scope
-    autouse fixtures, and their transitive deps."""
+    requested fixtures (the provider names of `requested`'s param→provider bindings), `extra` provider
+    names (e.g. `@riptide.uses` — set up but not injected), all in-scope autouse fixtures, and their
+    transitive deps."""
     ordered: list[FixtureDef] = []
     seen: set[str] = set()
     visiting: set[str] = set()
@@ -370,6 +371,8 @@ def _closure(reg: Registry, module_key: str, requested: dict) -> list[FixtureDef
     for d in reg.autouse_for(module_key):
         visit(d.name)
     for provider_name in requested.values():
+        visit(provider_name)
+    for provider_name in extra or ():
         visit(provider_name)
     return ordered
 
@@ -544,7 +547,8 @@ class Engine:
         case_params = [p for p in requested if p not in fixture_requested]
         case_kwargs_list = [dict(zip(case_params, c.values)) for c in self._cases(node_id, style)] or [{}]
 
-        closure = _closure(self.reg, module_key, fixture_requested)
+        uses = self._uses(node_id, style)  # @riptide.uses: set up by type, not injected (B2)
+        closure = _closure(self.reg, module_key, fixture_requested, uses)
         parametrized = [d for d in closure if d.params]
         if parametrized:
             axes = [[(d.name, p) for p in d.params] for d in parametrized]
@@ -686,6 +690,24 @@ class Engine:
         else:
             func = getattr(module, node_id.partition("::")[2])
         return list(getattr(func, "__riptide_marks__", ()))
+
+    def _uses(self, node_id: str, style: str) -> list:
+        """Provider names a test depends on via `@riptide.uses(Type, ...)` — resolved by type, set up
+        in the closure but never passed as args (the native `usefixtures`). unittest carries none."""
+        if style == "unittest_method":
+            return []
+        module = importlib.import_module(_module_name(_module_key(node_id)))
+        if style == "pytest_method":
+            cls, method = _class_method(node_id)
+            func = getattr(getattr(module, cls), method)
+        else:
+            func = getattr(module, node_id.partition("::")[2])
+        names = []
+        for t in getattr(func, "__riptide_uses__", ()):
+            provs = self.reg.by_type.get(t, [])
+            if len(provs) == 1:  # unambiguous; ambiguity is the author's to disambiguate
+                names.append(provs[0])
+        return names
 
     def _cases(self, node_id: str, style: str) -> list:
         """The native `@riptide.cases` variants on a test, read by attribute. unittest has none."""
