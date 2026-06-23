@@ -145,9 +145,9 @@ one-line ADR/doc note if a decision was made.
 - [x] Decided per case: `request.param` → **supported** (B5); `request.getfixturevalue` → **permanent** can't-map (dynamic name lookup); other `request.*` → manual port. No broad `Request` object (revisit trigger recorded).
   - Done: `migrate` stops flagging `request.param` on `params=` providers → anyio **89%→99%**, total **87%→89%**
 
-### B5 — Async + provider-level params  🟢 **provider-params done (2026-06-23)**
-*Proof `proof_b5_provider_params.py`; measured TOTAL 85%→87%, anyio 80%→89%.*
-- [ ] Async providers (`async def @provides` + `await` in body) — pairs with Phase-4 async tests *(remaining)*
+### B5 — Async + provider-level params  ✅ **done (2026-06-23)**
+*Proofs `proof_b5_provider_params.py`, `proof_b5_async_providers.py`; measured TOTAL 85%→87%, anyio 80%→89%.*
+- [x] Async providers (`async def @provides`, coroutine or async-gen w/ teardown) — set up + torn down on the **same event loop** as the (async or sync) body, wired by type; function-scope (wider-scope async is the documented edge). Sync hot path untouched.
 - [x] Provider-level parametrization — `@riptide.provides(params=[...])` fans the test out (value via `request.param`); `migrate` carries `params=` over instead of flagging
   - Done: proof shows fan-out across params + worst-wins aggregation; the **parametrized-fixture can't-map bucket cleared** (anyio 8→0, total can't-map 61→52)
 

@@ -24,6 +24,7 @@ the marker read (ADR-E001).
 from __future__ import annotations
 
 import ast
+import asyncio
 import difflib
 import importlib
 import importlib.util
@@ -424,6 +425,81 @@ def _teardown(gen) -> None:
         pass
 
 
+# --------------------------------------------------------------------------- async providers (B5)
+def _is_async_fixture(func) -> bool:
+    """An `async def` provider (coroutine) or `async def ... yield` provider (async generator)."""
+    return inspect.iscoroutinefunction(func) or inspect.isasyncgenfunction(func)
+
+
+async def _setup_fixture_async(fdef: FixtureDef, args: dict, param):
+    """Async-aware setup: drives sync *and* async providers up to their first (a)yield. Returns
+    `(value, handle)` where handle is `None` | `("gen", g)` | `("agen", ag)` for teardown."""
+    call_args = dict(args)
+    if fdef.wants_request:
+        call_args["request"] = _Request(param)
+    if inspect.isasyncgenfunction(fdef.func):
+        ag = fdef.func(**call_args)
+        return await ag.__anext__(), ("agen", ag)
+    if inspect.iscoroutinefunction(fdef.func):
+        return await fdef.func(**call_args), None
+    if fdef.is_yield:  # a sync yield-fixture used alongside async ones
+        gen = fdef.func(**call_args)
+        return next(gen), ("gen", gen)
+    return fdef.func(**call_args), None
+
+
+async def _teardown_async(handle) -> None:
+    if handle is None:
+        return
+    kind, g = handle
+    try:
+        if kind == "agen":
+            await g.__anext__()
+        else:
+            next(g)
+    except (StopIteration, StopAsyncIteration):
+        pass
+    except Exception:  # noqa: BLE001 — a teardown error must not abort remaining finalizers
+        pass
+
+
+def _test_is_async(node_id: str, style: str) -> bool:
+    """Whether the test body is `async def` (unittest methods are never async-driven here)."""
+    if style == "unittest_method":
+        return False
+    module = importlib.import_module(_module_name(_module_key(node_id)))
+    if style == "pytest_method":
+        cls, method = _class_method(node_id)
+        func = getattr(getattr(module, cls), method, None)
+    else:
+        func = getattr(module, node_id.partition("::")[2], None)
+    return inspect.iscoroutinefunction(func)
+
+
+async def _invoke_async(node_id: str, style: str, args: dict) -> tuple[str, str]:
+    """The async sibling of `_invoke`: call the test, `await` it if it's a coroutine, and map the same
+    outcomes (incl. lazy RichDiff on `AssertionError`). Runs inside the per-test event loop, so it must
+    `await` directly — never `asyncio.run` (which can't nest)."""
+    module = importlib.import_module(_module_name(_module_key(node_id)))
+    try:
+        if style == "pytest_method":
+            cls_name, method = _class_method(node_id)
+            result = getattr(getattr(module, cls_name)(), method)(**args)
+        else:
+            result = getattr(module, node_id.partition("::")[2])(**args)
+        if inspect.iscoroutine(result):
+            await result
+        return "passed", ""
+    except AssertionError as exc:
+        plain = "".join(traceback.format_exception_only(type(exc), exc))
+        rich = _introspect_assertion(exc)
+        return "failed", (rich + plain) if rich else plain
+    except unittest.SkipTest as exc:
+        return "skipped", str(exc)
+    except Exception as exc:  # noqa: BLE001 — any test error maps to Outcome::Error
+        return "error", "".join(traceback.format_exception_only(type(exc), exc))
+
+
 class _Coverage:
     """Per-test executed-source capture inside the fork child (ADR-E006, design 11). Uses PEP 669
     `sys.monitoring` LINE events on CPython 3.12+ (disabling each location once seen, so overhead is
@@ -647,6 +723,18 @@ class Engine:
 
         cov = _Coverage(self.root, self.coverage)
         cov.start()  # capture the per-test footprint: fixture setup + body, this test only (ADR-E006)
+        # B5: async test body or any function-scope async provider ⇒ run setup+body+teardown on ONE
+        # event loop (objects created on a loop must be awaited on the same loop). Sync path untouched.
+        if _test_is_async(node_id, style) or any(
+            _is_async_fixture(d.func) for d in closure if d.rank == 0
+        ):
+            try:
+                outcome, detail = asyncio.run(
+                    self._child_exec_async(node_id, style, requested, closure, combo, case_kwargs)
+                )
+                return outcome, detail, cov.stop()
+            finally:
+                cov.stop()
         try:
             for d in closure:
                 if d.rank != 0:
@@ -664,6 +752,36 @@ class Engine:
             cov.stop()  # idempotent — frees the monitoring tool id even if setup raised
             for gen in reversed(gens):
                 _teardown(gen)
+
+    async def _child_exec_async(self, node_id, style, requested, closure, combo, case_kwargs=None) -> tuple:
+        """The async sibling of the function-scope portion of `_child_exec` (B5): sets up function-scope
+        fixtures (sync or async) on this loop, runs the (possibly async) body, tears down in reverse.
+        Wider-scope fixtures are inherited from the parent as usual; only function-scope async providers
+        are driven here (a wider-scope async provider is an unsupported edge — none in the corpus)."""
+        module_key = _module_key(node_id)
+        local: dict[str, object] = {}
+        handles: list = []
+
+        def value_of(name: str):
+            if name in local:
+                return local[name]
+            return self._value(name, module_key)
+
+        try:
+            for d in closure:
+                if d.rank != 0:
+                    continue
+                args = {param: value_of(prov) for param, prov in d.bindings.items()}
+                val, handle = await _setup_fixture_async(d, args, combo.get(d.name))
+                local[d.name] = val
+                handles.append(handle)
+            test_args = {param: value_of(prov) for param, prov in requested.items()}
+            if case_kwargs:
+                test_args.update(case_kwargs)
+            return await _invoke_async(node_id, style, test_args)
+        finally:
+            for handle in reversed(handles):
+                await _teardown_async(handle)
 
     def _requested(self, node_id: str, style: str) -> dict:
         """The resources a test requests, as `param_name -> provider_name` bindings. Native params
@@ -777,8 +895,6 @@ def _maybe_await(result):
     straight through); a coroutine is run on a fresh event loop per test — isolation is free since each
     test is its own fork child. Async *providers* are deferred to Track B (B5)."""
     if inspect.iscoroutine(result):
-        import asyncio
-
         asyncio.run(result)
 
 
