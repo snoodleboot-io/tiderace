@@ -99,8 +99,8 @@ one-line ADR/doc note if a decision was made.
 
 - [x] **`LocalityScheduler`** — duration-aware LPT balancing + scope-locality (5 tests; makespan ≤ round-robin on uneven durations; a module co-locates; dominant group splits)
 - [x] **FS watch + invalidation** — `engine-daemon`: content-hash `Invalidator` (conftest/config/C-ext recycle; test→recollect; source→impact; identical bytes→no-op) + `notify`-backed `FsWatcher` + noise-filtering `Debouncer`
-- [🟢] **Warm daemon brain** — `Session` composes invalidation→impact→cache into the minimum re-run (`ChangeOutcome`); RPC protocol types (`RpcRequest`/`RpcResponse`). ⏳ remaining: the socket server + process lifecycle (start/reuse/health) glue, integration-tested e2e
-- [ ] ⏳ **`tiderace watch`** native mode — the thin client over the daemon (needs the socket/lifecycle glue above)
+- [🟢] **Warm daemon** — brain + wire layer done: `Session` composes invalidation→impact→cache into the minimum re-run (`ChangeOutcome`); `RpcRequest`/`RpcResponse` protocol; `serve_connection` (framing + dispatch loop, in-memory tested) + `serve_unix_socket` (cfg(unix)). ⏳ remaining: an `RpcHandler` over a live warm `Session`+wellspring (discover/run real Python) + process lifecycle (start/reuse/health) — needs an e2e harness
+- [ ] ⏳ **`tiderace watch`** native mode — the thin client over the daemon (needs the live `RpcHandler` wiring above)
 
 ### Phase 7 — Reporting + hardening (compat → migration)  🟡 **reporters done**
 *Designs: [12-plugin-host](design/12-plugin-host.md), [13-cross-cutting](design/13-cross-cutting.md); [ADR-E008](design/adr/ADR-E008-cross-platform.md). Note: "pytest-compat layer" is **replaced** by Track B migration.*
