@@ -10,6 +10,7 @@
 //! incremental session, FS-watch coalescing). The socket/process lifecycle glue layers on top of
 //! these pieces. One type per file (ADR-E005), mirroring design 08.
 
+mod engine_handler;
 mod fs_watcher;
 mod invalidator;
 mod rpc_method;
@@ -18,6 +19,7 @@ mod session;
 #[cfg(unix)]
 mod socket;
 
+pub use engine_handler::EngineHandler;
 pub use fs_watcher::{Debouncer, FsWatcher};
 pub use invalidator::{Invalidation, Invalidator};
 pub use rpc_method::{RpcRequest, RpcResponse, RpcResult};
