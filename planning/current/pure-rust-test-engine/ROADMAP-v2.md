@@ -41,8 +41,8 @@ one-line ADR/doc note if a decision was made.
 | 3 Fixtures + watermarks | ✅ done | merged to `main_v2` |
 | 4 Full styles + assertions | 🟢 **core done** | marks/`@cases` + RichDiff + async + unittest fidelity done; purity guard deferred to sandbox |
 | 5 Coverage + cache | 🟢 **core done** | coverage→DepGraph→impact + content-addressed cache done; live-loop wiring with Phase-6 daemon |
-| 6 Scheduler + daemon | 🟡 **scheduler done** | LocalityScheduler done; warm daemon / FS-watch need new deps (notify, JSON-RPC) |
-| 7 Compat + reporting + hardening | 🟡 **reporters started** | terminal/JUnit/JSON done; GitHub/SARIF + plugin host + perf + Windows remain |
+| 6 Scheduler + daemon | ✅ **done** | LocalityScheduler + warm daemon (EngineHandler e2e, watch, `riptide-daemon` bin); inner loop ~7ms |
+| 7 Compat + reporting + hardening | 🟢 **core done** | 5 reporters + plugin host + Windows CI + measured perf; further governor tuning iterative |
 
 | Track B item | Status |
 |---|---|
@@ -99,8 +99,8 @@ one-line ADR/doc note if a decision was made.
 
 - [x] **`LocalityScheduler`** — duration-aware LPT balancing + scope-locality (5 tests; makespan ≤ round-robin on uneven durations; a module co-locates; dominant group splits)
 - [x] **FS watch + invalidation** — `engine-daemon`: content-hash `Invalidator` (conftest/config/C-ext recycle; test→recollect; source→impact; identical bytes→no-op) + `notify`-backed `FsWatcher` + noise-filtering `Debouncer`
-- [🟢] **Warm daemon** — brain + wire layer done: `Session` composes invalidation→impact→cache into the minimum re-run (`ChangeOutcome`); `RpcRequest`/`RpcResponse` protocol; `serve_connection` (framing + dispatch loop, in-memory tested) + `serve_unix_socket` (cfg(unix)). ⏳ remaining: an `RpcHandler` over a live warm `Session`+wellspring (discover/run real Python) + process lifecycle (start/reuse/health) — needs an e2e harness
-- [ ] ⏳ **`tiderace watch`** native mode — the thin client over the daemon (needs the live `RpcHandler` wiring above)
+- [x] **Warm daemon** — full + runnable: `Session` (invalidation→impact→cache→`ChangeOutcome`); RPC protocol + `serve_connection` + `serve_unix_socket`; **`EngineHandler` over a warm reused wellspring** (e2e-proven: discover/run real Python, warm); `riptide-daemon` binary (run/serve/watch/bench)
+- [x] **`tiderace watch`** native mode — `react_to_change` (edit→minimum-rerun, unit-tested) + `watch_loop` (FsWatcher→debounce→react) + `riptide-daemon watch`. Measured warm rerun ≈ **7 ms** vs pytest ≈ 650 ms ([RESULTS-native.md](../../../benchmarks/RESULTS-native.md))
 
 ### Phase 7 — Reporting + hardening (compat → migration)  🟡 **reporters done**
 *Designs: [12-plugin-host](design/12-plugin-host.md), [13-cross-cutting](design/13-cross-cutting.md); [ADR-E008](design/adr/ADR-E008-cross-platform.md). Note: "pytest-compat layer" is **replaced** by Track B migration.*
@@ -108,7 +108,7 @@ one-line ADR/doc note if a decision was made.
 - [x] **Reporters** — terminal + JUnit XML + JSON + GitHub annotations + SARIF, all behind the `Reporter` seam (8 tests; each validated against its consumer's shape)
 - [x] **Plugin host** — `hooks::HookHost`: registers `Hook` plugins, dispatches typed `HookEvent`s by static call (no `pluggy`), `Priority`+stable order resolved once (2 tests: a sample plugin observes all events; priority ordering). `PyPluginAdapter` (Python-plugin FFI bridge) deferred to ②.
 - [x] **Conformance suite** (B6) — `conformance/runthrough.py` runs a suite **through the engine** vs an oracle; cachetools 215/215 = 100%. ⏳ extend to the migrated pytest repos (needs per-repo venvs)
-- [ ] ⏳ **Perf hardening** — batching, governor tuning, startup → `benchmarks/RESULTS.md`
+- [x] **Perf hardening (measured)** — `riptide-daemon bench` + [benchmarks/RESULTS-native.md](../../../benchmarks/RESULTS-native.md): honest cold/warm numbers. Inner loop (warm rerun of 1 impacted test) ≈ **7 ms vs pytest ≈ 650 ms (~90×)**; full cold run of cheap tests is *slower* than pytest (fork-per-test isolation tax — the lever ② targets). ⏳ further tuning (batching/governor) is iterative
 - [🟢] **Windows validation** — `engine-windows` CI job added (`.github/workflows/ci.yml`): `windows-latest` builds the engine workspace + runs clippy/fmt + `cargo test --all` (pure-Rust unit/lib/daemon pass; fork integration self-skips without the venv). Engine compiles cross-platform (only `cache_key` has unix code, with a `cfg(not(unix))` fallback). ⏳ remaining: the no-fork `SubprocessWorker` *acceptance* against a real Python on Windows (drive the `--no-fork` shim) — and confirming the job green on its first CI run
 
 ---
