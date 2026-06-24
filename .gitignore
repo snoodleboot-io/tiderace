@@ -13,6 +13,7 @@
 
 # pure-rust-test-engine build artifacts (sources ARE committed)
 spike/target/
+spike-inproc/target/
 engine/target/
 
 # Session files are per-developer working state, not committed (see core-session.md)
