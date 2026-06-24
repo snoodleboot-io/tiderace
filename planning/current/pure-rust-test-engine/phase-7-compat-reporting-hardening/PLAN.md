@@ -1,8 +1,6 @@
 # Phase 7 — Compat + Reporting + Plugin Host + Hardening (adoption + ship-readiness)
 
-> **Status:** 📋 PLAN — awaiting human approval. **No agent begins work, no Lane 0 starts, no code is
-> written, no agent is spawned until this phase is explicitly approved.** This document is for human
-> review only.
+> **Status:** 🟢 **core DELIVERED** on `feat/n5-conformance` — 5 reporters + plugin host (`HookHost`) + Windows CI job + measured perf; further governor tuning is iterative. Live status: [ROADMAP-v2](../ROADMAP-v2.md). Original plan preserved below.
 > **Owner:** orchestrator-agent · **PM/architect:** architect-agent (+ plan-agent) · **Persona:** Software Engineer · **Date:** 2026-06-15
 > **Shared scaffold:** [PIPELINE.md](../PIPELINE.md) (conventions, agent roster, env-gate doctrine,
 > implementation standards, enforcement checkpoints, test doctrine, debug/retry — **not repeated here**).

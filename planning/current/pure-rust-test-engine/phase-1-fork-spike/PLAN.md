@@ -1,6 +1,6 @@
 # Phase 1 — Fork/Wellspring Spike (de-risk) — Implementation Plan
 
-> 📋 **PLAN — awaiting human approval. No agent begins work until approved.**
+> ✅ **DELIVERED & merged to `main_v2`** (GO). Live status: [ROADMAP-v2](../ROADMAP-v2.md). Original plan preserved below for history.
 >
 > **Shared scaffold (read first):** [PIPELINE.md](../PIPELINE.md) · **Roadmap:** [ROADMAP.md](../ROADMAP.md)
 > **Phase design:** [05-execution-wellspring](../design/05-execution-wellspring.md) ·

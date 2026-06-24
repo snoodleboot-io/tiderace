@@ -1,7 +1,6 @@
 # Phase 6 — Scheduler + Warm Daemon (the sub-100ms inner loop)
 
-> **Status:** 📋 PLAN — awaiting human approval. **No agent begins work, no Lane 0 starts, no code is
-> written until this phase is explicitly approved.** This document is for human review only.
+> **Status:** ✅ **DELIVERED** on `feat/n5-conformance` — LocalityScheduler + runnable warm daemon (`EngineHandler` e2e, `react_to_change`/`watch_loop`, `riptide-daemon` bin); measured inner loop ≈ 7 ms. Live status: [ROADMAP-v2](../ROADMAP-v2.md). Original plan preserved below.
 > **Owner:** orchestrator-agent · **PM/architect:** architect-agent (+ plan-agent) · **Persona:** Software Engineer · **Date:** 2026-06-15
 > **Shared scaffold:** [PIPELINE.md](../PIPELINE.md) (conventions, agent roster, env-gate doctrine,
 > implementation standards, enforcement checkpoints, test doctrine, debug/retry — **not repeated here**).

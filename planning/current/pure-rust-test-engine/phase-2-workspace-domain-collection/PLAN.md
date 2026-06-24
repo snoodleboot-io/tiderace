@@ -1,7 +1,6 @@
 # Phase 2 — Workspace + Domain + Collection (Multiagent Implementation Plan)
 
-> **Status:** 📋 PLAN — awaiting human approval. **No agent begins work, no code is written, and no
-> subagent is spawned until this phase is approved.** This document is for human review only.
+> **Status:** ✅ **DELIVERED & merged to `main_v2`.** Live status: [ROADMAP-v2](../ROADMAP-v2.md). Original plan preserved below for history.
 >
 > **Shared scaffold (read first, not repeated here):** [PIPELINE.md](../PIPELINE.md) —
 > conventions (§1), roster→roles (§2), env-gate doctrine (§3), implementation standards (§4),

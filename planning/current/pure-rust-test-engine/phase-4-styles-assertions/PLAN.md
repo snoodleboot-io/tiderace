@@ -1,7 +1,6 @@
 # Phase 4 — Full Test Styles + Assertion Introspection — Implementation PLAN
 
-> **Status:** 📋 PLAN — awaiting human approval. **No agent begins work, no env is provisioned, no
-> code is written until this phase is approved.** This document is for human review only.
+> **Status:** ✅ **core DELIVERED** on `feat/n5-conformance` — RichDiff (ADR-E009) + async tests + unittest fidelity; purity guard deferred to the sandbox. Live status: [ROADMAP-v2](../ROADMAP-v2.md). Original plan preserved below.
 >
 > **Shared scaffold (read first, not repeated here):** [PIPELINE.md](../PIPELINE.md) — conventions,
 > agent roster→role map, Lane 0 doctrine, implementation standards, enforcement checkpoints,

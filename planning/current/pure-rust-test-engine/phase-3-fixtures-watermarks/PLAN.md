@@ -1,8 +1,6 @@
 # Phase 3 — Fixtures + Watermarks
 
-> **Status:** 📋 PLAN — awaiting human approval. **No agent begins work, no code is written, and no
-> lanes/subagents are spawned until this phase is explicitly approved.** This document is for human
-> review only.
+> **Status:** ✅ **DELIVERED & merged to `main_v2`.** Live status: [ROADMAP-v2](../ROADMAP-v2.md). Original plan preserved below for history.
 > **Owner:** orchestrator-agent · **Persona:** Software Engineer · **Date:** 2026-06-15
 > **Shared scaffold (do not repeat — referenced):** [PIPELINE.md](../PIPELINE.md) ·
 > **Roadmap:** [ROADMAP.md](../ROADMAP.md) · **Design:** [DESIGN.md](../DESIGN.md)

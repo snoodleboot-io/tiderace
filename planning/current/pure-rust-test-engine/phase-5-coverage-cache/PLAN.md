@@ -1,7 +1,6 @@
 # Phase 5 — Coverage + Content-Addressed Cache (the build-system-for-tests core)
 
-> **Status:** 📋 PLAN — awaiting human approval. **No agent begins work, no Lane 0 starts, no code is
-> written until this phase is explicitly approved.** This document is for human review only.
+> **Status:** ✅ **core DELIVERED** on `feat/n5-conformance` — coverage (sys.monitoring) → DepGraph → ImpactAnalyzer → content-addressed cache + purity seam; live-loop wired in the daemon. Live status: [ROADMAP-v2](../ROADMAP-v2.md). Original plan preserved below.
 > **Owner:** orchestrator-agent · **PM/architect:** architect-agent (+ plan-agent) · **Persona:** Software Engineer · **Date:** 2026-06-15
 > **Shared scaffold:** [PIPELINE.md](../PIPELINE.md) (conventions, agent roster, env-gate doctrine,
 > implementation standards, enforcement checkpoints, test doctrine, debug/retry — **not repeated here**).
