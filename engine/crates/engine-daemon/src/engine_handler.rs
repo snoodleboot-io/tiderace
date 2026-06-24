@@ -84,6 +84,13 @@ impl RpcHandler for EngineHandler {
                 Ok(results) => RpcResponse::Ran { results },
                 Err(message) => RpcResponse::Error { message },
             },
+            RpcRequest::Recycle => {
+                self.worker = None; // drop the stale warm interpreter; next Run relaunches it
+                match self.run(&[]) {
+                    Ok(results) => RpcResponse::Ran { results },
+                    Err(message) => RpcResponse::Error { message },
+                }
+            }
             RpcRequest::Watch => RpcResponse::Watching,
             RpcRequest::Health => RpcResponse::Healthy {
                 pid: self

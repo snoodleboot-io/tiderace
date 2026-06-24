@@ -11,6 +11,8 @@ pub enum RpcRequest {
     Run { node_ids: Vec<String> },
     /// Start watching; the daemon streams impacted re-runs until cancelled.
     Watch,
+    /// Drop warm state (a stale interpreter after a conftest/config/C-ext change) and re-run all.
+    Recycle,
     /// Liveness/warmth probe.
     Health,
     /// Ask the daemon to exit.
@@ -49,6 +51,7 @@ mod tests {
                 node_ids: vec!["t.py::a".into()],
             },
             RpcRequest::Watch,
+            RpcRequest::Recycle,
             RpcRequest::Health,
             RpcRequest::Shutdown,
         ] {
