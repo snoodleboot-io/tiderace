@@ -7,6 +7,10 @@ license.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "riptide-daemon"
+path = "src/main.rs"
+
 [dependencies]
 engine-core = { path = "../engine-core" }
 serde = { workspace = true }
