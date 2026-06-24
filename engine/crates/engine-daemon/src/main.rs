@@ -41,11 +41,40 @@ fn main() -> ExitCode {
         "run" => cmd_run(&mut handler),
         "watch" => cmd_watch(&root, &mut handler),
         "serve" => cmd_serve(&mut handler),
+        "bench" => {
+            let iters = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
+            cmd_bench(&mut handler, iters)
+        }
         other => {
             eprintln!("unknown mode: {other}");
             ExitCode::from(64)
         }
     }
+}
+
+/// Run the whole corpus `iters` times on one handler, timing each pass: the first includes the
+/// wellspring launch (cold), the rest reuse the warm wellspring (warm) — the daemon's payoff, in ms.
+fn cmd_bench(handler: &mut EngineHandler, iters: usize) -> ExitCode {
+    for i in 0..iters {
+        let started = std::time::Instant::now();
+        let resp = handler.handle(RpcRequest::Run { node_ids: vec![] });
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        let n = match resp {
+            RpcResponse::Ran { results } => results.len(),
+            RpcResponse::Error { message } => {
+                eprintln!("error: {message}");
+                return ExitCode::FAILURE;
+            }
+            _ => 0,
+        };
+        let tag = if i == 0 {
+            "cold (+wellspring launch)"
+        } else {
+            "warm"
+        };
+        println!("iter {i}: {n} tests in {ms:.1} ms  [{tag}]");
+    }
+    ExitCode::SUCCESS
 }
 
 fn cmd_run(handler: &mut EngineHandler) -> ExitCode {
