@@ -5,7 +5,26 @@
 > transport/in-process work ([ADR-E011](design/adr/ADR-E011-shim-transport-seam.md)), and turns the
 > remaining work into **two tracks of detailed checklists**.
 >
-> **Last updated:** 2026-06-21. Trunk: `main_v2` (phases 1–3 merged). Conformance data: `conformance/`.
+> **Last updated:** 2026-06-24. Trunk: `main_v2` (phases 1–3 merged); phases 4–7 + Track B delivered on
+> `feat/n5-conformance`. Conformance data: `conformance/`. Native perf: `benchmarks/RESULTS-native.md`.
+
+---
+
+## Delivery summary (2026-06-24)
+
+Both tracks are **core-complete**; the only open item is the ② in-process backend (a deliberate
+side-bet — see the ticket [`planning/backlog/in-process-ffi-backend/`](../../backlog/in-process-ffi-backend/)).
+
+- **Track A:** Phase 4 (RichDiff/async/unittest), Phase 5 (coverage→DepGraph→impact→cache), Phase 6
+  (LocalityScheduler + **runnable warm daemon**: `EngineHandler` e2e, `tiderace watch`, `riptide-daemon`
+  bin), Phase 7 (5 reporters, plugin host, Windows CI, measured perf). Purity guard + sandbox
+  *interception* deferred (cache `Purity` seam exists).
+- **Track B:** B1–B7 done — migrate conformance **70% → 89%** across 4 repos (anyio 99%, click 94%,
+  flask 80%). B6 run-through: cachetools 215/215 = 100% through the engine.
+- **Measured:** warm inner-loop rerun ≈ **7 ms vs pytest ≈ 650 ms (~90×)**; full cold runs of cheap
+  tests are slower than pytest (fork-per-test isolation tax — the lever ② targets).
+- **Health:** engine-core 118 lib + 2 integration + diff + 9 acceptance; engine-daemon 20 + 1 e2e;
+  10 Python proofs; clippy -D + fmt clean.
 
 ---
 
