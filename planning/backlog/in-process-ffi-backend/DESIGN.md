@@ -24,7 +24,22 @@ interpreter is the in-process Wellspring, and a `fork()` per test inherits it co
 - New: `in_process_transport.rs` — `ready()` + `exchange()` over the embedded interpreter; the
   fork-per-test + result handoff (a minimal pipe/shared-mem for outcome+coverage, not the full JSON
   control plane).
-- `spike-inproc/` — the proven reference (PyO3 0.23, `auto-initialize`); port its embed+drive logic.
+
+## What the spike proved (captured — spike since disposed)
+
+The `spike-inproc/` go/no-go crate has been removed (it was disposable); its evidence, recorded here so
+this ticket is self-contained (full code in git history):
+
+- **PyO3 embeds one CPython and Rust drives riptide's own executor by FFI — no pytest.** Rust imported
+  the user module and called the bare `test_*` bodies (catching `AssertionError`), and per-test
+  `(name, outcome, detail)` came back as **Rust values**, not bytes over a pipe — the
+  `InProcessTransport::exchange` shape. `unittest.TestCase.run()` driven the same way.
+- **ADR-010's segfault does not occur with one interpreter.** `_decimal` (the exact module that crashed
+  under subinterpreters) imported + ran heavy arithmetic with no crash — single-phase-init is a
+  *multi-interpreter* hazard; one interpreter is the world every pytest plugin already runs in.
+- **Repro recipe (for the real impl):** a uv-managed standalone CPython ships `libpython*.so` + headers
+  (no system `python3-dev`); build with `RUSTFLAGS="-L native=$BASE/lib" PYO3_PYTHON=<venv>/bin/python`
+  and run with `LD_LIBRARY_PATH="$BASE/lib"`. PyO3 0.23, `auto-initialize`. VERDICT was GO.
 
 ## Data / schema changes
 

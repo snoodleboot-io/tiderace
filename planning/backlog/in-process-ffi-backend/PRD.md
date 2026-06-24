@@ -6,7 +6,7 @@
 **Refs:** [ADR-E011 ②](../../current/pure-rust-test-engine/design/adr/ADR-E011-shim-transport-seam.md) ·
 [ADR-E013 (isolation, ratified)](../../current/pure-rust-test-engine/design/adr/ADR-E013-inprocess-isolation.md) ·
 [ROADMAP-v2 §4](../../current/pure-rust-test-engine/ROADMAP-v2.md) ·
-spike [`spike-inproc/`](../../../spike-inproc/RESULTS.md) (GO) ·
+spike: `spike-inproc/` (GO — disposed; evidence captured in [DESIGN.md](DESIGN.md) + git history) ·
 baseline [`benchmarks/RESULTS-native.md`](../../../benchmarks/RESULTS-native.md)
 
 ## Problem

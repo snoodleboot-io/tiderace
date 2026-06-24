@@ -64,8 +64,9 @@ disappears, `fork()` is retained only where it earns isolation. This is the genu
 execution path. It is **flagged for human ratification** and should land as its own follow-up once the
 seam (above) has proven out.
 
-**Feasibility: proven (GO).** A throwaway PyO3 0.23 spike ([`spike-inproc/`](../../../../../spike-inproc/RESULTS.md),
-not in engine-core) embeds one CPython 3.11.15 and, by FFI, drives **riptide's own executor — no pytest**:
+**Feasibility: proven (GO).** A throwaway PyO3 0.23 spike (`spike-inproc/`, not in engine-core; since
+disposed — evidence in the [in-process backend ticket](../../../../backlog/in-process-ffi-backend/DESIGN.md)
++ git history) embeds one CPython 3.11.15 and, by FFI, drives **riptide's own executor — no pytest**:
 it imports the user module, calls the bare `test_*` bodies, catches `AssertionError` (exactly as
 `engine/py-shim/shim.py` does), and drives stdlib `unittest.TestCase.run()` — per-test verdicts extracted
 as Rust values, the exact `exchange` shape. Critically it imports and hammers **`_decimal`**, the precise

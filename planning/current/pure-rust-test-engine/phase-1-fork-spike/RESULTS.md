@@ -3,17 +3,18 @@
 > **Verdict: 🟢 GO.** Date: 2026-06-16. Branch: `feat/phase-1-fork-spike`.
 > Validates [ADR-E002](../design/adr/ADR-E002-execution-substrate.md) (subprocess + shim) and
 > [ADR-E003](../design/adr/ADR-E003-fork-snapshot-isolation.md) (fork-from-warm isolation).
-> Spike code lives in [`spike/`](../../../../spike/); reproduce with `spike/run_spike.sh`.
+> Spike code (`spike/`) has since been disposed (GO captured here + in git history); it was a
+> throwaway crate with `run_spike.sh`.
 
 ## What was built
 
 A real, end-to-end harness (no pytest underneath):
 
-- **Wellspring** ([`spike/shim.py`](../../../../spike/shim.py)) — one CPython process imports the
+- **Wellspring** (`spike/shim.py`, disposed) — one CPython process imports the
   corpus + numpy **once**, then `os.fork()`s a pristine COW child per test and runs it: a
   pytest-style function by call, or a `unittest.TestCase` via stdlib `TestCase.run()` at method
   granularity. Child→parent result over an `os.pipe`; crash/timeout detected via `waitpid`/`select`.
-- **Orchestrator** ([`spike/src/main.rs`](../../../../spike/src/main.rs)) — Rust drives the
+- **Orchestrator** (`spike/src/main.rs`, disposed) — Rust drives the
   Wellspring over a length-prefixed (u32 LE) JSON frame protocol; `warm` mode (fork-from-warm) and
   `fresh` mode (process-per-test) for comparison. `cargo fmt`/`clippy -Dwarnings` clean; 3 unit
   tests for the frame codec + spec parsing.
