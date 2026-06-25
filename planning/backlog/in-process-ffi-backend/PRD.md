@@ -11,14 +11,17 @@ baseline [`benchmarks/RESULTS-native.md`](../../../benchmarks/RESULTS-native.md)
 
 ## Problem
 
-Today the Rust kernel drives CPython as a **subprocess**: every test result crosses a pipe as
-length-prefixed JSON (`PipeTransport`). For a suite of many cheap tests that per-test control-plane
-overhead is measurable — `benchmarks/RESULTS-native.md` shows the native engine *slower* than pytest on
-a full cold run of 511 cheap tests, dominated by the per-test fork + pipe round-trip. The inner loop is
-already excellent (~7 ms warm vs pytest ~650 ms); the open lever is the **per-test transport cost**.
+Today the Rust kernel drives CPython as a **subprocess** over pipes (`PipeTransport`), and the parallel
+runner launches **one wellspring per core** — so each worker imports the project independently. After
+parallelizing (cold full run 3.27 s → 1.17 s, `benchmarks/RESULTS-3way.md`), the **residual gap to
+pytest (1.17 s vs 0.86 s) is now the per-worker import**: the 8-way pool pays ~8× the project import
+(visible as ~7 s total CPU over 1.17 s wall). The fork itself is cheap; the costs left are (a) N× import
+and (b) the per-test pipe/JSON control plane.
 
-This is the last open item on ROADMAP-v2 — a deliberate side-bet, independent of Tracks A/B, that rides
-the existing `ShimTransport` seam and blocks nothing.
+② attacks both directly: **one** embedded interpreter imports the project **once**, and tests are driven
+by FFI call instead of a pipe frame. This is the highest-leverage remaining perf lever and the last open
+ROADMAP-v2 item — a deliberate side-bet, independent of Tracks A/B, riding the existing `ShimTransport`
+seam, blocking nothing.
 
 ## Goals
 
@@ -27,8 +30,9 @@ the existing `ShimTransport` seam and blocks nothing.
   the JSON-over-pipe control plane. **No `Worker` change** (rides the seam).
 - Keep **fork-from-embedded** isolation (ADR-E013): per-test `fork()` from the warm embedded
   interpreter; the Rust parent stays single-threaded at the fork point.
-- A measured **perf delta vs the `PipeTransport` baseline** (the syscall win), recorded in
-  `benchmarks/RESULTS-native.md`.
+- A measured **perf delta vs the `PipeTransport` baseline** (import-once + the syscall win), recorded
+  in `benchmarks/RESULTS-native.md` / `RESULTS-3way.md`. Target: close the residual cold-run gap to
+  pytest (1.17 s → ≤ pytest) by importing once instead of N×.
 
 ## Non-Goals
 
