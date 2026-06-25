@@ -3,18 +3,73 @@
 //! (no subprocess, no pipe/JSON control plane). **No pytest.**
 
 use std::path::PathBuf;
+use std::time::Instant;
 
+use engine_core::collection::{Collector, RegexCollector};
 use engine_core::exec::{ExecRequest, ShimTransport};
 use engine_inproc::{engine_py_paths, InProcessTransport};
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    // `inproc-probe bench <corpus> [iters]` — time a full corpus through the in-process backend.
+    if args.get(1).map(String::as_str) == Some("bench") {
+        std::process::exit(bench(&args));
+    }
+    proof();
+}
+
+/// Time `iters` full passes of a real corpus through the embedded interpreter (import-once + per-test
+/// fork-from-embedded), to compare against the subprocess `PipeTransport` baseline.
+fn bench(args: &[String]) -> i32 {
+    let corpus = PathBuf::from(args.get(2).expect("usage: inproc-probe bench <corpus> [iters]"));
+    let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3);
+    let engine_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+
+    let items = RegexCollector::new().collect(&corpus).expect("collect");
+    let mut transport = InProcessTransport::new(&corpus, engine_py_paths(&engine_dir), false);
+    let boot = Instant::now();
+    transport.ready().expect("ready");
+    println!(
+        "[ready] {} tests; one embedded interpreter, project imported once in {:.0} ms",
+        items.len(),
+        boot.elapsed().as_secs_f64() * 1000.0
+    );
+
+    for i in 0..iters {
+        let started = Instant::now();
+        let mut passed = 0usize;
+        for it in &items {
+            let resp = transport
+                .exchange(&ExecRequest::bare(it.node_id.as_str(), it.style.wire(), 5000))
+                .expect("exchange");
+            if resp.outcome == "passed" {
+                passed += 1;
+            }
+        }
+        println!(
+            "iter {i}: {} tests ({} passed) in {:.1} ms  [in-process, fork-per-test]",
+            items.len(),
+            passed,
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+    0
+}
+
+fn proof() {
     let dir = std::env::temp_dir().join(format!("inproc_probe_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("test_x.py"),
-        "def test_ok():\n    assert 1 + 1 == 2\n\
+        "_STATE = {'n': 0}\n\
+         def test_ok():\n    assert 1 + 1 == 2\n\
          def test_bad():\n    assert 1 == 2\n\
-         def test_upper():\n    assert 'ab'.upper() == 'AB'\n",
+         def test_upper():\n    assert 'ab'.upper() == 'AB'\n\
+         def test_mutate():\n    _STATE['n'] += 1\n    assert _STATE['n'] == 1\n\
+         def test_isolated():\n    assert _STATE['n'] == 0  # passes ONLY if test_mutate ran in a forked child\n",
     )
     .unwrap();
 
@@ -34,6 +89,8 @@ fn main() {
         ("test_ok", "passed"),
         ("test_bad", "failed"),
         ("test_upper", "passed"),
+        ("test_mutate", "passed"),   // mutates a module global in its forked child
+        ("test_isolated", "passed"), // sees a clean global ⇒ the mutation did NOT leak ⇒ fork isolated
     ];
     let mut ok = true;
     for (name, want) in expected {
