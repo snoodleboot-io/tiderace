@@ -13,14 +13,20 @@
 
 | tool | mean time | vs pytest |
 |---|---:|---:|
-| **pytest** | **0.91 s** | 1.0× |
-| native (riptide, `--all`) | 3.27 s | 3.6× slower |
-| old (tiderace) | 4.39 s | 4.8× slower |
+| **pytest** | **0.86 s** | 1.0× |
+| native (riptide, parallel pool) | 1.17 s | 1.36× slower |
+| old (tiderace, parallel) | 4.22 s | 4.9× slower |
 
-Cold, on cheap tests, **pytest wins** — both Rust engines pay an isolation tax pytest doesn't (native
-forks per test; old spawns pytest workers). **Native is ~26% faster than the old engine**, and its time
-is almost all *system* (fork syscalls) vs old's *user* time (pytest worker overhead). See "what's
-better" below — native runs these **sequentially in one wellspring**, leaving cores on the table.
+**Now parallelized.** The native engine runs across a **pool of wellsprings (one per core)** — the
+`LocalityScheduler` (LPT + scope-locality) wired to a multi-worker pool (`engine-daemon/src/pool.rs`).
+That took the cold full run from **3.27 s (sequential) → 1.17 s (2.8× faster)**. Native is now only
+**~1.36× behind pytest** (was 3.6×) and **3.6× faster than the old engine** (which also parallelizes,
+via pytest workers, but pays pytest's overhead).
+
+The residual gap to pytest is the **per-worker import**: each of the N wellsprings imports the project
+(numpy here) once, so on this host the 8-way pool pays ~8× the import — visible as `native`'s high
+total CPU (≈ user+sys 7 s over 1.17 s wall). That import multiplication, not the fork, is the remaining
+cold-run cost — and exactly what ② (one shared embedded interpreter) removes.
 
 ## Scenario 2 — warm, no changes (re-run; impact analysis skips all) — **gap now filled**
 
@@ -46,33 +52,31 @@ re-runs only that file's dependents (verified: edit one module → 1 of 2 tests 
 
 ## Takeaways (honest)
 
-1. **Cold full run of cheap tests:** pytest is fastest; per-test isolation is the cost. Native is ~26%
-   faster than the old engine.
-2. **Warm, no-change:** **native now wins (4.9 ms)** — 7× the old engine, 185× pytest. The impact-skip
-   is wired into `run` (was the gap; now closed).
+1. **Cold full run of cheap tests:** native (parallel pool) **1.17 s vs pytest 0.86 s (1.36×)** and
+   **3.6× faster than the old engine** — was 3.6× *behind* pytest before parallelizing.
+2. **Warm, no-change:** **native wins (4.9 ms)** — 7× the old engine, 185× pytest.
 3. **Warm inner loop (1 changed test):** native ~5 ms vs pytest ~320 ms.
 
-So native beats the old engine in **all three** scenarios; pytest only wins the cold-from-scratch full
-run, on the strength of not isolating tests.
+So native beats the old engine in **all three** scenarios and is now within ~1.4× of pytest even on the
+cold-from-scratch full run — the one case pytest still leads, on the strength of not isolating tests
+(one interpreter, no per-worker import).
 
 ## Do we batch? What can we do better? (the per-test isolation tax)
 
-**No batching today** — the native engine `fork()`s **once per test** (511 forks for fx_corpus), each a
-pristine COW child (ADR-E003). That isolation is the cost in scenario 1. Two facts about *why* it's
-3.27 s, and the levers:
+**No per-fork batching** — the native engine `fork()`s **once per test** (pristine COW child,
+ADR-E003). The levers, in order of leverage:
 
-1. **It's sequential.** The biggest lever isn't the fork itself — it's that `run_batch` executes tests
-   **one at a time in a single wellspring**. We *built* a `LocalityScheduler` (LPT + scope-locality,
-   Phase 6) but it is **not yet wired into the run loop**, and there's no multi-wellspring worker pool.
-   The old engine already parallelizes (pytest workers across cores); native does not. **Parallelizing
-   across N cores is the single biggest win** — it could take the 3.27 s toward ~pytest territory,
-   independent of the fork cost. *(Highest-leverage next task.)*
-2. **The subprocess + pipe control plane.** Each test is a fork + a JSON frame over a pipe. The **②
-   in-process / FFI backend** (ticketed, ADR-E013) deletes that control plane — fork-from-embedded, no
-   per-test subprocess/pipe — shaving the per-test overhead while keeping isolation.
-3. **Batch *pure* tests per fork.** Fork once, run K independent tests in the child. This trades
-   isolation for speed and is only sound for tests that don't mutate shared state — so it needs the
-   **purity guard / SandboxHooks** (Phase-4/5 deferred items) to decide which tests are batchable.
+1. ✅ **Parallelize across cores — DONE.** This was the big one: native ran tests *sequentially in one
+   wellspring*. Now the `LocalityScheduler` (LPT + scope-locality) drives a **pool of wellsprings, one
+   per core** (`engine-daemon/src/pool.rs`): cold full run **3.27 s → 1.17 s (2.8×)**, from 3.6× behind
+   pytest to 1.36×.
+2. ⏭ **② in-process / FFI backend** (ticketed, ADR-E013) — the residual cold-run gap is now the
+   **per-worker import** (each of N wellsprings imports the project once → ~N× import). ② embeds **one**
+   interpreter and forks from it, so the project is imported **once** and the subprocess/pipe control
+   plane disappears — directly attacking what's left. *(Next.)*
+3. ⏭ **Batch *pure* tests per fork** — fork once, run K independent tests in the child. Trades isolation
+   for speed; only sound for tests that don't mutate shared state, so it needs a **purity guard /
+   `SandboxHooks`** to decide which tests are batchable. *(After ②.)*
 
-In short: the fork tax is real, but the *sequential* execution is the larger, lower-risk win — wire the
-already-built scheduler to a worker pool. ② and pure-batching are the follow-ons.
+The sequential-execution win is banked. ② (import-once) and pure-batching (fewer forks) are the planned
+follow-ons — see `planning/backlog/`.

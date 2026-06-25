@@ -78,6 +78,36 @@ impl EngineHandler {
         Ok(self.run_items(requested)?.into_iter().map(to_rpc).collect())
     }
 
+    /// Run the requested tests across a **parallel pool** of wellsprings (one per core), not the single
+    /// warm wellspring — the fix for sequential full runs. Used by the one-shot CLI `run` paths.
+    fn run_items_parallel(&self, requested: &[String]) -> Result<Vec<TestResult>, String> {
+        let all = self.collect()?;
+        let items: Vec<TestItem> = if requested.is_empty() {
+            all
+        } else {
+            all.into_iter()
+                .filter(|it| requested.iter().any(|r| r == it.node_id.as_str()))
+                .collect()
+        };
+        crate::pool::run_parallel(
+            &self.python,
+            &self.shim,
+            &self.root,
+            items,
+            crate::pool::default_workers(),
+            5000,
+        )
+    }
+
+    /// Full run across the parallel pool (the one-shot `run --all` path).
+    pub fn run_full_parallel(&self) -> Result<Vec<RpcResult>, String> {
+        Ok(self
+            .run_items_parallel(&[])?
+            .into_iter()
+            .map(to_rpc)
+            .collect())
+    }
+
     /// **Impact-aware run** (the warm-mode gap): load persisted state, re-run only the tests whose
     /// dependencies changed since last run (or have never run), serve the rest from cache, and persist
     /// the updated footprint. With no changes, nothing executes — not even a wellspring launch. Needs
@@ -109,9 +139,9 @@ impl EngineHandler {
             })
             .collect();
 
-        // Execute only the impacted tests (skip the wellspring launch entirely if none).
+        // Execute only the impacted tests (skip the wellspring launch entirely if none), in parallel.
         if !p.to_run.is_empty() {
-            let fresh = self.run_items(&p.to_run)?;
+            let fresh = self.run_items_parallel(&p.to_run)?;
             for r in &fresh {
                 state.tests.insert(
                     r.node_id.to_string(),

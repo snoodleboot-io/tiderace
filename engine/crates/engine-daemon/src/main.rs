@@ -115,8 +115,8 @@ fn cmd_run_impacted(handler: &mut EngineHandler) -> ExitCode {
 }
 
 fn cmd_run(handler: &mut EngineHandler) -> ExitCode {
-    match handler.handle(RpcRequest::Run { node_ids: vec![] }) {
-        RpcResponse::Ran { results } => {
+    match handler.run_full_parallel() {
+        Ok(results) => {
             let mut failures = 0;
             for r in &results {
                 if r.outcome == "failed" || r.outcome == "error" {
@@ -124,18 +124,21 @@ fn cmd_run(handler: &mut EngineHandler) -> ExitCode {
                 }
                 println!("{}\t{}", r.outcome.to_uppercase(), r.node_id);
             }
-            eprintln!("{} tests, {} failing", results.len(), failures);
+            eprintln!(
+                "{} tests, {} failing (parallel pool)",
+                results.len(),
+                failures
+            );
             if failures == 0 {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE
             }
         }
-        RpcResponse::Error { message } => {
+        Err(message) => {
             eprintln!("error: {message}");
             ExitCode::FAILURE
         }
-        _ => ExitCode::FAILURE,
     }
 }
 
