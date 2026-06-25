@@ -6,6 +6,10 @@
 [workspace]
 resolver = "2"
 members = ["crates/engine-core", "crates/engine-cli", "crates/engine-daemon"]
+# ② in-process/FFI backend (ADR-E013): a separate optional crate that links libpython (PyO3). Excluded
+# from the default workspace build + the Windows CI job so the core engine stays dependency-free; built
+# explicitly with `PYO3_PYTHON=<python-with-libpython> cargo build --manifest-path crates/engine-inproc/Cargo.toml`.
+exclude = ["crates/engine-inproc"]
 
 [workspace.package]
 edition = "2021"

@@ -16,6 +16,7 @@
 spike/target/
 spike-inproc/target/
 engine/target/
+engine/crates/engine-inproc/target/
 
 # Session files are per-developer working state, not committed (see core-session.md)
 .prompticorn/sessions/

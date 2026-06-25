@@ -1,0 +1,16 @@
+[package]
+name = "engine-inproc"
+edition = "2021"
+version = "0.0.1"
+license = "MIT"
+# NOTE: standalone crate, deliberately EXCLUDED from the engine workspace (see ../../Cargo.toml). It
+# links libpython via PyO3, so it must never be pulled into the default/Windows build. Build it with:
+#   PYO3_PYTHON=<python-with-libpython> cargo build --manifest-path crates/engine-inproc/Cargo.toml
+
+[[bin]]
+name = "inproc-probe"
+path = "src/main.rs"
+
+[dependencies]
+# auto-initialize: boot libpython on first GIL acquisition (embedding mode, not extension-module).
+pyo3 = { version = "0.26", features = ["auto-initialize"] }
