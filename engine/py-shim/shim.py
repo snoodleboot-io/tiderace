@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import copy
 import difflib
 import importlib
 import importlib.util
@@ -463,6 +464,41 @@ async def _teardown_async(handle) -> None:
         pass
 
 
+# --------------------------------------------------------------------------- purity guard (→ batching)
+_MISSING = object()
+_OPAQUE = object()
+
+
+def _snapshot_shared(module) -> dict:
+    """A deep snapshot of a module's mutable top-level state — the names a test could mutate to
+    contaminate a batch-mate. Functions/classes/modules/dunders are excluded; values that can't be
+    deep-copied are marked opaque and skipped (the differential gate is the soundness backstop)."""
+    out = {}
+    for k, v in list(vars(module).items()):
+        if k.startswith("__") or callable(v) or isinstance(v, type) or inspect.ismodule(v):
+            continue
+        try:
+            out[k] = copy.deepcopy(v)
+        except Exception:  # noqa: BLE001
+            out[k] = _OPAQUE
+    return out
+
+
+def _purity_verdict(module, before: dict, env_before: dict):
+    """Compare the module's shared state + `os.environ` to the pre-body snapshot. Returns an impurity
+    reason (a test that mutated shared state — NOT safe to batch) or `None` (pure — batchable)."""
+    after = _snapshot_shared(module)
+    for k in set(before) | set(after):
+        b, a = before.get(k, _MISSING), after.get(k, _MISSING)
+        if b is _OPAQUE or a is _OPAQUE:
+            continue  # couldn't snapshot ⇒ can't judge; leave to the differential gate
+        if b is _MISSING or a is _MISSING or b != a:
+            return f"mutated module global `{k}`"
+    if dict(os.environ) != env_before:
+        return "mutated os.environ"
+    return None
+
+
 def _test_is_async(node_id: str, style: str) -> bool:
     """Whether the test body is `async def` (unittest methods are never async-driven here)."""
     if style == "unittest_method":
@@ -567,11 +603,12 @@ class Engine:
     """Parent-side scope state: wider-than-function fixtures live here, inherited by forked children."""
 
     def __init__(self, reg: Registry, no_fork: bool = False, root: str | None = None,
-                 coverage: bool = False):
+                 coverage: bool = False, purity_guard: bool = False):
         self.reg = reg
         self.no_fork = no_fork  # no-COW fallback path (SubprocessWorker / Windows / --no-fork)
         self.root = root  # corpus root, for coverage path relativization
         self.coverage = coverage  # ADR-E006: capture per-test executed-source footprint
+        self.purity_guard = purity_guard  # detect shared-state mutation per test (→ pure-test batching)
         self.active: list[_Active] = []  # in setup order (widest → narrowest)
 
     def _value(self, name: str, module_key: str):
@@ -635,19 +672,26 @@ class Engine:
 
         outcomes: list[tuple[str, str]] = []
         coverage: dict[str, set] = {}  # union of touched lines across all variants of this node
+        impurity = None  # first impurity reason across variants (any impure ⇒ the node is impure)
         for combo in combos:
             self._sync_wider(closure, node_id)
             for case_kwargs in case_kwargs_list:
-                oc, detail, cov = self._fork_run(
+                oc, detail, cov, purity = self._fork_run(
                     node_id, style, fixture_requested, closure, combo, deadline_ms, case_kwargs)
                 outcomes.append((oc, detail))
                 for path, lines in cov.items():
                     coverage.setdefault(path, set()).update(lines)
+                if purity is not None and impurity is None:
+                    impurity = purity
         outcome, detail = _aggregate(outcomes)
         outcome, detail = _apply_xfail(marks, outcome, detail)
         resp = {"node_id": node_id, "outcome": outcome, "detail": detail}
         if coverage:  # additive field (Phase-3 CONTRACT §6); omitted when capture is off/empty
             resp["coverage"] = {path: sorted(lines) for path, lines in coverage.items()}
+        if self.purity_guard:  # additive: whether this test is batchable (didn't mutate shared state)
+            resp["pure"] = impurity is None
+            if impurity is not None:
+                resp["impurity"] = impurity
         return resp
 
     def _fork_run(self, node_id, style, requested, closure, combo, deadline_ms, case_kwargs=None) -> tuple:
@@ -661,18 +705,20 @@ class Engine:
             try:
                 return self._child_exec(node_id, style, requested, closure, combo, case_kwargs)
             except BaseException as exc:  # noqa: BLE001 — any in-process test error → Outcome::Error
-                return "error", "".join(traceback.format_exception_only(type(exc), exc)), {}
+                return "error", "".join(traceback.format_exception_only(type(exc), exc)), {}, None
 
         read_fd, write_fd = os.pipe()
         pid = os.fork()
         if pid == 0:  # ---- CHILD: pristine COW copy with all wider fixtures already warm ----
             os.close(read_fd)
             try:
-                outcome, detail, coverage = self._child_exec(
+                outcome, detail, coverage, purity = self._child_exec(
                     node_id, style, requested, closure, combo, case_kwargs)
                 payload = {"outcome": outcome, "detail": detail[:4000]}
                 if coverage:
                     payload["coverage"] = coverage
+                if purity is not None:
+                    payload["purity"] = purity
                 os.write(write_fd, json.dumps(payload).encode())
             except BaseException:  # noqa: BLE001 — never hang the child on the way out
                 pass
@@ -689,7 +735,7 @@ class Engine:
                 pass
             os.waitpid(pid, 0)
             os.close(read_fd)
-            return "error", "timeout", {}
+            return "error", "timeout", {}, None
         data = b""
         while True:
             chunk = os.read(read_fd, 65536)
@@ -700,12 +746,12 @@ class Engine:
         _, status = os.waitpid(pid, 0)
         if not data:
             if os.WIFSIGNALED(status):
-                return "error", f"child killed by signal {os.WTERMSIG(status)}", {}
+                return "error", f"child killed by signal {os.WTERMSIG(status)}", {}, None
             if os.WIFEXITED(status) and os.WEXITSTATUS(status) != 0:
-                return "error", f"child exited {os.WEXITSTATUS(status)}", {}
-            return "error", "no result from child", {}
+                return "error", f"child exited {os.WEXITSTATUS(status)}", {}, None
+            return "error", "no result from child", {}, None
         res = json.loads(data.decode())
-        return res["outcome"], res.get("detail", ""), res.get("coverage", {})
+        return res["outcome"], res.get("detail", ""), res.get("coverage", {}), res.get("purity")
 
     def _child_exec(self, node_id, style, requested, closure, combo, case_kwargs=None) -> tuple:
         """In the forked child: set up function-scope fixtures (incl. parametrized + reinit-after-fork
@@ -732,7 +778,7 @@ class Engine:
                 outcome, detail = asyncio.run(
                     self._child_exec_async(node_id, style, requested, closure, combo, case_kwargs)
                 )
-                return outcome, detail, cov.stop()
+                return outcome, detail, cov.stop(), None  # purity guard skips async (scope: sync)
             finally:
                 cov.stop()
         try:
@@ -746,8 +792,14 @@ class Engine:
             test_args = {param: value_of(prov) for param, prov in requested.items()}
             if case_kwargs:
                 test_args.update(case_kwargs)
+            # Purity guard: snapshot shared state right before the body, compare right after (in this
+            # forked child it's safe). A mutation ⇒ the test can't be batched without isolation.
+            mod = importlib.import_module(_module_name(module_key)) if self.purity_guard else None
+            before = _snapshot_shared(mod) if mod is not None else None
+            env_before = dict(os.environ) if mod is not None else None
             outcome, detail = _invoke(node_id, style, test_args)
-            return outcome, detail, cov.stop()
+            purity = _purity_verdict(mod, before, env_before) if mod is not None else None
+            return outcome, detail, cov.stop(), purity
         finally:
             cov.stop()  # idempotent — frees the monitoring tool id even if setup raised
             for gen in reversed(gens):
@@ -1080,10 +1132,11 @@ def serve() -> int:
     root = sys.argv[1]
     no_fork = "--no-fork" in sys.argv[2:]
     coverage = "--coverage" in sys.argv[2:] or os.environ.get("RIPTIDE_COVERAGE") == "1"
+    purity = "--purity" in sys.argv[2:] or os.environ.get("RIPTIDE_PURITY") == "1"
     sys.path.insert(0, root)
     _preimport(root)
     reg = _discover(root)
-    engine = Engine(reg, no_fork=no_fork, root=root, coverage=coverage)
+    engine = Engine(reg, no_fork=no_fork, root=root, coverage=coverage, purity_guard=purity)
     _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
     try:
         while True:
