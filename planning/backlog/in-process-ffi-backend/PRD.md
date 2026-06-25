@@ -18,21 +18,30 @@ pytest (1.17 s vs 0.86 s) is now the per-worker import**: the 8-way pool pays ~8
 (visible as ~7 s total CPU over 1.17 s wall). The fork itself is cheap; the costs left are (a) N× import
 and (b) the per-test pipe/JSON control plane.
 
-② attacks both directly: **one** embedded interpreter imports the project **once**, and tests are driven
-by FFI call instead of a pipe frame. This is the highest-leverage remaining perf lever and the last open
-ROADMAP-v2 item — a deliberate side-bet, independent of Tracks A/B, riding the existing `ShimTransport`
-seam, blocking nothing.
+## ⚠️ Benchmark finding (2026-06-25) — premise corrected
 
-## Goals
+A working `InProcessTransport` was built and benchmarked ([`benchmarks/RESULTS-inproc.md`](../../../benchmarks/RESULTS-inproc.md)).
+Result: **the transport/pipe was never the bottleneck.** On 500 trivial tests, in-process (FFI, no pipe)
+and the subprocess+pipe path are **identical (~2.0 s)** — the cost is the **`fork()` per test (~4 ms)**,
+which both pay. Deleting the control plane changes nothing measurable.
 
-- A third `ShimTransport` impl, **`InProcessTransport`**, that embeds **one** CPython interpreter in the
-  Rust process (PyO3) and drives riptide's own executor by **FFI call** instead of pipe frame — deleting
-  the JSON-over-pipe control plane. **No `Worker` change** (rides the seam).
-- Keep **fork-from-embedded** isolation (ADR-E013): per-test `fork()` from the warm embedded
-  interpreter; the Rust parent stays single-threaded at the fork point.
-- A measured **perf delta vs the `PipeTransport` baseline** (import-once + the syscall win), recorded
-  in `benchmarks/RESULTS-native.md` / `RESULTS-3way.md`. Target: close the residual cold-run gap to
-  pytest (1.17 s → ≤ pytest) by importing once instead of N×.
+So **② is *not* a win as a transport swap.** Its only real lever is **import-once**, and that pays off
+**only if combined with PARALLEL fork-out**: one embedded interpreter (import once) that forks **N
+children in parallel** would match the pool's parallelism *without* the pool's N× import. The current
+`InProcessTransport` is sequential, so it has import-once but not parallelism, and does not beat the
+pool. **Re-scoped accordingly** (Goals below). Feasibility + correctness (incl. fork-from-embedded
+isolation) are *proven*; what's unproven is the parallel-fork win.
+
+## Goals (re-scoped after the benchmark)
+
+- ✅ **`InProcessTransport: ShimTransport`** — embed one CPython (PyO3), import once, drive the executor
+  by FFI, fork-from-embedded isolation. **Done + proven** (`engine/crates/engine-inproc`).
+- ⏭ **Parallel fork-out from the one embedded interpreter** — the actual win: the single (main-thread)
+  parent forks **N children concurrently** off the warm interpreter; children run in parallel; results
+  reaped over N pipes. One import + parallelism — vs the pool's N imports + parallelism.
+- ⏭ A measured delta showing **in-process parallel ≤ the subprocess pool** on an **import-heavy**
+  suite (where the pool's N× import dominates) — that's the only regime ② wins. On cheap/light-import
+  suites it ties the pool (both fork-bound). Record in `benchmarks/RESULTS-inproc.md`.
 
 ## Non-Goals
 
