@@ -25,18 +25,18 @@ cd "$CORPUS"   # all tools run with cwd = corpus (rootdir/conftest resolution mu
 
 echo "### Scenario 1 — COLD full run (everything executes; all three pass the same tests)"
 hyperfine --warmup 1 --runs 8 \
-  -n "pytest"           "$VENV -m pytest -q ." \
-  -n "tiderace (old)"   --prepare "rm -f .tiderace.db" "$TIDERACE . --all --python $VENV -n 0" \
-  -n "native (riptide)" "$RIPTIDE run ."
+  --prepare "true"                      -n "pytest"           "$VENV -m pytest -q ." \
+  --prepare "rm -f .tiderace.db"        -n "tiderace (old)"   "$TIDERACE . --all --python $VENV -n 0" \
+  --prepare "rm -f .riptide-state.json" -n "native (riptide)" "$RIPTIDE run . --all"
 
 echo
-echo "### Scenario 2 — WARM, no changes (re-run after a clean run; impact analysis should skip)"
-rm -f .tiderace.db; "$TIDERACE" . --python "$VENV" >/dev/null 2>&1   # populate the impact db (cold)
+echo "### Scenario 2 — WARM, no changes (re-run after a clean run; impact analysis skips all)"
+rm -f .tiderace.db; "$TIDERACE" . --python "$VENV" >/dev/null 2>&1          # populate old-engine db
+rm -f .riptide-state.json; "$RIPTIDE" run . >/dev/null 2>&1                  # populate native state
 hyperfine --warmup 1 --runs 5 \
-  -n "pytest (no warm mode)" "$VENV -m pytest -q ." \
-  -n "tiderace (old, impact-skip)" "$TIDERACE . --python $VENV"
-echo "  native: \`run\`/\`bench\` always execute all (impact-skip lives in \`watch\`, not the one-shot CLI):"
-"$RIPTIDE" bench . 2 | sed 's/^/    /'
+  -n "pytest (no warm mode)"        "$VENV -m pytest -q ." \
+  -n "tiderace (old, impact-skip)"  "$TIDERACE . --python $VENV" \
+  -n "native (impact-skip)"         "$RIPTIDE run ."
 
 echo
 echo "### Scenario 3 — INNER LOOP, warm rerun of ONE test (the daemon's pitch)"
