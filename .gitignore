@@ -4,6 +4,7 @@
 .tiderace.db
 .tiderace-coverage/
 .riptide.db
+.riptide-state.json
 .riptide-coverage/
 
 # Benchmark / spike / fixture environments (provisioned by Lane 0)

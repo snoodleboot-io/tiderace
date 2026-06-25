@@ -61,12 +61,16 @@ pub(crate) fn run_batch<T: ShimTransport + ?Sized>(
         let start = Instant::now();
         let resp = transport.exchange(&req)?;
         let duration_ms = start.elapsed().as_millis() as u64;
-        results.push(TestResult::new(
-            item.node_id.clone(),
-            Outcome::from_wire(&resp.outcome),
-            duration_ms,
-            resp.detail,
-        ));
+        let touched = resp.coverage.keys().cloned().collect();
+        results.push(
+            TestResult::new(
+                item.node_id.clone(),
+                Outcome::from_wire(&resp.outcome),
+                duration_ms,
+                resp.detail,
+            )
+            .with_touched(touched),
+        );
     }
     Ok(results)
 }

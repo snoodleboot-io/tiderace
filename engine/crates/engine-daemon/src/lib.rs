@@ -13,6 +13,7 @@
 mod engine_handler;
 mod fs_watcher;
 mod invalidator;
+mod persist;
 mod rpc_method;
 mod rpc_server;
 mod session;
@@ -20,9 +21,10 @@ mod session;
 mod socket;
 mod watch;
 
-pub use engine_handler::EngineHandler;
+pub use engine_handler::{EngineHandler, ImpactSummary};
 pub use fs_watcher::{Debouncer, FsWatcher};
 pub use invalidator::{Invalidation, Invalidator};
+pub use persist::{changed_files, plan, PersistedState, Plan, TestRecord};
 pub use rpc_method::{RpcRequest, RpcResponse, RpcResult};
 pub use rpc_server::{read_frame, serve_connection, write_frame, RpcHandler};
 pub use session::{ChangeOutcome, Session};

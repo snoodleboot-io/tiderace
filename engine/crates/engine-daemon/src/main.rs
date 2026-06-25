@@ -35,10 +35,17 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Impact-aware `run` needs coverage to record each test's footprint (the warm-mode skip). The
+    // wellspring (a child process) inherits this env. `--all` opts out (full run, no coverage).
+    let force_all = args.iter().any(|a| a == "--all");
+    if mode == "run" && !force_all {
+        std::env::set_var("RIPTIDE_COVERAGE", "1");
+    }
     let mut handler = EngineHandler::new(python, shim, root.clone());
 
     match mode {
-        "run" => cmd_run(&mut handler),
+        "run" if force_all => cmd_run(&mut handler),
+        "run" => cmd_run_impacted(&mut handler),
         "watch" => cmd_watch(&root, &mut handler),
         "serve" => cmd_serve(&mut handler),
         "bench" => {
@@ -75,6 +82,36 @@ fn cmd_bench(handler: &mut EngineHandler, iters: usize) -> ExitCode {
         println!("iter {i}: {n} tests in {ms:.1} ms  [{tag}]");
     }
     ExitCode::SUCCESS
+}
+
+/// Impact-aware run: execute only tests whose deps changed since last run; serve the rest from warm
+/// state. With no changes, nothing executes.
+fn cmd_run_impacted(handler: &mut EngineHandler) -> ExitCode {
+    match handler.run_impacted() {
+        Ok(summary) => {
+            let failures = summary
+                .results
+                .iter()
+                .filter(|r| r.outcome == "failed" || r.outcome == "error")
+                .count();
+            eprintln!(
+                "{} ran, {} cached, {} total, {} failing",
+                summary.ran,
+                summary.cached,
+                summary.results.len(),
+                failures
+            );
+            if failures == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(message) => {
+            eprintln!("error: {message}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn cmd_run(handler: &mut EngineHandler) -> ExitCode {
