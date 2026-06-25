@@ -29,6 +29,8 @@ pub struct InProcessTransport {
     /// Extra `sys.path` entries (the `py-shim` dir, and `py-riptide` so `import riptide.*` resolves).
     py_paths: Vec<PathBuf>,
     coverage: bool,
+    /// `true` ⇒ run tests in-process in the parent (no fork, no isolation) — for profiling the fork cost.
+    no_fork: bool,
     /// The warm `shim.Engine` instance, or `None` until [`ready`](ShimTransport::ready).
     engine: Option<Py<PyAny>>,
     pid: i64,
@@ -41,9 +43,16 @@ impl InProcessTransport {
             root: root.into(),
             py_paths,
             coverage,
+            no_fork: false,
             engine: None,
             pid: -1,
         }
+    }
+
+    /// Toggle in-process (no-fork) execution — used to profile how much of per-test cost is the `fork()`.
+    pub fn with_no_fork(mut self, no_fork: bool) -> Self {
+        self.no_fork = no_fork;
+        self
     }
 
     fn boot(&mut self) -> Result<()> {
@@ -60,7 +69,7 @@ impl InProcessTransport {
             let reg = shim.call_method1("_discover", (root.as_ref(),))?;
 
             let kwargs = PyDict::new(py);
-            kwargs.set_item("no_fork", false)?; // fork-from-embedded isolation (ADR-E013)
+            kwargs.set_item("no_fork", self.no_fork)?; // false ⇒ fork-from-embedded isolation (ADR-E013)
             kwargs.set_item("root", root.as_ref())?;
             kwargs.set_item("coverage", self.coverage)?;
             let engine = shim.getattr("Engine")?.call((reg,), Some(&kwargs))?;

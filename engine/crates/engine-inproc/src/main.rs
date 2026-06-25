@@ -29,31 +29,34 @@ fn bench(args: &[String]) -> i32 {
         .unwrap();
 
     let items = RegexCollector::new().collect(&corpus).expect("collect");
-    let mut transport = InProcessTransport::new(&corpus, engine_py_paths(&engine_dir), false);
-    let boot = Instant::now();
-    transport.ready().expect("ready");
-    println!(
-        "[ready] {} tests; one embedded interpreter, project imported once in {:.0} ms",
-        items.len(),
-        boot.elapsed().as_secs_f64() * 1000.0
-    );
 
-    for i in 0..iters {
-        let started = Instant::now();
+    // Profile: same tests, fork-per-test (isolated) vs in-process (no fork) — isolates the fork cost.
+    for (label, no_fork) in [("fork-per-test (isolated)", false), ("no-fork (in-process)", true)] {
+        let mut transport =
+            InProcessTransport::new(&corpus, engine_py_paths(&engine_dir), false).with_no_fork(no_fork);
+        let boot = Instant::now();
+        transport.ready().expect("ready");
+        let boot_ms = boot.elapsed().as_secs_f64() * 1000.0;
+        let mut last = 0.0;
         let mut passed = 0usize;
-        for it in &items {
-            let resp = transport
-                .exchange(&ExecRequest::bare(it.node_id.as_str(), it.style.wire(), 5000))
-                .expect("exchange");
-            if resp.outcome == "passed" {
-                passed += 1;
+        for _ in 0..iters {
+            let started = Instant::now();
+            passed = 0;
+            for it in &items {
+                let resp = transport
+                    .exchange(&ExecRequest::bare(it.node_id.as_str(), it.style.wire(), 5000))
+                    .expect("exchange");
+                if resp.outcome == "passed" {
+                    passed += 1;
+                }
             }
+            last = started.elapsed().as_secs_f64() * 1000.0;
         }
         println!(
-            "iter {i}: {} tests ({} passed) in {:.1} ms  [in-process, fork-per-test]",
+            "[{label:<26}] {} tests ({} passed) in {last:.1} ms ({:.2} ms/test)  +{boot_ms:.0} ms import",
             items.len(),
             passed,
-            started.elapsed().as_secs_f64() * 1000.0
+            last / items.len() as f64,
         );
     }
     0

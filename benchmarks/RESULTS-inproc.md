@@ -29,6 +29,22 @@ itself** (~4 ms/test: fork + child `_child_exec` setup + body + `_exit` + parent
 paths pay equally. Deleting the transport changes nothing measurable, because the transport was never
 the bottleneck.
 
+## Profile: where do the ~4 ms go? (`inproc-probe bench` fork vs no-fork)
+
+| mode | per test | 500 trivial tests |
+|---|---:|---:|
+| **fork-per-test** (isolated) | **4.49 ms** | ~2246 ms |
+| **no-fork** (in-process) | **0.05 ms** | **~26 ms** |
+
+The **entire** per-test cost is the `fork()` (+ child `_child_exec` + IPC + reap). Parent-side
+orchestration (collection lookup, closure resolution, mark parsing) is **0.05 ms** — noise. No-fork is
+**~90× cheaper**, and 500 trivial tests run in **26 ms vs pytest's 863 ms (33×)**.
+
+**Implication:** the prize isn't *fewer* forks — it's *no* fork for tests that don't need isolation.
+A **pure** test (no shared-state mutation) can run in-process at 0.05 ms; only **impure** tests need the
+4.5 ms fork. The [purity guard + pure-test batching](../planning/backlog/pure-test-batching/) is the
+single highest-leverage perf lever in the whole engine.
+
 ## Corrected understanding of the levers
 
 1. **`fork()` per test (~4 ms) is the cost** — not the transport, not (for cheap tests) the body.
