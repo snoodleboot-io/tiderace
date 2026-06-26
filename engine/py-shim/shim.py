@@ -571,6 +571,32 @@ def _purity_verdict(module, before: dict, env_before: dict):
     return None
 
 
+def _restore_shared(module, before: dict, env_before: dict) -> None:
+    """Undo a (bounded) test's mutations from the pre-body snapshot — fork-free isolation. Restores the
+    module's snapshotted globals (re-setting changed ones, removing added ones) and `os.environ`. Sound
+    only for the snapshotted footprint: a mutation through an opaque/unsnapshottable value can't be
+    undone here, so such tests must still fork (see `_restorable`)."""
+    current = _snapshot_shared(module)
+    d = vars(module)
+    for k in set(before) | set(current):
+        old = before.get(k, _MISSING)
+        if old is _OPAQUE or current.get(k, _MISSING) is _OPAQUE:
+            continue  # can't safely restore an opaque value
+        if old is _MISSING:
+            d.pop(k, None)  # the test added this global → remove it
+        elif d.get(k, _MISSING) != old:
+            d[k] = copy.deepcopy(old)  # the test changed it → put the old value back
+    if dict(os.environ) != env_before:
+        os.environ.clear()
+        os.environ.update(env_before)
+
+
+def _restorable(module) -> bool:
+    """Whether a module's shared state is fully snapshot/restorable (no opaque mutable globals). A test
+    in a non-restorable module can't use the no-fork restore path — it must fork for isolation."""
+    return _OPAQUE not in _snapshot_shared(module).values()
+
+
 def _test_is_async(node_id: str, style: str) -> bool:
     """Whether the test body is `async def` (unittest methods are never async-driven here)."""
     if style == "unittest_method":
@@ -675,12 +701,13 @@ class Engine:
     """Parent-side scope state: wider-than-function fixtures live here, inherited by forked children."""
 
     def __init__(self, reg: Registry, no_fork: bool = False, root: str | None = None,
-                 coverage: bool = False, purity_guard: bool = False):
+                 coverage: bool = False, purity_guard: bool = False, restore: bool = False):
         self.reg = reg
         self.no_fork = no_fork  # no-COW fallback path (SubprocessWorker / Windows / --no-fork)
         self.root = root  # corpus root, for coverage path relativization
         self.coverage = coverage  # ADR-E006: capture per-test executed-source footprint
         self.purity_guard = purity_guard  # detect shared-state mutation per test (→ pure-test batching)
+        self.restore = restore  # snapshot/restore shared state around no-fork tests (isolation w/o fork)
         self.active: list[_Active] = []  # in setup order (widest → narrowest)
 
     def _value(self, name: str, module_key: str):
@@ -779,7 +806,8 @@ class Engine:
             # engine → result-identical outcomes; §8 boundary 3). Function fixtures are set up and
             # torn down per test in-process; wider scopes still live once in the parent.
             try:
-                return self._child_exec(node_id, style, requested, closure, combo, case_kwargs)
+                return self._child_exec(node_id, style, requested, closure, combo, case_kwargs,
+                                        in_process=True)
             except BaseException as exc:  # noqa: BLE001 — any in-process test error → Outcome::Error
                 return "error", "".join(traceback.format_exception_only(type(exc), exc)), {}, None
 
@@ -829,7 +857,8 @@ class Engine:
         res = json.loads(data.decode())
         return res["outcome"], res.get("detail", ""), res.get("coverage", {}), res.get("purity")
 
-    def _child_exec(self, node_id, style, requested, closure, combo, case_kwargs=None) -> tuple:
+    def _child_exec(self, node_id, style, requested, closure, combo, case_kwargs=None,
+                    in_process=False) -> tuple:
         """In the forked child: set up function-scope fixtures (incl. parametrized + reinit-after-fork
         resources, which thus get a FRESH handle per child), run the body, tear down in reverse.
         `case_kwargs` are the @riptide.cases values bound to the test's bare params. Returns
@@ -868,13 +897,17 @@ class Engine:
             test_args = {param: value_of(prov) for param, prov in requested.items()}
             if case_kwargs:
                 test_args.update(case_kwargs)
-            # Purity guard: snapshot shared state right before the body, compare right after (in this
-            # forked child it's safe). A mutation ⇒ the test can't be batched without isolation.
-            mod = importlib.import_module(_module_name(module_key)) if self.purity_guard else None
+            # Purity guard / restore: snapshot shared state right before the body, compare right after.
+            # When running in-process (no fork) with `restore`, undo any mutation so the next test is
+            # isolated WITHOUT a fork — the snapshot/restore fast path for impure tests too.
+            need_snap = self.purity_guard or (self.restore and in_process)
+            mod = importlib.import_module(_module_name(module_key)) if need_snap else None
             before = _snapshot_shared(mod) if mod is not None else None
             env_before = dict(os.environ) if mod is not None else None
             outcome, detail = _invoke(node_id, style, test_args)
             purity = _purity_verdict(mod, before, env_before) if mod is not None else None
+            if self.restore and in_process and purity is not None and mod is not None:
+                _restore_shared(mod, before, env_before)  # undo the mutation → next test isolated
             return outcome, detail, cov.stop(), purity
         finally:
             cov.stop()  # idempotent — frees the monitoring tool id even if setup raised
