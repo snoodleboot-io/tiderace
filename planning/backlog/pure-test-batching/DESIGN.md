@@ -49,7 +49,34 @@ scheduler can batch without re-deriving it every run. Additive.
   mark them impure (or at least not co-batch) so B is unaffected.
 - Unit tests for the batch-packing (pure → batched ≤ K; impure → solo).
 
+## Status (2026-06-25)
+
+- ✅ **Purity guard built + proven** (`engine/py-shim/shim.py`, `proof_purity_guard.py`): per-test
+  deep-copy snapshot of module globals + `os.environ`; in-place mutations caught; verdict surfaced as
+  `pure: bool` (+ `impurity` reason). Gated by `RIPTIDE_PURITY`/`--purity`, default off.
+- ✅ **Batching mechanism built + proven** (`run(force_no_fork=True)`, `proof_pure_batching.py`): pure
+  tests run in-process — **200 pure tests 993 ms → 70 ms (14×)**, identical outcomes; an impure test run
+  no-fork is still flagged (defense in depth).
+- ⏭ **Daemon integration** (the product win): persist the purity verdict per test in
+  `.riptide-state.json` (next to coverage deps); `run_impacted` routes proven-pure tests through
+  `force_no_fork` and forks only impure ones.
+
+## Future enhancements (ideas this unlocked)
+
+1. **Drop the guard for *known*-pure tests** → the raw ~90× (not 14×). After the learning pass, a test
+   recorded pure runs no-fork **without** re-snapshotting; re-verify periodically / when its deps
+   change. (The 14×→90× gap is the guard's per-test `deepcopy(os.environ)` cost.)
+2. **Snapshot/restore instead of fork for *impure* tests.** The guard already names exactly what a test
+   mutates (`module global X`, `os.environ`). So for an impure test with a *small, known* footprint,
+   save just those names before and restore after — **no fork**, near-free isolation. Only
+   opaque/unbounded mutators fall back to fork. This could remove the fork from *most* tests, not just
+   pure ones. (Soundness: footprint must be complete; this is ADR-E004's "pin the nondeterministic
+   inputs" strategy applied to state.)
+3. **Free-threading (PEP 703, CPython 3.13t/3.14t).** Pure tests are thread-safe by definition → run
+   them on **threads** in one interpreter with no GIL: no fork **and** parallel across cores **and** one
+   import — the trifecta. Needs the free-threaded build (`python3.14t`); the GIL build only parallelizes
+   via processes. The purity guard is exactly the gate that says which tests are thread-safe.
+
 ## Risks
 
-Soundness (PRD). Conservative default + the differential gate are the guardrails. The purity guard is
-the hard, prerequisite piece — see [ADR.md](ADR.md).
+Soundness (PRD). Conservative default + the differential gate are the guardrails.
