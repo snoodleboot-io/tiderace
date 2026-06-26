@@ -642,7 +642,9 @@ class Engine:
             self.active.append(_Active(d, key, value, gen))
             live.add(key)
 
-    def run(self, node_id: str, style: str, deadline_ms: int) -> dict:
+    def run(self, node_id: str, style: str, deadline_ms: int, force_no_fork: bool = False) -> dict:
+        # `force_no_fork`: run THIS test in-process (no fork) — the pure-test fast path (~90× cheaper).
+        # The caller asserts it's pure (purity guard); the guard re-checks and flags any escapee.
         module_key = _module_key(node_id)
         try:
             requested = self._requested(node_id, style)
@@ -677,7 +679,8 @@ class Engine:
             self._sync_wider(closure, node_id)
             for case_kwargs in case_kwargs_list:
                 oc, detail, cov, purity = self._fork_run(
-                    node_id, style, fixture_requested, closure, combo, deadline_ms, case_kwargs)
+                    node_id, style, fixture_requested, closure, combo, deadline_ms, case_kwargs,
+                    force_no_fork)
                 outcomes.append((oc, detail))
                 for path, lines in cov.items():
                     coverage.setdefault(path, set()).update(lines)
@@ -694,11 +697,12 @@ class Engine:
                 resp["impurity"] = impurity
         return resp
 
-    def _fork_run(self, node_id, style, requested, closure, combo, deadline_ms, case_kwargs=None) -> tuple:
-        """Run one (combo, case) variant; returns `(outcome, detail, coverage)` (coverage `{}` unless
-        enabled). The child streams its coverage map back through the result pipe alongside the outcome."""
+    def _fork_run(self, node_id, style, requested, closure, combo, deadline_ms, case_kwargs=None,
+                  force_no_fork=False) -> tuple:
+        """Run one (combo, case) variant; returns `(outcome, detail, coverage, purity)`. `force_no_fork`
+        runs it in THIS process (the pure-test fast path) without forking."""
         case_kwargs = case_kwargs or {}
-        if self.no_fork:
+        if self.no_fork or force_no_fork:
             # No-COW fallback: run the test in THIS process (no isolation, but the same fixture
             # engine → result-identical outcomes; §8 boundary 3). Function fixtures are set up and
             # torn down per test in-process; wider scopes still live once in the parent.
