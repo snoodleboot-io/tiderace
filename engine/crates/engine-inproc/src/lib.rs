@@ -31,6 +31,8 @@ pub struct InProcessTransport {
     coverage: bool,
     /// `true` ⇒ run tests in-process in the parent (no fork, no isolation) — for profiling the fork cost.
     no_fork: bool,
+    /// `true` ⇒ enable the purity guard (per-test `pure` verdict).
+    purity_guard: bool,
     /// The warm `shim.Engine` instance, or `None` until [`ready`](ShimTransport::ready).
     engine: Option<Py<PyAny>>,
     pid: i64,
@@ -44,6 +46,7 @@ impl InProcessTransport {
             py_paths,
             coverage,
             no_fork: false,
+            purity_guard: false,
             engine: None,
             pid: -1,
         }
@@ -53,6 +56,43 @@ impl InProcessTransport {
     pub fn with_no_fork(mut self, no_fork: bool) -> Self {
         self.no_fork = no_fork;
         self
+    }
+
+    /// Enable the purity guard so each run reports `pure` (which tests are safe to run no-fork).
+    pub fn with_purity_guard(mut self, on: bool) -> Self {
+        self.purity_guard = on;
+        self
+    }
+
+    /// Run one test directly, choosing fork vs no-fork per call (the pure-test routing the scheduler
+    /// does). Returns `(outcome, pure)` — `pure` is `Some(bool)` when the guard is on. FFI, no pipe.
+    pub fn run_node(
+        &self,
+        node_id: &str,
+        style: &str,
+        deadline_ms: u64,
+        force_no_fork: bool,
+    ) -> Result<(String, Option<bool>)> {
+        let engine = self
+            .engine
+            .as_ref()
+            .ok_or_else(|| EngineError::Exec("transport not ready".into()))?;
+        Python::attach(|py| -> PyResult<(String, Option<bool>)> {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("force_no_fork", force_no_fork)?;
+            let res =
+                engine
+                    .bind(py)
+                    .call_method("run", (node_id, style, deadline_ms), Some(&kwargs))?;
+            let outcome: String = res.get_item("outcome")?.extract()?;
+            let pure = res
+                .call_method1("get", ("pure",))
+                .ok()
+                .filter(|v| !v.is_none())
+                .and_then(|v| v.extract().ok());
+            Ok((outcome, pure))
+        })
+        .map_err(|e| EngineError::Exec(format!("run_node failed: {e}")))
     }
 
     fn boot(&mut self) -> Result<()> {
@@ -72,6 +112,7 @@ impl InProcessTransport {
             kwargs.set_item("no_fork", self.no_fork)?; // false ⇒ fork-from-embedded isolation (ADR-E013)
             kwargs.set_item("root", root.as_ref())?;
             kwargs.set_item("coverage", self.coverage)?;
+            kwargs.set_item("purity_guard", self.purity_guard)?;
             let engine = shim.getattr("Engine")?.call((reg,), Some(&kwargs))?;
 
             self.pid = py.import("os")?.call_method0("getpid")?.extract()?;
