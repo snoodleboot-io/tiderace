@@ -37,3 +37,4 @@ benchmarks/.hyperfine/
 
 # mkdocs build output
 /site/
+engine/crates/engine-inproc/Cargo.lock

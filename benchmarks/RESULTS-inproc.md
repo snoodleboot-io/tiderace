@@ -49,15 +49,16 @@ single highest-leverage perf lever in the whole engine.
 
 Learn each test's purity once (forked, safe), then re-run routing **pure tests to no-fork**:
 
-| corpus | all-fork re-run | **smart (pure→no-fork)** | speedup |
-|---|---:|---:|---:|
-| fx_corpus (509 fixture tests, all pure) | 4290 ms | **403 ms** | **10.7×** |
-| 500 pure tests | 2758 ms | **137 ms** | **20.2×** |
+| corpus | pytest | all-fork re-run | **smart (pure→no-fork)** | smart vs pytest | smart vs fork |
+|---|---:|---:|---:|---:|---:|
+| fx_corpus (509 fixture tests, all pure) | 800 ms | 4290 ms | **403 ms** | **2.0× faster** | 10.7× |
+| 500 pure tests | 850 ms | 2758 ms | **137 ms** | **6.2× faster** | 20.2× |
 
-**403 ms beats pytest's 863 ms by ~2×** on the fixture-heavy corpus — with full per-test purity
-verification (every test re-snapshotted). This is the warm re-run: learn purity once, then every
-subsequent run is ~10–20× faster. (Even the *fixture-heavy* fx_corpus is 509/509 pure — the fixtures set
-up isolated state; the test *bodies* don't mutate module globals, so they're safe to run without a fork.)
+The smart warm re-run **beats pytest** (2× on the fixture-heavy corpus, 6× on the pure suite) **and** the
+all-fork path (10–20×) — with full per-test purity verification (every test re-snapshotted). Learn purity
+once, then every subsequent run is fast. (Even the *fixture-heavy* fx_corpus is 509/509 pure — the
+fixtures set up isolated state; the test *bodies* don't mutate module globals, so they're safe to run
+without a fork.)
 
 ## Corrected understanding of the levers
 
