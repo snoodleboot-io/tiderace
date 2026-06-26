@@ -38,13 +38,18 @@ fn main() -> ExitCode {
     // Impact-aware `run` needs coverage to record each test's footprint (the warm-mode skip). The
     // wellspring (a child process) inherits this env. `--all` opts out (full run, no coverage).
     let force_all = args.iter().any(|a| a == "--all");
+    let fast = args.iter().any(|a| a == "--fast");
     if mode == "run" && !force_all {
         std::env::set_var("RIPTIDE_COVERAGE", "1");
+    }
+    if fast {
+        // Optimistic no-fork needs the wellsprings to snapshot/restore shared state (inherited env).
+        std::env::set_var("RIPTIDE_RESTORE", "1");
     }
     let mut handler = EngineHandler::new(python, shim, root.clone());
 
     match mode {
-        "run" if force_all => cmd_run(&mut handler),
+        "run" if force_all || fast => cmd_run(&mut handler, fast),
         "run" => cmd_run_impacted(&mut handler),
         "watch" => cmd_watch(&root, &mut handler),
         "serve" => cmd_serve(&mut handler),
@@ -114,8 +119,8 @@ fn cmd_run_impacted(handler: &mut EngineHandler) -> ExitCode {
     }
 }
 
-fn cmd_run(handler: &mut EngineHandler) -> ExitCode {
-    match handler.run_full_parallel() {
+fn cmd_run(handler: &mut EngineHandler, fast: bool) -> ExitCode {
+    match handler.run_full_parallel(fast) {
         Ok(results) => {
             let mut failures = 0;
             for r in &results {

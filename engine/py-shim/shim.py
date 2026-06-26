@@ -762,6 +762,15 @@ class Engine:
         case_params = [p for p in requested if p not in fixture_requested]
         case_kwargs_list = [dict(zip(case_params, c.values)) for c in self._cases(node_id, style)] or [{}]
 
+        # Soundness: an optimistic no-fork request is only honored when we can snapshot/restore the
+        # module's shared state. A module with opaque (un-deep-copyable) globals must still fork.
+        if force_no_fork and self.restore:
+            try:
+                if not _restorable(importlib.import_module(_module_name(module_key))):
+                    force_no_fork = False
+            except Exception:  # noqa: BLE001 — can't import/inspect ⇒ be safe, fork
+                force_no_fork = False
+
         uses = self._uses(node_id, style)  # @riptide.uses: set up by type, not injected (B2)
         closure = _closure(self.reg, module_key, fixture_requested, uses)
         parametrized = [d for d in closure if d.params]
@@ -1242,10 +1251,12 @@ def serve() -> int:
     no_fork = "--no-fork" in sys.argv[2:]
     coverage = "--coverage" in sys.argv[2:] or os.environ.get("RIPTIDE_COVERAGE") == "1"
     purity = "--purity" in sys.argv[2:] or os.environ.get("RIPTIDE_PURITY") == "1"
+    restore = "--restore" in sys.argv[2:] or os.environ.get("RIPTIDE_RESTORE") == "1"
     sys.path.insert(0, root)
     _preimport(root)
     reg = _discover(root)
-    engine = Engine(reg, no_fork=no_fork, root=root, coverage=coverage, purity_guard=purity)
+    engine = Engine(reg, no_fork=no_fork, root=root, coverage=coverage, purity_guard=purity,
+                    restore=restore)
     _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
     try:
         while True:
@@ -1254,7 +1265,8 @@ def serve() -> int:
                 return 0
             _write_frame(
                 _STDOUT,
-                engine.run(req["node_id"], req["style"], req.get("deadline_ms", 5000)),
+                engine.run(req["node_id"], req["style"], req.get("deadline_ms", 5000),
+                           req.get("force_no_fork", False)),
             )
     finally:
         engine.teardown_all()

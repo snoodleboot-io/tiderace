@@ -10,6 +10,7 @@ use crate::exec::worker::Worker;
 pub struct ForkWorker {
     wellspring: Wellspring,
     deadline_ms: u64,
+    optimistic_no_fork: bool,
 }
 
 impl ForkWorker {
@@ -18,12 +19,21 @@ impl ForkWorker {
         Ok(Self {
             wellspring: Wellspring::launch(python, shim, root)?,
             deadline_ms: 5_000,
+            optimistic_no_fork: false,
         })
     }
 
     /// Per-test deadline (ms) after which the forked child is killed and reported as `Error`.
     pub fn with_deadline_ms(mut self, ms: u64) -> Self {
         self.deadline_ms = ms;
+        self
+    }
+
+    /// Ask the shim to run tests in-process where sound (the snapshot/restore fast path). The shim
+    /// still forks any module it can't snapshot-restore, so isolation is preserved. The wellspring
+    /// must have been launched with `RIPTIDE_RESTORE=1` (the daemon sets it) for this to be safe.
+    pub fn with_optimistic_no_fork(mut self, on: bool) -> Self {
+        self.optimistic_no_fork = on;
         self
     }
 
@@ -36,6 +46,7 @@ impl ForkWorker {
 impl Worker for ForkWorker {
     fn run(&mut self, items: &[TestItem]) -> Result<Vec<TestResult>> {
         let deadline_ms = self.deadline_ms;
-        run_batch(self.wellspring.transport_mut(), items, deadline_ms)
+        let nf = self.optimistic_no_fork;
+        run_batch(self.wellspring.transport_mut(), items, deadline_ms, nf)
     }
 }

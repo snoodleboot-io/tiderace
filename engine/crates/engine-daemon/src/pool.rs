@@ -11,6 +11,7 @@ use engine_core::scheduler::{LocalityScheduler, ScheduleInput, ScheduledTest, Sc
 /// locality) and LPT-balances the groups across workers; each worker is its own warm wellspring on its
 /// own thread, forking per test (ADR-E003 isolation preserved). Coverage rides along if the wellsprings
 /// inherit `RIPTIDE_COVERAGE` (the caller's env), so impact footprints are still captured.
+#[allow(clippy::too_many_arguments)]
 pub fn run_parallel(
     python: &str,
     shim: &Path,
@@ -18,6 +19,7 @@ pub fn run_parallel(
     items: Vec<TestItem>,
     workers: usize,
     deadline_ms: u64,
+    optimistic_no_fork: bool,
 ) -> Result<Vec<TestResult>, String> {
     if items.is_empty() {
         return Ok(Vec::new());
@@ -50,7 +52,8 @@ pub fn run_parallel(
         handles.push(thread::spawn(move || -> Result<Vec<TestResult>, String> {
             let mut worker = ForkWorker::launch(&py, &sh, &rt)
                 .map_err(|e| format!("failed to launch wellspring: {e}"))?
-                .with_deadline_ms(deadline_ms);
+                .with_deadline_ms(deadline_ms)
+                .with_optimistic_no_fork(optimistic_no_fork);
             worker
                 .run(&batch_items)
                 .map_err(|e| format!("execution failed: {e}"))

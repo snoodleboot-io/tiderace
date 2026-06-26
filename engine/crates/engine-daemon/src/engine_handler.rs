@@ -79,8 +79,9 @@ impl EngineHandler {
     }
 
     /// Run the requested tests across a **parallel pool** of wellsprings (one per core), not the single
-    /// warm wellspring — the fix for sequential full runs. Used by the one-shot CLI `run` paths.
-    fn run_items_parallel(&self, requested: &[String]) -> Result<Vec<TestResult>, String> {
+    /// warm wellspring — the fix for sequential full runs. `fast` ⇒ optimistic no-fork (snapshot/restore
+    /// fast path; the shim forks non-restorable modules for soundness).
+    fn run_items_parallel(&self, requested: &[String], fast: bool) -> Result<Vec<TestResult>, String> {
         let all = self.collect()?;
         let items: Vec<TestItem> = if requested.is_empty() {
             all
@@ -96,13 +97,15 @@ impl EngineHandler {
             items,
             crate::pool::default_workers(),
             5000,
+            fast,
         )
     }
 
-    /// Full run across the parallel pool (the one-shot `run --all` path).
-    pub fn run_full_parallel(&self) -> Result<Vec<RpcResult>, String> {
+    /// Full run across the parallel pool (the one-shot `run` / `run --all` path). `fast` ⇒ no-fork
+    /// where sound (requires the wellsprings to have `RIPTIDE_RESTORE=1`, which the CLI sets).
+    pub fn run_full_parallel(&self, fast: bool) -> Result<Vec<RpcResult>, String> {
         Ok(self
-            .run_items_parallel(&[])?
+            .run_items_parallel(&[], fast)?
             .into_iter()
             .map(to_rpc)
             .collect())
@@ -141,7 +144,7 @@ impl EngineHandler {
 
         // Execute only the impacted tests (skip the wellspring launch entirely if none), in parallel.
         if !p.to_run.is_empty() {
-            let fresh = self.run_items_parallel(&p.to_run)?;
+            let fresh = self.run_items_parallel(&p.to_run, false)?;
             for r in &fresh {
                 state.tests.insert(
                     r.node_id.to_string(),

@@ -29,6 +29,10 @@ pub struct ExecRequest<'a> {
     /// The assembled argument map the body is invoked with.
     #[serde(default, skip_serializing_if = "FixtureArgs::is_empty")]
     pub fixture_args: FixtureArgs,
+    /// Ask the shim to run this test **in-process (no fork)** — the pure/restore fast path. The shim
+    /// still forks if the module isn't snapshot-restorable (soundness). `false` ⇒ byte-identical frame.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force_no_fork: bool,
 }
 
 impl<'a> ExecRequest<'a> {
@@ -42,7 +46,14 @@ impl<'a> ExecRequest<'a> {
             post_fork: Vec::new(),
             reinit: Vec::new(),
             fixture_args: FixtureArgs::new(),
+            force_no_fork: false,
         }
+    }
+
+    /// Ask the shim to run this test in-process (no fork) where sound — the fast path.
+    pub fn no_fork(mut self) -> Self {
+        self.force_no_fork = true;
+        self
     }
 }
 
