@@ -45,6 +45,20 @@ A **pure** test (no shared-state mutation) can run in-process at 0.05 ms; only *
 4.5 ms fork. The [purity guard + pure-test batching](../planning/backlog/pure-test-batching/) is the
 single highest-leverage perf lever in the whole engine.
 
+## Smart batching — the realized win (`inproc-probe smart`)
+
+Learn each test's purity once (forked, safe), then re-run routing **pure tests to no-fork**:
+
+| corpus | all-fork re-run | **smart (pure→no-fork)** | speedup |
+|---|---:|---:|---:|
+| fx_corpus (509 fixture tests, all pure) | 4290 ms | **403 ms** | **10.7×** |
+| 500 pure tests | 2758 ms | **137 ms** | **20.2×** |
+
+**403 ms beats pytest's 863 ms by ~2×** on the fixture-heavy corpus — with full per-test purity
+verification (every test re-snapshotted). This is the warm re-run: learn purity once, then every
+subsequent run is ~10–20× faster. (Even the *fixture-heavy* fx_corpus is 509/509 pure — the fixtures set
+up isolated state; the test *bodies* don't mutate module globals, so they're safe to run without a fork.)
+
 ## Corrected understanding of the levers
 
 1. **`fork()` per test (~4 ms) is the cost** — not the transport, not (for cheap tests) the body.
