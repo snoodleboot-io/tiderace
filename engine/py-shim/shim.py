@@ -38,6 +38,7 @@ import select
 import signal
 import struct
 import sys
+import textwrap
 import traceback
 import typing
 import unittest
@@ -462,6 +463,77 @@ async def _teardown_async(handle) -> None:
         pass
     except Exception:  # noqa: BLE001 — a teardown error must not abort remaining finalizers
         pass
+
+
+# --------------------------------------------------------------------------- static purity pre-filter
+# Calls that touch PROCESS-GLOBAL state (a sufficient, conservative signal of impurity — no run needed).
+_IMPURE_CALLS = frozenset({
+    "os.chdir", "os.putenv", "os.unsetenv", "os.environ.update", "os.environ.pop",
+    "os.environ.setdefault", "os.environ.clear", "random.seed", "numpy.random.seed", "np.random.seed",
+    "locale.setlocale", "signal.signal", "sys.setrecursionlimit", "warnings.filterwarnings",
+    "warnings.simplefilter", "setattr", "delattr", "globals", "__import__",
+})
+
+
+def _local_names(fn) -> set:
+    """Names bound locally in `fn` (params + assignment/loop/with/comprehension targets) — used to tell
+    a write to a *local* (fine) from a write to a *free* name (a module global / closure → impure)."""
+    names = set()
+    a = fn.args
+    for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg):
+        if arg is not None:
+            names.add(arg.arg)
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+    return names
+
+
+def _assign_root(target) -> str | None:
+    """The root Name of an assignment target: `a` for `a`, `a[k]`, `a.b`, `a.b[k]` (None otherwise)."""
+    while isinstance(target, (ast.Subscript, ast.Attribute)):
+        target = target.value
+    return target.id if isinstance(target, ast.Name) else None
+
+
+def _dotted_call(call) -> str:
+    """Dotted name of a call's callee: `os.chdir(...)` → 'os.chdir'."""
+    node, parts = call.func, []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def static_impurity(func) -> str | None:
+    """A **sufficient** (conservative) static impurity test — decided WITHOUT running. Returns a reason
+    when the source obviously mutates shared state (`global`, a write to a free/module name, env or
+    process-global calls), else `None` (no obvious impurity ⇒ a no-fork *candidate*, to be confirmed by
+    the runtime guard). Over-approximates impurity (the safe direction): a false 'impure' only costs a
+    fork; it never wrongly green-lights an unsafe no-fork."""
+    try:
+        src = textwrap.dedent(inspect.getsource(func))
+        fn = next(n for n in ast.walk(ast.parse(src)) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    except (OSError, TypeError, SyntaxError, StopIteration):
+        return None  # can't read source ⇒ no static verdict; the runtime guard decides
+    local = _local_names(fn)
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Global):
+            return f"`global {', '.join(node.names)}`"
+        if isinstance(node, (ast.Assign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                if not isinstance(t, ast.Name):  # subscript/attr write — a mutation through the root
+                    root = _assign_root(t)
+                    if root and root not in local:
+                        return f"writes to non-local `{root}`"
+                elif isinstance(node, ast.AugAssign) and t.id not in local:
+                    return f"augments non-local `{t.id}`"
+        if isinstance(node, ast.Call) and _dotted_call(node) in _IMPURE_CALLS:
+            return f"calls `{_dotted_call(node)}`"
+    return None
 
 
 # --------------------------------------------------------------------------- purity guard (→ batching)
