@@ -81,3 +81,54 @@ without a fork.)
 - ❌ ② **transport swap is not a perf win** on its own (this doc).
 - ⏭ The win requires **parallel-fork-from-embedded** (import once + parallel) — re-scoped on the ticket.
   And independently, **pure-test batching** is now the #1 lever because the fork is the cost.
+
+---
+
+## The no-fork ladder (2026-06-26): isolation without paying the fork
+
+Follow-on work. Since `fork()` (~4.5 ms/test) is the cost, the goal is to **skip the fork wherever it's
+safe** — and make "safe" the engine's job, not the test author's. Three execution tiers now exist, picked
+per test:
+
+| tier | when | isolation | rel. cost |
+|---|---|---|---|
+| **bare no-fork** | test is *known pure* (verdict) | nothing to isolate | ~0.05 ms (90×) |
+| **no-fork + restore** | test mutates a *restorable* (snapshottable) footprint | snapshot before / restore after | ~0.4–0.9 ms (5–14×) |
+| **fork** | module has *opaque* globals (can't snapshot) | COW child | ~4.5 ms (1×) |
+
+Built + proven:
+
+- **Static pre-filter** (`shim.static_impurity`, `proof_static_purity.py`) — an AST scan that flags
+  obvious mutators (`global`, write to a free/module name, env/process-global calls) **without running**.
+  A sufficient (conservative) impurity test: a false "impure" only costs a fork. Seeds the tier choice
+  on a cold run; distinguishes a *local* write (fine) from a *free-name* write (impure).
+- **Snapshot/restore** (`Engine(restore=)`, `proof_snapshot_restore.py`) — **the big one**. Run *impure*
+  tests in-process and undo their mutation from the pre-body snapshot. 50 tests that contaminate each
+  other (1/50 pass un-isolated) run **50/50 isolated in 39 ms vs 207 ms forked — 5×, same isolation, and
+  no learning pass** (it *contains* impurity instead of predicting it). Opaque modules auto-fall-back to
+  fork (`_restorable()`), so it's sound.
+- **Daemon `run --fast`** — the win, end-to-end through the **pipe daemon** (not just the in-process
+  bench). The daemon optimistically requests no-fork with `RIPTIDE_RESTORE=1`; the shim restores
+  restorable modules and forks opaque ones. **No persisted verdicts needed for correctness.**
+
+Measured (fx_corpus, 509 tests, **cold one-shot** through the daemon, hyperfine -r 6):
+
+| daemon mode | mean | vs fork | note |
+|---|---:|---:|---|
+| `run --all` (parallel fork) | 1179 ms | 1.0× | System (fork syscalls) 3.68 s |
+| `run --fast` (no-fork + restore) | **706 ms** | **1.67×** | System **0.58 s** (6× fewer syscalls) |
+
+Cold one-shot understates it (it still pays wellspring launch + collection once fork is gone); the no-fork
+fraction is larger in **warm/serve** mode where launch is amortized — there it approaches the in-process
+bench's 5–20×.
+
+### Still open
+
+- **Free-threading (PEP 703)** — *blocked on the environment*: this box has the GIL-enabled 3.14 build
+  (`Py_GIL_DISABLED: 0`), no `python3.14t`. Design holds: pure tests are thread-safe by definition, so on
+  a free-threaded build they run on **threads in one interpreter** — no fork **+** parallel **+** one
+  import (the trifecta). The purity guard is exactly the "is this thread-safe?" gate. Needs the
+  free-threaded CPython build installed to measure.
+- **Persisted purity verdicts** — correctness doesn't need them (restore + opaque-fork is sound), but
+  recording verdicts lets *known-pure* tests take the **bare no-fork** tier (skip the restore snapshot →
+  the full 90×). Content-address the verdict like the result cache so CI teaches every machine.
