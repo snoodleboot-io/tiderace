@@ -23,11 +23,12 @@ command -v hyperfine >/dev/null || { echo "needs hyperfine"; exit 1; }
 
 cd "$CORPUS"   # all tools run with cwd = corpus (rootdir/conftest resolution must match)
 
-echo "### Scenario 1 — COLD full run (everything executes; all three pass the same tests)"
+echo "### Scenario 1 — COLD full run (everything executes; all four pass the same tests)"
 hyperfine --warmup 1 --runs 8 \
-  --prepare "true"                      -n "pytest"           "$VENV -m pytest -q ." \
-  --prepare "rm -f .tiderace.db"        -n "tiderace (old)"   "$TIDERACE . --all --python $VENV -n 0" \
-  --prepare "rm -f .riptide-state.json" -n "native (riptide)" "$RIPTIDE run . --all"
+  --prepare "true"                      -n "pytest"                 "$VENV -m pytest -q ." \
+  --prepare "rm -f .tiderace.db"        -n "tiderace (old)"         "$TIDERACE . --all --python $VENV -n 0" \
+  --prepare "rm -f .riptide-state.json" -n "native (fork)"          "$RIPTIDE run . --all" \
+  --prepare "rm -f .riptide-state.json" -n "native --fast (nofork)" "$RIPTIDE run . --fast"
 
 echo
 echo "### Scenario 2 — WARM, no changes (re-run after a clean run; impact analysis skips all)"
