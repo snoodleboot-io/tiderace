@@ -11,6 +11,19 @@
 > - **native --fast** — `riptide-daemon run --fast`: optimistic **no-fork + snapshot/restore** (impure
 >   tests run in-process and have their mutation undone; opaque modules auto-fork for soundness).
 
+## Summary — warm + cold at a glance
+
+| scenario | pytest | tiderace (old) | native (fork) | **native --fast** |
+|---|---:|---:|---:|---:|
+| **Cold** — full run (all 509 execute) | 0.94 s | 7.56 s | 1.07 s | **0.66 s** |
+| **Warm** — no changes (impact-skip) | 0.84 s | 37.7 ms | 9.4 ms | **9.4 ms** |
+| **Warm** — inner loop, 1 changed test | 0.27 s | — | ~5 ms | **~5 ms** |
+
+`--fast` (no-fork+restore) only helps when tests **actually execute** — the cold/full-run row, where it
+beats pytest 1.42×. In the warm rows impact-skip runs nothing (or one cheap test), so fork vs no-fork is
+in the noise; those were already won by impact-skip + the warm daemon. Read `--fast` as the
+**cold-run / large-changeset** lever, not a warm-loop one.
+
 ## Scenario 1 — cold full run (everything executes; all four pass the same tests)
 
 | tool | mean time | vs pytest |
