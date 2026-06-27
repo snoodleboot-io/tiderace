@@ -24,11 +24,12 @@ command -v hyperfine >/dev/null || { echo "needs hyperfine"; exit 1; }
 cd "$CORPUS"   # all tools run with cwd = corpus (rootdir/conftest resolution must match)
 
 echo "### Scenario 1 — COLD full run (everything executes; all four pass the same tests)"
+# native runs no-fork+restore BY DEFAULT (no flag); RIPTIDE_FORCE_FORK=1 is a debug knob for the baseline.
 hyperfine --warmup 1 --runs 8 \
-  --prepare "true"                      -n "pytest"                 "$VENV -m pytest -q ." \
-  --prepare "rm -f .tiderace.db"        -n "tiderace (old)"         "$TIDERACE . --all --python $VENV -n 0" \
-  --prepare "rm -f .riptide-state.json" -n "native (fork)"          "$RIPTIDE run . --all" \
-  --prepare "rm -f .riptide-state.json" -n "native --fast (nofork)" "$RIPTIDE run . --fast"
+  --prepare "true"                      -n "pytest"                  "$VENV -m pytest -q ." \
+  --prepare "rm -f .tiderace.db"        -n "tiderace (old)"          "$TIDERACE . --all --python $VENV -n 0" \
+  --prepare "rm -f .riptide-state.json" -n "native (default,no-fork)" "$RIPTIDE run . --all" \
+  --prepare "rm -f .riptide-state.json" -n "native (force-fork)"      "RIPTIDE_FORCE_FORK=1 $RIPTIDE run . --all"
 
 echo
 echo "### Scenario 2 — WARM, no changes (re-run after a clean run; impact analysis skips all)"

@@ -48,11 +48,14 @@ impl EngineHandler {
             .map_err(|e| format!("collection failed: {e}"))
     }
 
-    /// Launch the wellspring once; reuse it thereafter (warm).
+    /// Launch the wellspring once; reuse it thereafter (warm). Runs tests no-fork + restore by default
+    /// (the shim forks non-restorable modules for soundness) — the warm RPC `Run` path gets the same
+    /// fast execution as the one-shot pool.
     fn worker(&mut self) -> Result<&mut ForkWorker, String> {
         if self.worker.is_none() {
             let w = ForkWorker::launch(&self.python, &self.shim, &self.root)
-                .map_err(|e| format!("failed to launch wellspring: {e}"))?;
+                .map_err(|e| format!("failed to launch wellspring: {e}"))?
+                .with_optimistic_no_fork(optimistic_no_fork());
             self.worker = Some(w);
         }
         Ok(self.worker.as_mut().expect("just launched"))
@@ -79,9 +82,9 @@ impl EngineHandler {
     }
 
     /// Run the requested tests across a **parallel pool** of wellsprings (one per core), not the single
-    /// warm wellspring — the fix for sequential full runs. `fast` ⇒ optimistic no-fork (snapshot/restore
-    /// fast path; the shim forks non-restorable modules for soundness).
-    fn run_items_parallel(&self, requested: &[String], fast: bool) -> Result<Vec<TestResult>, String> {
+    /// warm wellspring — the fix for sequential full runs. Tests run no-fork + restore by default; the
+    /// shim forks non-restorable (opaque) modules for soundness.
+    fn run_items_parallel(&self, requested: &[String]) -> Result<Vec<TestResult>, String> {
         let all = self.collect()?;
         let items: Vec<TestItem> = if requested.is_empty() {
             all
@@ -97,15 +100,15 @@ impl EngineHandler {
             items,
             crate::pool::default_workers(),
             5000,
-            fast,
+            optimistic_no_fork(), // no-fork + restore by default (RIPTIDE_FORCE_FORK=1 to disable)
         )
     }
 
-    /// Full run across the parallel pool (the one-shot `run` / `run --all` path). `fast` ⇒ no-fork
-    /// where sound (requires the wellsprings to have `RIPTIDE_RESTORE=1`, which the CLI sets).
-    pub fn run_full_parallel(&self, fast: bool) -> Result<Vec<RpcResult>, String> {
+    /// Full run across the parallel pool (the one-shot `run` / `run --all` path). Requires the
+    /// wellsprings to have `RIPTIDE_RESTORE=1` (the CLI always sets it).
+    pub fn run_full_parallel(&self) -> Result<Vec<RpcResult>, String> {
         Ok(self
-            .run_items_parallel(&[], fast)?
+            .run_items_parallel(&[])?
             .into_iter()
             .map(to_rpc)
             .collect())
@@ -144,7 +147,7 @@ impl EngineHandler {
 
         // Execute only the impacted tests (skip the wellspring launch entirely if none), in parallel.
         if !p.to_run.is_empty() {
-            let fresh = self.run_items_parallel(&p.to_run, false)?;
+            let fresh = self.run_items_parallel(&p.to_run)?;
             for r in &fresh {
                 state.tests.insert(
                     r.node_id.to_string(),
@@ -199,6 +202,12 @@ impl EngineHandler {
             Err(_) => "missing".to_string(),
         }
     }
+}
+
+/// No-fork + restore is the default. `RIPTIDE_FORCE_FORK=1` reverts to fork-per-test — a debug/benchmark
+/// escape only (not a user-facing flag), so the fork baseline stays measurable for regression checks.
+fn optimistic_no_fork() -> bool {
+    std::env::var("RIPTIDE_FORCE_FORK").as_deref() != Ok("1")
 }
 
 fn to_rpc(r: TestResult) -> RpcResult {
