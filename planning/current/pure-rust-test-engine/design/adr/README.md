@@ -19,9 +19,14 @@ informs **ADR-E002**).
 | [E008](ADR-E008-cross-platform.md) | Fork-first; cross-platform fallback behind `Worker` trait | ✅ Accepted (design) | 05 |
 | [E009](ADR-E009-lazy-assertion-introspection.md) | Lazy assertion introspection (not import-time rewrite) | ✅ Accepted (design) | 09 |
 | [E010](ADR-E010-locality-scheduler.md) | Duration-aware, scope-locality scheduler | ✅ Accepted (design) | 06 |
+| [E011](ADR-E011-shim-transport-seam.md) | `ShimTransport` seam (pipe / in-process backends) | ✅ Accepted (design) | 05 |
+| [E012](ADR-E012-native-type-driven-authoring.md) | Native type-driven authoring (`@provides`/`@cases`/`@uses`) | ✅ Accepted (design) | 04, 10 |
+| [E013](ADR-E013-inprocess-isolation.md) | In-process backend isolation: fork-from-embedded (②) | ✅ Accepted (design) | 05, 11 |
+| [E014](ADR-E014-no-fork-restore-ladder.md) | No-fork + restore isolation ladder (default execution path) | ✅ **Implemented + measured** | 05, 04, 06 |
 
 **Status legend:** "Accepted (design)" = agreed for the design phase; revisitable when the
-de-risking spike produces real numbers. Nothing here is implemented yet.
+de-risking spike produces real numbers. **E014 is implemented + measured** — the no-fork ladder is the
+engine's default execution path today; several other ADRs (E001–E013) are now built as well.
 
 ## ADR format
 

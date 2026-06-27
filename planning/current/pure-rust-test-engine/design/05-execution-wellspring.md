@@ -1,5 +1,11 @@
 # 05 — Execution: Wellspring, Snapshot Stack & the Worker Trait
 
+> **As-built update (2026-06):** the fork-per-test model below is now *conditional*. The engine's default
+> execution path is the **no-fork + restore isolation ladder** — fork only where nothing cheaper is sound
+> — per [ADR-E014](adr/ADR-E014-no-fork-restore-ladder.md). See [`/ARCHITECTURE.md`](../../../../ARCHITECTURE.md) §6
+> for the current end-to-end picture. The wellspring/fork machinery here remains the tier-3 (and Windows)
+> path.
+
 > **Status:** ✅ draft for discussion
 > Prereqs: [00-vision](00-vision.md), [01-architecture](01-architecture.md), [02-domain-model](02-domain-model.md), [04-fixture-graph](04-fixture-graph.md).
 > Gated by: [ADR-E003](adr/ADR-E003-fork-snapshot-isolation.md) (fork-from-snapshot — *the load-bearing performance bet*),
