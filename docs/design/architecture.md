@@ -1,85 +1,129 @@
 # Architecture
 
+> The full, authoritative architecture (every diagram, the code map, ADR index) lives in
+> [`ARCHITECTURE.md`](https://github.com/snoodleboot-io/tiderace/blob/main/ARCHITECTURE.md) at the repo
+> root. This page is the user-facing tour.
+
 ## System Overview
 
-tiderace is a single compiled Rust binary. It orchestrates Python test execution without being
-a Python process itself — giving it native-speed control over discovery, hashing, scheduling,
-and state — while real `pytest` does the actual running (full fixture/plugin/assertion
-compatibility).
+tiderace is a **pure-Rust test engine for Python**. The Rust side owns everything that benefits from
+being fast, typed, and parallel — test collection, the fixture graph, scheduling, isolation, coverage,
+and impact analysis. The one thing that must run inside CPython — running Python — is a small *shim* that
+imports your tests and invokes their bodies. **There is no pytest at runtime.**
 
 ```mermaid
-graph TD
-    CLI[CLI / main.rs] --> COL[Collector]
-    CLI --> HASH[Hasher]
-    CLI --> DB[(SQLite .tiderace.db)]
+flowchart LR
+    subgraph rust["Rust — the engine (owns all logic & state)"]
+        CLI["riptide-daemon<br/>(CLI &amp; warm daemon)"]
+        CORE["engine-core<br/>collection · fixtures · scheduler<br/>coverage · impact · cache · exec"]
+        CLI --> CORE
+    end
 
-    COL -->|test items| IMP[Impact Analyzer]
-    HASH -->|file hashes| IMP
-    DB -->|stored hashes + deps| IMP
+    subgraph py["Python — the substrate (no logic)"]
+        SHIM["py-shim/shim.py<br/>import user code · invoke body<br/>isolate · capture coverage + purity"]
+        USER["your tests + fixtures"]
+        SHIM --> USER
+    end
 
-    IMP -->|tests to run| RUN[Runner / Rayon pool]
-
-    RUN -->|"one process per worker (batched)"| PY1[pytest worker 1]
-    RUN -->|…| PYN[pytest worker N]
-    PY1 -->|"-rA status + coverage contexts"| RUN
-
-    WATCH[watcher.rs] -.->|file changes| CLI
-    POOL[pool.rs warm workers] -.->|tiderace watch| RUN
-
-    RUN --> DB
-    RUN --> REP[Reporter]
+    CORE <-->|"ExecRequest / ExecResponse<br/>(ShimTransport seam)"| SHIM
 ```
 
-## Execution strategies
+The boundary between them is a single narrow trait, `ShimTransport` — one synchronous request→response
+exchange. In production it's JSON frames over a child process's pipes; the same seam also hosts an
+experimental embedded-CPython (FFI) backend. The engine never knows which.
 
-tiderace drives pytest three ways (see [Execution Model](parallel-execution.md) and
-[ADR-009](decisions.md)):
+## The run pipeline
 
-- **Batched (default)** — one `pytest` process per worker over many node ids; *N* tests cost
-  *W* interpreter startups. ~8× faster cold than one process per test.
-- **Isolated (`--isolate`)** — one process per test, for suites needing a fresh interpreter.
-- **Warm pool (`tiderace watch`)** — long-lived workers import pytest once; edit→test cycles
-  pay no startup.
+```mermaid
+sequenceDiagram
+    participant U as you (CLI)
+    participant C as Collector (Rust)
+    participant F as FixtureGraph (Rust)
+    participant S as Scheduler (Rust)
+    participant W as Wellspring(s) (CPython + shim)
+    participant R as Reporter (Rust)
 
-## Key design decisions
+    U->>C: run <path>
+    C->>C: discover tests (regex collect)
+    C->>F: build fixture closure per test
+    F->>S: group by module (locality) + balance across N workers
+    par one wellspring per core
+        loop each test in batch
+            S->>W: ExecRequest (isolation ladder picks fork / no-fork)
+            W-->>S: outcome + coverage + purity
+        end
+    end
+    S->>R: results
+    R-->>U: report + exit code
+```
 
-- **Subprocesses, not embedded Python.** Full compatibility and OS-level isolation. Embedding
-  via PyO3 with subinterpreters was prototyped and **rejected** — most C extensions aren't
-  multi-interpreter-safe and crash the process ([ADR-010](decisions.md)).
-- **SQLite for state.** Zero infrastructure, ACID for concurrent writers, a single
-  inspectable file ([ADR-002](decisions.md)).
-- **SHA-256 for change detection.** Works without git, content-based ([ADR-003](decisions.md)).
-- **Coverage dynamic contexts.** Per-test dependencies come from a single *batched* coverage
-  run, so `--coverage` is precise *and* fast ([ADR-011](decisions.md)).
+## The isolation ladder
 
-## Module breakdown
+This is what makes tiderace fast. We isolate tests from each other so one can't corrupt another's view
+of process-global state. The classic way is `fork()` per test — but the fork (~4.5 ms) was the dominant
+cost, and **most tests don't mutate shared state at all**, so the fork buys them nothing. tiderace
+classifies each test and runs it the cheapest *sound* way — automatically, no flag:
 
-| Module | Responsibility |
-|---|---|
-| `main.rs` | CLI parsing, config resolution, run/collect/clear/coverage/**watch** orchestration |
-| `config.rs` | `[tool.tiderace]` parsing from `pyproject.toml` |
-| `collector.rs` | Regex test discovery (functions, `Test*` classes, `unittest.TestCase`, async) |
-| `hasher.rs` | SHA-256 fingerprinting + change detection |
-| `db.rs` | SQLite persistence (hashes, results, deps, coverage) |
-| `impact.rs` | Changed-file → affected-test selection |
-| `runner.rs` | Rayon pool, batched/isolated execution, coverage-context extraction |
-| `pool.rs` | Persistent warm worker pool (watch mode) |
-| `watcher.rs` | Debounced file watching (`notify`) |
-| `worker.py` | Embedded Python worker run by the warm pool |
-| `reporter.rs` | Terminal output and coverage report |
+```mermaid
+flowchart TD
+    START["test to run"] --> STATIC{"obviously mutates<br/>shared state?<br/>(static AST scan)"}
+    STATIC -->|yes| FORK
+    STATIC -->|no| RESTORABLE{"module snapshot-<br/>restorable?"}
+    RESTORABLE -->|"no (opaque globals)"| FORK["FORK · COW child<br/>~4.5 ms · bulletproof"]
+    RESTORABLE -->|yes| KNOWN{"known pure?"}
+    KNOWN -->|yes| BARE["BARE NO-FORK<br/>in-process · ~0.05 ms (90×)"]
+    KNOWN -->|"unknown / impure"| RESTORE["NO-FORK + RESTORE<br/>snapshot → run → undo<br/>~0.4–0.9 ms (5–14×)"]
+```
 
-## Concurrency model
+| Tier | When | How it stays isolated | Rel. cost |
+|---|---|---|---|
+| **bare no-fork** | test is known pure | nothing to isolate | ~0.05 ms (90×) |
+| **no-fork + restore** | mutates a restorable footprint | snapshot module globals + `os.environ`, run, restore | ~0.4–0.9 ms (5–14×) |
+| **fork** | opaque/un-restorable globals | copy-on-write child | ~4.5 ms (1×) |
 
-Tests run on a scoped Rayon pool via `par_iter().map().collect()` — no shared
-`Mutex<Vec<_>>`, so there are no lock-poisoning panics, and the requested worker count is
-honored deterministically. The warm pool (`pool.rs`) adds a dedicated stdout reader thread per
-worker so a timeout/crash never deadlocks or hangs the run.
+It's **sound by construction**: restore *undoes* mutation rather than predicting purity, and anything it
+can't snapshot falls back to fork. A wrong guess can only change speed, never correctness — which is why
+it's on by default and needs no learning pass. See
+[ADR-E014](https://github.com/snoodleboot-io/tiderace/blob/main/planning/current/pure-rust-test-engine/design/adr/ADR-E014-no-fork-restore-ladder.md).
 
-## Limitations (v0.1)
+## Impact analysis & the cache
 
-- **Linux x86_64** is the supported target this phase (the code uses portable
-  `std::process`, so other platforms are a future step).
-- **Fixture/plugin dependencies** are captured only through runtime coverage, not static
-  analysis — so precise impact analysis requires a prior `--coverage` run.
-- **Embedded subinterpreters** are out (ecosystem not multi-interpreter-ready —
-  [ADR-010](decisions.md)).
+```mermaid
+flowchart LR
+    EXE["run test"] --> MON["sys.monitoring<br/>records touched files"]
+    MON --> DG["dep graph<br/>(test ↔ source)"]
+    DG --> ST["persist state +<br/>file content hashes"]
+    ST --> CHG{"next run:<br/>which files changed?"}
+    CHG -->|"touches changed file"| RERUN["re-run (isolation ladder)"]
+    CHG -->|unchanged| SKIP["serve prior outcome · no run"]
+```
+
+After one run, tiderace knows which source files each test executed. On the next run it hashes the files,
+finds what changed, and runs **only** the affected tests — when nothing changed, nothing runs (the warm
+interpreter isn't even launched). Because outcomes are content-addressed, a result is a pure function of
+its inputs, so the same machinery doubles as a **build-system-style cache** that can be shared across
+machines.
+
+## The warm daemon
+
+The engine keeps CPython warm so your project is imported **once**, not per test or per run:
+
+- **`run`** — impact-aware: execute only changed tests across a parallel pool of wellsprings.
+- **`run --all`** — full run across the pool.
+- **`watch`** — re-run impacted tests on each file save (millisecond loops).
+- **`serve`** — a persistent warm session over a Unix socket (RPC: discover / run / health / recycle).
+
+## Authoring
+
+tiderace runs ordinary pytest-style tests as-is. It also offers **native type-driven authoring** —
+`@riptide.provides` / `@riptide.cases` / `@riptide.uses`, where fixtures resolve by *type* through the
+Rust fixture graph — so a suite can drop the pytest dependency entirely. `riptide migrate` is an AST
+codemod that converts an existing pytest suite to the native model.
+
+## Learn more
+
+- [Design overview](overview.md) — the three pillars
+- [Modules](modules.md) — crate-by-crate responsibilities
+- [Parallel execution & isolation](parallel-execution.md)
+- [Coverage](coverage.md) · [Impact analysis](impact-analysis.md) · [State & cache](database.md)
+- [Design decisions (ADRs)](decisions.md)
