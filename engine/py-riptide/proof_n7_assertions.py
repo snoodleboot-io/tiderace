@@ -60,7 +60,7 @@ def main() -> int:
         engine = shim.Engine(reg, no_fork=True, root=root)
 
         def run(name):
-            return engine.run(f"test_asserts.py::{name}", "pytest_func", 5000)
+            return engine.run(f"test_asserts.py::{name}", "function", 5000)
 
         checks = []
 

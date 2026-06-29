@@ -57,7 +57,7 @@ def main() -> int:
         print(f"[mechanism] {mech} (CPython {sys.version_info.major}.{sys.version_info.minor})")
 
         engine = shim.Engine(reg, no_fork=True, root=root, coverage=True)
-        res = engine.run("test_cov.py::test_uses_used", "pytest_func", 5000)
+        res = engine.run("test_cov.py::test_uses_used", "function", 5000)
         engine.teardown_all()
 
         cov = res.get("coverage", {})

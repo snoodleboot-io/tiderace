@@ -113,7 +113,7 @@ def main() -> int:
         results = {}
         print("\n[run]")
         for name, want in expected.items():
-            res = engine.run(f"test_native.py::{name}", "pytest_func", 5000)
+            res = engine.run(f"test_native.py::{name}", "function", 5000)
             results[name] = res["outcome"]
             mark = "ok" if res["outcome"] == want else f"!! expected {want}"
             detail = f"  ({res['detail'].strip().splitlines()[-1]})" if res["detail"] else ""

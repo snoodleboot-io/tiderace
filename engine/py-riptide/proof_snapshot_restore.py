@@ -27,7 +27,7 @@ CORPUS = "_STATE = {'n': 0}\n" + "".join(
 
 
 def run_all(engine, nodes, force_no_fork):
-    return sum(engine.run(n, "pytest_func", 5000, force_no_fork=force_no_fork)["outcome"] == "passed"
+    return sum(engine.run(n, "function", 5000, force_no_fork=force_no_fork)["outcome"] == "passed"
                for n in nodes)
 
 

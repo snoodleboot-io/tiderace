@@ -95,7 +95,7 @@ def main() -> int:
         results = {}
         print("\n[run]")
         for name, want in order:
-            res = engine.run(f"test_builtins.py::{name}", "pytest_func", 5000)
+            res = engine.run(f"test_builtins.py::{name}", "function", 5000)
             results[name] = res["outcome"]
             mark = "ok" if res["outcome"] == want else f"!! expected {want}"
             detail = f"  ({res['detail'].strip().splitlines()[-1]})" if res["detail"] else ""

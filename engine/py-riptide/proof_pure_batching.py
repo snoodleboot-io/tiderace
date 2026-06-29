@@ -37,18 +37,18 @@ def main() -> int:
 
         # 1. Baseline: fork per test (isolated).
         t0 = time.perf_counter()
-        fork_pass = sum(engine.run(n, "pytest_func", 5000)["outcome"] == "passed" for n in nodes)
+        fork_pass = sum(engine.run(n, "function", 5000)["outcome"] == "passed" for n in nodes)
         fork_ms = (time.perf_counter() - t0) * 1000
 
         # 2. Fast path: the SAME pure tests in-process (no fork).
         t0 = time.perf_counter()
         nofork_pass = sum(
-            engine.run(n, "pytest_func", 5000, force_no_fork=True)["outcome"] == "passed" for n in nodes
+            engine.run(n, "function", 5000, force_no_fork=True)["outcome"] == "passed" for n in nodes
         )
         nofork_ms = (time.perf_counter() - t0) * 1000
 
         # 3. Defense in depth: the impure test, even if run no-fork, is flagged pure=False.
-        imp = engine.run("test_pure.py::test_impure", "pytest_func", 5000, force_no_fork=True)
+        imp = engine.run("test_pure.py::test_impure", "function", 5000, force_no_fork=True)
         engine.teardown_all()
 
         speedup = fork_ms / nofork_ms if nofork_ms else 0

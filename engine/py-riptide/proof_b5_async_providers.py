@@ -73,7 +73,7 @@ def main() -> int:
         ]
         results = {}
         for name, want in order:
-            res = engine.run(f"test_ap.py::{name}", "pytest_func", 5000)
+            res = engine.run(f"test_ap.py::{name}", "function", 5000)
             results[name] = res["outcome"]
             mark = "ok" if res["outcome"] == want else f"!! expected {want} ({res['detail'].strip()[-70:]})"
             print(f"    {name:<34} {res['outcome']:<8} {mark}")

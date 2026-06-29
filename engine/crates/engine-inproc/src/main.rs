@@ -161,7 +161,7 @@ fn proof() {
     for (name, want) in expected {
         let node = format!("test_x.py::{name}");
         let resp = transport
-            .exchange(&ExecRequest::bare(&node, "pytest_func", 5000))
+            .exchange(&ExecRequest::bare(&node, "function", 5000))
             .expect("exchange");
         let mark = if resp.outcome == want {
             "ok"

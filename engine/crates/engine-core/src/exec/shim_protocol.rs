@@ -17,7 +17,7 @@ use crate::fixtures::{FixtureArgs, FixtureInstance};
 #[derive(Debug, Serialize)]
 pub struct ExecRequest<'a> {
     pub node_id: &'a str,
-    /// Wire token for the test style (`pytest_func` / `pytest_method` / `unittest_method`).
+    /// Wire token for the test style (`function` / `class_method` / `unittest_method`).
     pub style: &'a str,
     pub deadline_ms: u64,
     /// Function-scope fixture instances to set up in the forked child, topo order (design 05 §5.2).
@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn frame_roundtrips_request_to_response_shape() {
-        let req = ExecRequest::bare("m.py::t", "pytest_func", 5000);
+        let req = ExecRequest::bare("m.py::t", "function", 5000);
         let mut buf = Vec::new();
         write_frame(&mut buf, &req).unwrap();
         // Header is the LE length of the JSON payload.

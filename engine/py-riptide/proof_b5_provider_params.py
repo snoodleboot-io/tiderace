@@ -55,10 +55,10 @@ def main() -> int:
         reg = shim._discover(root)
         engine = shim.Engine(reg, no_fork=True, root=root)
 
-        r1 = engine.run("test_pp.py::test_runs_per_backend", "pytest_func", 5000)
+        r1 = engine.run("test_pp.py::test_runs_per_backend", "function", 5000)
         from test_pp import SEEN  # type: ignore  # noqa: E402
 
-        r2 = engine.run("test_pp.py::test_fails_on_one", "pytest_func", 5000)
+        r2 = engine.run("test_pp.py::test_fails_on_one", "function", 5000)
         engine.teardown_all()
 
         fanned = sorted(SEEN) == ["memory", "postgres", "sqlite"]

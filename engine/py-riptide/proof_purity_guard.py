@@ -65,7 +65,7 @@ def main() -> int:
         }
         ok = True
         for name, want_pure in expected.items():
-            res = engine.run(f"test_purity.py::{name}", "pytest_func", 5000)
+            res = engine.run(f"test_purity.py::{name}", "function", 5000)
             pure = res.get("pure")
             good = (pure == want_pure) and res["outcome"] == "passed"
             ok = ok and good

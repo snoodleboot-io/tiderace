@@ -201,7 +201,7 @@ mod tests {
     fn item(node_id: &str) -> TestItem {
         TestItem::new(
             NodeId::new(node_id),
-            TestStyle::PytestFunction,
+            TestStyle::Function,
             ScopePath::module("m.py"),
         )
     }

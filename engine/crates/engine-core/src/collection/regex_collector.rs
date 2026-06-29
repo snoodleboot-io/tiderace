@@ -111,7 +111,7 @@ impl RegexCollector {
                         let style = if *is_unittest {
                             TestStyle::UnittestMethod
                         } else {
-                            TestStyle::PytestClassMethod
+                            TestStyle::ClassMethod
                         };
                         out.push(TestItem::new(
                             NodeId::new(format!("{rel}::{cname}::{fname}")),
@@ -122,7 +122,7 @@ impl RegexCollector {
                     _ if indent == 0 => {
                         out.push(TestItem::new(
                             NodeId::new(format!("{rel}::{fname}")),
-                            TestStyle::PytestFunction,
+                            TestStyle::Function,
                             ScopePath::module(rel),
                         ));
                     }
@@ -157,14 +157,14 @@ mod tests {
         let items = collect_source("def test_x():\n    assert True\n");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].node_id.as_str(), "test_mod.py::test_x");
-        assert_eq!(items[0].style, TestStyle::PytestFunction);
+        assert_eq!(items[0].style, TestStyle::Function);
     }
 
     #[test]
     fn finds_async_function() {
         let items = collect_source("async def test_async():\n    pass\n");
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].style, TestStyle::PytestFunction);
+        assert_eq!(items[0].style, TestStyle::Function);
     }
 
     #[test]
@@ -179,9 +179,7 @@ mod tests {
                 "test_mod.py::TestThing::test_b"
             ]
         );
-        assert!(items
-            .iter()
-            .all(|i| i.style == TestStyle::PytestClassMethod));
+        assert!(items.iter().all(|i| i.style == TestStyle::ClassMethod));
     }
 
     #[test]

@@ -10,7 +10,7 @@ cost is paid 1x and inherited by every child via COW; per-test isolation is free
 Protocol with the Rust orchestrator over stdin(0)/stdout(1): length-prefixed (u32 LE) JSON frames
 (Phase 2 CONTRACT §3, unchanged).
   startup:   shim -> {"ready": true, "pid": int}
-  request:   orchestrator -> {"node_id": str, "style": "pytest_func"|"pytest_method"|
+  request:   orchestrator -> {"node_id": str, "style": "function"|"class_method"|
                               "unittest_method", "deadline_ms": int}
   response:  shim -> {"node_id": str, "outcome": "passed|failed|skipped|error", "detail": str}
 
@@ -602,7 +602,7 @@ def _test_is_async(node_id: str, style: str) -> bool:
     if style == "unittest_method":
         return False
     module = importlib.import_module(_module_name(_module_key(node_id)))
-    if style == "pytest_method":
+    if style == "class_method":
         cls, method = _class_method(node_id)
         func = getattr(getattr(module, cls), method, None)
     else:
@@ -616,7 +616,7 @@ async def _invoke_async(node_id: str, style: str, args: dict) -> tuple[str, str]
     `await` directly — never `asyncio.run` (which can't nest)."""
     module = importlib.import_module(_module_name(_module_key(node_id)))
     try:
-        if style == "pytest_method":
+        if style == "class_method":
             cls_name, method = _class_method(node_id)
             result = getattr(getattr(module, cls_name)(), method)(**args)
         else:
@@ -960,7 +960,7 @@ class Engine:
         module = importlib.import_module(_module_name(_module_key(node_id)))
         if style == "unittest_method":
             return {}  # unittest methods drive their own setUp/tearDown; no DI in Phase 3
-        if style == "pytest_method":
+        if style == "class_method":
             cls, method = _class_method(node_id)
             func = getattr(getattr(module, cls), method)
         else:
@@ -973,7 +973,7 @@ class Engine:
         if style == "unittest_method":
             return []
         module = importlib.import_module(_module_name(_module_key(node_id)))
-        if style == "pytest_method":
+        if style == "class_method":
             cls, method = _class_method(node_id)
             func = getattr(getattr(module, cls), method)
         else:
@@ -986,7 +986,7 @@ class Engine:
         if style == "unittest_method":
             return []
         module = importlib.import_module(_module_name(_module_key(node_id)))
-        if style == "pytest_method":
+        if style == "class_method":
             cls, method = _class_method(node_id)
             func = getattr(getattr(module, cls), method)
         else:
@@ -1003,7 +1003,7 @@ class Engine:
         if style == "unittest_method":
             return []
         module = importlib.import_module(_module_name(_module_key(node_id)))
-        if style == "pytest_method":
+        if style == "class_method":
             cls, method = _class_method(node_id)
             func = getattr(getattr(module, cls), method)
         else:
@@ -1043,7 +1043,7 @@ def _invoke(node_id: str, style: str, args: dict) -> tuple[str, str]:
     try:
         if style == "unittest_method":
             return _invoke_unittest(module, node_id)
-        if style == "pytest_method":
+        if style == "class_method":
             cls_name, method = _class_method(node_id)
             instance = getattr(module, cls_name)()
             _maybe_await(getattr(instance, method)(**args))
