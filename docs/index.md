@@ -112,8 +112,8 @@ export RIPTIDE_PYTHON="$(which python3)"
 
 !!! info "Naming"
     The project is **tiderace**. The engine binaries currently build as `riptide` / `riptide-daemon`
-    (a retired codename being consolidated under tiderace) — read them as tiderace. The legacy
-    `tiderace` binary that orchestrated pytest is the previous generation.
+    (a retired codename being consolidated under tiderace) — read them as tiderace. An earlier
+    generation that orchestrated pytest (a separate `tiderace` binary) has been removed.
 
 ## How It Works
 

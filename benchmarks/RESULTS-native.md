@@ -1,8 +1,8 @@
 # Native engine — performance (cold / warm)
 
-> The **pure-Rust engine** (`engine/`), not the legacy `tiderace` crate ([RESULTS.md](RESULTS.md) is
-> the legacy numbers). Measured 2026-06-23 on this host with `riptide-daemon bench` (forks per test for
-> isolation — ADR-E003) against the `.riptide-fx-venv` interpreter. Honest, not cherry-picked.
+> The **pure-Rust engine** (`engine/`) — the tiderace engine. Measured 2026-06-23 on this host with
+> `riptide-daemon bench` (forks per test for isolation — ADR-E003) against the `.riptide-fx-venv`
+> interpreter. Honest, not cherry-picked.
 
 ## How
 

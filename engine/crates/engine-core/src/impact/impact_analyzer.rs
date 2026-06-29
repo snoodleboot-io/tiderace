@@ -3,8 +3,7 @@ use crate::domain::NodeId;
 use crate::impact::{Change, Selection};
 
 /// Selects which collected tests a set of changes actually affects, using the always-on
-/// [`DepGraph`] (design 11; the precise, line-level successor to the legacy file-only
-/// `tiderace/impact.rs`).
+/// [`DepGraph`] (design 11) — a precise, line-level (not file-only) impact model.
 ///
 /// Decision per candidate test:
 /// 1. **Unknown** (no recorded footprint — never run with coverage, or a brand-new node): run it, to

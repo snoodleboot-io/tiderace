@@ -8,8 +8,8 @@ pytest at runtime** — tiderace is the runner, not a wrapper around one.
 > **Naming.** The project is **tiderace**. During the pure-Rust rebuild the engine was codenamed
 > *riptide*; that name is retired. Some binaries and identifiers still carry it (`riptide`,
 > `riptide-daemon`, `RIPTIDE_*`, `.riptide-state.json`) pending a mechanical rename — read them as
-> tiderace. The legacy `tiderace` binary (Rust orchestrating *pytest* workers) is the previous
-> generation, kept only as a benchmark baseline.
+> tiderace. An earlier generation — a separate `tiderace` binary that orchestrated *pytest* workers —
+> has been removed.
 
 ---
 

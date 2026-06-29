@@ -1,11 +1,15 @@
-# pytest vs old engine vs native engine — three-way benchmark
+# pytest vs the tiderace engine — benchmark
+
+> **Note (2026-06):** the legacy `tiderace` engine (a Rust orchestrator over pytest workers + SQLite)
+> has since been **removed**. Rows/columns labelled *old* / *tiderace (old)* below are historical
+> measurements of that retired engine, kept for context; current runs (`bench_3way.sh`) compare
+> **pytest vs the tiderace engine** only.
 
 > Reproduce: `benchmarks/bench_3way.sh [corpus] [python]`. Measured 2026-06-26 on this host, over
 > `benchmarks/fixtures/fx_corpus` (509 fixture tests: numpy/sqlite). hyperfine 1.20, 8 runs.
 >
 > - **pytest** — `python -m pytest` (single process, no per-test isolation).
-> - **old** — legacy `tiderace` (repo root): Rust orchestrator over **parallel pytest workers** +
->   SQLite impact analysis.
+> - **old** — the retired `tiderace` orchestrator (historical baseline; engine since removed).
 > - **native (fork)** — `riptide-daemon run --all`: own Rust engine, **fork-per-test** isolation
 >   (ADR-E003), parallel pool of warm wellsprings.
 > - **native --fast** — optimistic **no-fork + snapshot/restore** (impure tests run in-process and have

@@ -1,8 +1,7 @@
-# Pure-Rust test engine workspace.
+# Pure-Rust test engine workspace — the tiderace engine.
 #
-# Isolated under engine/ so it coexists with the legacy `tiderace` crate at the repo root during
-# the rebuild (see planning/current/pure-rust-test-engine/). Promotes to the repo root when the
-# legacy orchestrator is retired. Mirrors the layout in design/01-architecture.md.
+# Lives under engine/ (the earlier pytest-orchestrator crate that used to sit at the repo root has been
+# removed). See planning/current/pure-rust-test-engine/ and design/01-architecture.md for the layout.
 [workspace]
 resolver = "2"
 members = ["crates/engine-core", "crates/engine-cli", "crates/engine-daemon"]

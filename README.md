@@ -33,9 +33,8 @@ That design unlocks two things no pytest plugin can do together:
   works as a build-system-style cache.
 
 > **Naming.** The project is **tiderace**. The engine binaries currently build as `riptide` /
-> `riptide-daemon` (a retired codename being consolidated under tiderace) — read them as tiderace. The
-> legacy `tiderace` binary that *orchestrated pytest* is the previous generation, kept as a benchmark
-> baseline.
+> `riptide-daemon` (a retired codename being consolidated under tiderace) — read them as tiderace. An
+> earlier generation that *orchestrated pytest* (a separate `tiderace` binary) has been removed.
 
 ## How it compares
 
