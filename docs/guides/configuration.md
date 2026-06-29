@@ -1,87 +1,69 @@
 # Configuration
 
-tiderace is configured via command-line flags and optionally a `pyproject.toml` section.
+The pure-Rust engine is **environment-driven**, not flag-heavy. Almost everything you'd configure is
+an environment variable that the engine reads and passes through to the wellspring (the warm CPython
+child). There is exactly one command-line flag — `--all` — on the daemon's `run` mode.
 
-## CLI Flags
+!!! info "Naming"
+    The binaries currently build as `riptide` / `riptide-daemon` — a retired codename being
+    consolidated under tiderace. Read them as tiderace.
 
-| Flag | Default | Description |
+## Environment variables
+
+| Variable | Default | Purpose |
 |---|---|---|
-| `[PATHS]` | `tests/ test/` | Test directories or files to scan |
-| `-n, --workers` | `0` (CPU count) | Parallel worker threads |
-| `--python` | `python3` | Python binary to use |
-| `-c, --coverage` | off | Enable per-test coverage |
-| `--all` | off | Ignore impact analysis, run everything |
-| `--isolate` | off | One pytest process per test (legacy). Default is batched (one process per worker) — faster cold start |
-| `--pattern` | `test_.*\.py\|.*_test\.py` | Regex for test file discovery |
-| `--db` | `.tiderace.db` | Path to SQLite state database |
-| `--timeout` | `300` | Per-test (or per-batch) wall-clock timeout in seconds |
+| `RIPTIDE_SHIM` | — (**required**) | Path to `py-shim/shim.py`. The engine launches CPython with this shim; it imports your code and invokes test bodies. Without it the binaries exit with an error. |
+| `RIPTIDE_PYTHON` | `python3` | The Python interpreter to run. Point this at your project's venv if your tests need installed dependencies. |
+| `RIPTIDE_COVERAGE` | off | Record per-test coverage via `sys.monitoring`. The daemon **sets this automatically** for impact-aware `run` (it needs the footprint to know what to skip next time). Set it yourself only for ad-hoc coverage. |
+| `RIPTIDE_RESTORE` | set by daemon | Enables the no-fork + snapshot/restore isolation path. The daemon sets `RIPTIDE_RESTORE=1` on every mode — it's the **default** execution model, not an opt-in. Nothing to choose. |
+| `RIPTIDE_FORCE_FORK` | off | **Debug / benchmark only.** Reverts to `fork()`-per-test isolation, bypassing the no-fork ladder. Use it to A/B the ladder or chase an isolation bug — not in normal use. |
+| `RIPTIDE_SOCKET` | `<tmp>/riptide-daemon.sock` | `serve` mode: the Unix socket path the RPC server binds. |
 
-A test that exceeds `--timeout` is killed and recorded as an error. By default tiderace
-runs tests **batched** — one pytest process per worker — which avoids paying interpreter
-startup per test (see [ADR-009](../design/decisions.md)). `--coverage` is also batched: it
-records per-test dependencies via coverage dynamic contexts, so it is precise *and* fast
-(see [ADR-011](../design/decisions.md)). `--isolate` forces the legacy one-process-per-test
-path for suites that genuinely need interpreter isolation.
-
-## pyproject.toml
-
-tiderace reads defaults from a `[tool.tiderace]` section in your `pyproject.toml`:
-
-```toml
-[tool.tiderace]
-workers = 8                          # int
-python = ".venv/bin/python"          # string
-coverage = true                      # bool
-pattern = "test_.*\\.py"             # string (regex)
-db = ".tiderace.db"                   # path
-paths = ["tests/", "integration/"]   # list of strings
-timeout = 300                        # int (seconds)
-isolate = false                      # bool — one process per test (legacy)
+```bash
+# A typical setup
+export RIPTIDE_SHIM="$PWD/engine/py-shim/shim.py"
+export RIPTIDE_PYTHON="$PWD/.venv/bin/python"
 ```
 
-| Key | Type | Description |
-|---|---|---|
-| `workers` | int | Parallel worker threads |
-| `python` | string | Python binary to use |
-| `coverage` | bool | Enable per-test coverage |
-| `pattern` | string (regex) | Test file discovery regex |
-| `db` | path | SQLite state database path |
-| `paths` | list of strings | Default test directories or files to scan |
-| `timeout` | int (seconds) | Per-test wall-clock timeout |
-| `isolate` | bool | One pytest process per test (legacy isolation) |
+## The isolation default
 
-### Precedence
+No-fork + restore is **on by default** — there is no flag to enable it. The daemon requests no-fork
+on every test and the shim runs it in-process, undoing any mutation from a pre-body snapshot; a
+module it can't snapshot (opaque globals) automatically falls back to `fork()` for soundness. So a
+wrong guess can only change speed, never correctness.
 
-Configuration is resolved in this order, highest priority first:
+`RIPTIDE_FORCE_FORK=1` is the escape hatch back to fork-per-test, kept purely as a debug and
+benchmark baseline. See the [isolation ladder](../design/architecture.md#the-isolation-ladder).
 
-**explicit CLI flag > `pyproject.toml` value > built-in default**
+## The one flag: `--all`
 
-So a flag passed on the command line always wins; if a setting is not given on the CLI, the `[tool.tiderace]` value is used; otherwise the built-in default applies.
+```bash
+riptide-daemon run  <tests>          # impact-aware: only changed tests; coverage on; state persisted
+riptide-daemon run  <tests> --all    # full parallel run; opts out of impact-skip and coverage
+```
 
-## Environment Variables
+- Plain `run` is **impact-aware**: it reads `.riptide-state.json`, runs only tests whose deps
+  changed, and re-persists the state. With no changes, nothing runs.
+- `run --all` forces a full run across the parallel pool — your CI safe mode, or a clean baseline.
 
-| Variable | Description |
-|---|---|
-| `TIDERACE_WORKERS` | Override worker count |
-| `TIDERACE_DB` | Override DB path |
-| `TIDERACE_PYTHON` | Override Python binary |
+The one-shot `riptide` binary has no impact analysis: `riptide collect <path>` lists tests,
+`riptide run <path>` runs them all once.
 
-## Test Discovery
+## State file & `.gitignore`
 
-tiderace finds tests by:
-
-1. Walking directories matching `--pattern` for file names
-2. Scanning each file for `def test_*` functions (top-level and inside `class Test*`)
-3. Building node IDs in pytest format: `path/to/test_file.py::TestClass::test_name`
-
-!!! warning "Fixtures and conftest.py"
-    tiderace delegates execution to `pytest` as a subprocess, so all fixtures, `conftest.py`, parametrize, and marks work as normal. tiderace controls *which* tests run and *how many at once* — not how they execute.
-
-## Recommended .gitignore
+Impact analysis persists to **`.riptide-state.json`** in the directory you run from — each test's
+dependency files plus per-file content hashes. It is machine-local; every developer and CI runner
+keeps their own. Ignore it:
 
 ```gitignore
-.tiderace.db
-.tiderace-coverage/
+# tiderace impact-analysis state — machine-local, do not commit
+.riptide-state.json
 ```
 
-The state database is machine-local. Each developer and each CI runner maintains their own.
+## Future: pyproject configuration
+
+!!! note "Not yet"
+    There is currently **no** `pyproject.toml` / config-file support — configuration is entirely
+    through the environment variables above. A native `[tool.tiderace]` section may arrive later;
+    it does not exist today. (If you've used the retired pytest-orchestrating engine, its
+    `[tool.tiderace]` keys and `TIDERACE_*` variables are gone — they don't apply here.)

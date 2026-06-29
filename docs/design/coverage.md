@@ -1,80 +1,56 @@
-# Coverage Engine
+# Coverage
 
-## Overview
+tiderace captures coverage with CPython's **`sys.monitoring`** (PEP 669, CPython 3.12+) — **not**
+coverage.py and **not** a separate `coverage run` pass. The footprint is recorded *in-process on the
+same run that executes the test*, so it costs almost nothing extra and feeds straight into
+[impact analysis](impact-analysis.md). See ADR-E006.
 
-tiderace integrates with Python's `coverage.py`. Coverage serves two purposes:
+## Why `sys.monitoring`
 
-1. **Reporting** — a line-coverage percentage per file after a run.
-2. **Dependency mapping** — the per-test graph of which source files each test executed, which
-   powers [impact analysis](impact-analysis.md).
+Coverage here serves one job above all: build the per-test **executed-source footprint** — which
+source files (and lines) each test actually ran — so tiderace can re-run only what a change affects.
+`sys.monitoring` (PEP 669) is the right tool because:
 
-## Per-test coverage from one batched run
+- It is a **built-in CPython API**, so there is no coverage.py dependency at runtime.
+- Locations can be **disabled once seen** — after a line fires its LINE event, the shim disables that
+  location, so steady-state overhead is low even on hot loops.
+- It runs **on the same in-process execution** as the test body — there is no second instrumented run
+  to attribute back to tests.
 
-tiderace gets **per-test** attribution without running a separate process per test. A coverage
-run is configured with dynamic contexts:
+The shim claims a dedicated `sys.monitoring` tool id (slot 5, chosen to avoid clashing with
+coverage.py or a profiler a user might attach) and turns LINE events on only while a test body runs.
 
-```ini
-[run]
-dynamic_context = test_function
-branch = True
-source = .
+```mermaid
+flowchart LR
+    EXE["execute test body<br/>(in-process)"] --> MON["sys.monitoring<br/>LINE events → touched files/lines"]
+    MON --> CR["CoverageReport<br/>(per test: files → lines)"]
+    CR --> DG["DepGraph<br/>(test ↔ source files)"]
 ```
 
-With `dynamic_context = test_function`, coverage.py tags every measured line with the test
-that was executing. So a single **batched** run — `coverage run -m pytest <many node ids>`,
-one process per worker — still records which lines (and therefore which files) each individual
-test touched. This is the same fast batched execution as a normal run; only the wrapper
-differs. See [ADR-011](decisions.md).
+## From events to the dep graph
 
-## Combining and extraction
+Each test's touched files become a `CoverageReport` (`engine-core/src/coverage/coverage_report.rs`,
+keyed by `file_lines`), which the engine folds into a `DepGraph` (`dep_graph.rs`): a mapping of test
+node id ↔ source files. That graph is the input to impact analysis and is persisted with content
+hashes in [`.riptide-state.json`](database.md).
 
-After the batches finish, tiderace combines the per-batch data files and reads the
-context-annotated report:
+## Enabling it
 
-```bash
-python -m coverage combine --keep .tiderace-coverage/
-python -m coverage json --show-contexts -o .tiderace-coverage/contexts.json
-```
+The daemon turns coverage on by itself for impact-aware runs — it sets `RIPTIDE_COVERAGE=1` so
+footprints are recorded as a side effect of running. (The shim also accepts a `--coverage` argv flag.)
+There is no separate coverage command and no coverage data file: the footprint lives in the engine's
+state, not in an `.coverage` database.
 
-For each file, the report lists which **contexts** (tests) executed lines in it. Coverage
-prefixes context names with the package-dependent module path (e.g.
-`pkg.tests.test_auth.test_login`), so tiderace matches tests on the stable **suffix**
-`{file_stem}.{func}` / `{file_stem}.{Class}.{method}` rather than a predicted full name.
+## Relationship to impact and the cache
 
-## Storing the dependency graph
+The same per-test footprint does double duty:
 
-The extracted `test → files` map is written to SQLite:
+- It is the dependency set in the **impact-skip** layer — a test re-runs only when one of its
+  footprint files changed ([impact analysis](impact-analysis.md)).
+- It is part of the **content-addressed cache key** (ADR-E004): a test's outcome is keyed by its full
+  input closure, of which the executed-source closure is a component.
 
-```sql
-INSERT INTO test_file_deps (test_id, dep_path) VALUES ('tests/test_auth.py::test_login', 'src/auth.py');
-INSERT INTO test_file_deps (test_id, dep_path) VALUES ('tests/test_auth.py::test_login', 'src/models.py');
-```
-
-On later runs **without** `--coverage`, this stored graph drives impact analysis — no
-instrumentation needed until you choose to refresh it.
-
-## Coverage report
-
-```
-  Coverage
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  src/auth.py      [██████████] 100%  42/42
-  src/models.py    [████████░░]  83%  25/30
-  src/utils.py     [██████░░░░]  61%  11/18
-
-  Overall: 87.4%
-```
-
-## When to use `--coverage`
-
-| Scenario | Recommendation |
-|---|---|
-| First run on a project | Use `--coverage` to build the dependency graph |
-| Regular development | Omit `--coverage` — the graph persists and is reused |
-| After adding source files | Re-run `--coverage` to refresh the graph |
-| Before `tiderace watch` | Prime once with `--coverage` for the tightest watch loops |
-
-Because coverage now runs batched (not one process per test), building the graph is far
-cheaper than it used to be — roughly **4–5× faster** than the legacy isolated path — while
-remaining precise. `--isolate --coverage` still uses the one-process-per-test path if you need
-strict isolation.
+> **Note on richer coverage reporting.** This page documents the dependency-footprint role of
+> coverage, which is what the engine uses today. Any line-percentage *reporting* UI beyond that is not
+> documented here because it is not something I could confirm in the engine code — treat the footprint
+> as the load-bearing artifact.

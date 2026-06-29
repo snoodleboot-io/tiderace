@@ -1,104 +1,85 @@
 # Impact Analysis
 
-Impact analysis is the core feature that makes tiderace fast on repeated runs. It answers the question: **given that these files changed, which tests need to re-run?**
+Impact analysis is what makes tiderace fast on repeated runs. It answers: **given that these files
+changed, which tests need to re-run?** The answer comes from runtime coverage data, not static
+analysis — and when nothing changed, nothing runs.
 
-## The Problem
+## The pipeline
 
-A typical Python project has hundreds of tests. When you change one function in one file, naively you must run all tests to be safe. But most tests don't touch that file at all. Running them wastes time.
-
-## How tiderace Solves It
-
-tiderace builds and maintains a **dependency graph** mapping each test to the set of source files it executed during its last run. This graph comes from Python's `coverage.py` instrumentation.
-
-```
-test_login       → [src/auth.py, src/models.py, src/db.py]
-test_register    → [src/auth.py, src/models.py, src/validators.py]
-test_format_date → [src/utils.py]
-test_send_email  → [src/email.py, src/utils.py, src/templates.py]
-```
-
-When `src/auth.py` changes:
-
-- `test_login` → **run** (depends on auth.py)
-- `test_register` → **run** (depends on auth.py)
-- `test_format_date` → **skip** (no dependency on auth.py)
-- `test_send_email` → **skip** (no dependency on auth.py)
-
-## Decision Rules
-
-For each test, tiderace applies these rules in order:
-
-```
-1. Has the test file itself changed?          → RUN
-2. Has any file in the test's dep graph changed? → RUN
-3. Did the test fail on its last run?            → RUN (always retry failures)
-4. Is this the first run (no dep graph yet)?     → RUN
-5. Otherwise                                     → SKIP
+```mermaid
+flowchart TB
+    subgraph run1["First run (coverage on)"]
+        EXE["execute test"] --> MON["sys.monitoring<br/>records touched files"]
+        MON --> DG["DepGraph<br/>(test → source files)"]
+        DG --> ST["persist .riptide-state.json<br/>(per-test deps + file content hashes)"]
+    end
+    subgraph run2["Next run"]
+        HASH["hash current files"] --> CHG{"which files changed?<br/>(content-hash diff)"}
+        CHG --> PLAN["plan():<br/>to_run = tests touching changed files<br/>cached = the rest"]
+        PLAN -->|to_run| RERUN["execute (isolation ladder)"]
+        PLAN -->|cached| SERVE["serve prior outcome<br/>(no execution)"]
+    end
+    ST -.feeds.-> CHG
 ```
 
-Rule 3 is important: tiderace never silently skips a previously failing test. You always know if something is broken.
+1. **Coverage footprint.** Each test's executed-source footprint is captured via
+   [`sys.monitoring`](coverage.md) (ADR-E006) on the same in-process run that executes it.
+2. **Dep graph.** Footprints fold into a `DepGraph` (`engine-core/src/coverage/dep_graph.rs`): test
+   node id ↔ the source files it touched.
+3. **Persist.** The graph plus the content hash of every touched file are written to
+   [`.riptide-state.json`](database.md) (`engine-daemon/src/persist.rs`).
+4. **Content-hash diff.** On the next run, tiderace re-hashes the files and diffs against the stored
+   hashes (`changed_files()`) — content-based, so touching a file without editing it triggers nothing.
+5. **Plan.** `plan()` partitions the candidate tests into `to_run` and `cached`; only `to_run`
+   executes, through the [isolation ladder](parallel-execution.md).
 
-## Building the Dep Graph
+## Decision rules
 
-The dep graph is populated from coverage data. When you run with `--coverage`:
+For each candidate test (`persist::plan`):
 
-```bash
-tiderace tests/ --coverage
+```
+1. Has this test never been seen?              → RUN  (establish a baseline)
+2. Did any file in the test's dep list change? → RUN
+3. Otherwise                                   → SKIP (serve the cached outcome)
 ```
 
-tiderace runs each test as:
+A *test file* change shows up as rule 2 as well: a test's own source file is part of its recorded
+dependency footprint, so editing the test re-runs it. And because dependency footprints can only
+*over*-include (a coarse footprint adds extra deps), a wrong guess can only cause an unnecessary
+re-run, never a wrong skip.
 
-```bash
-python -m coverage run --data-file=.tiderace-coverage/.coverage.<test_id> \
-  --source=. --branch -m pytest <nodeid>
+## The no-change fast path
+
+The headline case: **if no tracked file changed, `changed_files()` is empty, `plan()` puts every
+known test in `cached`, and nothing executes** — the wellspring isn't even launched. This is what
+makes a warm "no changes" run land in milliseconds.
+
+```
+Run 1 (full, coverage on):  all tests run, dep graph + hashes built
+Run 2 (edit src/auth.py):   only tests whose deps include src/auth.py run
+Run 3 (no changes):         nothing runs — state served from .riptide-state.json
 ```
 
-After the test completes, it extracts the file list from the coverage JSON:
+## Building the footprint
 
-```bash
-python -m coverage json --data-file=... -o coverage.json
-```
+The footprint is built from coverage, captured automatically on runs where the daemon sets
+`RIPTIDE_COVERAGE=1`. There is no separate instrumentation command and no `coverage run` — the
+footprint is a side effect of executing the test in-process. See [coverage](coverage.md).
 
-The `files` key lists every `.py` file that was imported or executed during that test. This list is stored in SQLite:
+## Relationship to the content-addressed cache
 
-```sql
-INSERT INTO test_file_deps (test_id, dep_path) VALUES (?, ?)
-```
-
-On subsequent runs, this data powers the skip decision without needing `--coverage` again.
-
-## File Change Detection
-
-tiderace uses SHA-256 hashing rather than file modification times or git status:
-
-- **Reliable across filesystems** — mtime can be unreliable in Docker, network mounts, and CI
-- **Content-based** — touching a file without changing it doesn't trigger re-runs
-- **Git-independent** — works in any directory, not just git repos
-
-On each run, tiderace hashes every `.py` file in the scanned paths and compares against hashes stored in `.tiderace.db`. Files whose hash has changed are marked as "changed" and used to compute affected tests.
-
-After a run completes successfully, the new hashes are written back to the DB.
+Impact-skip is the **local, per-run** layer. The **content-addressed cache** (ADR-E004) is the
+cross-machine layer: a test's outcome keyed by its full input closure, so a result computed in CI is
+reusable on any machine. Impact-skip says "this test's deps didn't change, so its prior outcome
+stands"; the cache says "these exact inputs were computed before, anywhere." Both are gated for
+soundness (the cache by `purity`). See [state & cache](database.md).
 
 ## Limitations
 
-### Dynamic imports
-
-tiderace cannot detect dependencies created by dynamic imports that coverage.py doesn't trace:
-
-```python
-# This IS detected (coverage traces the import)
-import src.auth
-
-# This might NOT be detected depending on execution path
-module = importlib.import_module(f"src.{name}")
-```
-
-In practice this is rare, and the worst outcome is a missed dep that causes a false skip — which `--all` can always override.
-
-### First run after `--coverage`
-
-Impact analysis only becomes selective after at least one `--coverage` run has built the dep graph. On first run (or after `tiderace clear`), all tests execute.
-
-### Monorepo / shared libraries
-
-If a test imports a shared library outside the scanned path tree, that library's changes won't be detected. Configure `--paths` to include all relevant directories.
+- **Dynamic imports** that don't show up in the executed-source footprint won't be tracked. In
+  practice the footprint comes from real execution, so anything the test actually ran is captured; the
+  gap is code reached only on a path the test didn't take. A full run (`run --all`) always overrides.
+- **First run** has no graph, so every test runs to establish the baseline (rule 1) — precise
+  selection begins on the second run.
+- **Files outside the scanned tree** (e.g. a shared library elsewhere in a monorepo) are only tracked
+  if they fall within the paths tiderace hashes.

@@ -1,74 +1,77 @@
 # Installation
 
+The pure-Rust engine builds from source from the `engine/` Cargo workspace. Prebuilt binaries are
+**not published yet**.
+
+!!! info "Naming"
+    The binaries currently build as `riptide` / `riptide-daemon` — a retired codename being
+    consolidated under tiderace. Read them as tiderace.
+
 ## Prerequisites
 
-- Python 3.8+ with `pip`
-- `pytest` and `coverage` Python packages
-- Linux x86_64
-- [Rust toolchain](https://rustup.rs) 1.75+ (to build from source)
+- **Rust toolchain** (stable) — install via [rustup](https://rustup.rs).
+- **Python 3.12+** — the engine captures coverage with CPython's `sys.monitoring` (PEP 669), which
+  requires 3.12 or newer.
 
-> **Pre-release:** tiderace is not yet published to crates.io or GitHub Releases. Build from source with `cargo build --release` (binary at `target/release/tiderace`). The download URLs below are placeholders for a future release.
+That's it. There is no pytest or coverage.py to install — tiderace is its own runner, and the only
+Python it runs is a small shim shipped in the repo.
 
-## From Source (Recommended)
-
-This is the working path today. With the [Rust toolchain](https://rustup.rs) 1.75+ installed:
+## Build from source
 
 ```bash
+git clone https://github.com/snoodleboot-io/tiderace
+cd tiderace/engine            # build from the engine/ workspace, not the repo root
 cargo build --release
-
-# binary at target/release/tiderace; copy it onto your PATH, e.g.
-install -m 0755 target/release/tiderace /usr/local/bin/tiderace
-
-# Verify
-tiderace --version
 ```
 
-## Binary (Future / Illustrative)
+The two binaries land in `engine/target/release/`:
 
-Once releases are published, you will be able to download a pre-built binary. The commands below are placeholders for that future release:
+| Binary | Crate | What it does |
+|---|---|---|
+| `riptide` | `engine-cli` | one-shot `collect` / `run` |
+| `riptide-daemon` | `engine-daemon` | warm server: impact-aware `run`, `run --all`, `serve` (RPC), `watch`, `bench` |
+
+Optionally copy them onto your `PATH`:
 
 ```bash
-# Linux x86_64 (placeholder URL — not yet available)
-curl -sSfL https://github.com/snoodleboot-io/tiderace/releases/latest/download/tiderace-linux-x86_64 \
-  -o /usr/local/bin/tiderace && chmod +x /usr/local/bin/tiderace
+install -m 0755 target/release/riptide        /usr/local/bin/riptide
+install -m 0755 target/release/riptide-daemon /usr/local/bin/riptide-daemon
 ```
 
-## Cargo Install (Future / Illustrative)
+## Point the engine at Python
 
-Once published to crates.io, this will also work (not yet available):
+The engine is env-driven. Set the shim path (required) and, optionally, the interpreter:
 
 ```bash
-cargo install tiderace
+# Required — the shim the engine runs inside CPython.
+export RIPTIDE_SHIM="$PWD/py-shim/shim.py"
+
+# Optional — defaults to python3. Use your project's venv if tests have dependencies.
+export RIPTIDE_PYTHON="$(which python3)"
 ```
 
-## Python Dependencies
+See [Configuration](configuration.md) for the rest of the variables.
 
-tiderace shells out to `pytest` and optionally `coverage`. Install them in your project environment:
+## Verify
 
 ```bash
-pip install pytest coverage
-# or
-uv add --dev pytest coverage
+# List the tests the engine discovers (no execution)
+./target/release/riptide collect /path/to/tests
+
+# Full run through the warm daemon
+./target/release/riptide-daemon run /path/to/tests --all
 ```
 
-## CI / GitHub Actions
+## Prebuilt binaries (future)
 
-The [CI workflow](https://github.com/snoodleboot-io/tiderace/blob/main/.github/workflows/ci.yml) builds and tests automatically. Until prebuilt binaries are published, build from source in CI:
+!!! note "Pre-release"
+    crates.io publishing and GitHub Releases binaries are not available yet. Build from source as
+    above. Release artifacts will be added once the rename from the `riptide` codename to tiderace
+    is consolidated.
 
-```yaml
-- name: Build tiderace
-  run: |
-    cargo build --release
-    install -m 0755 target/release/tiderace /usr/local/bin/tiderace
-
-- name: Run tests
-  run: tiderace tests/ --coverage -n 4
-```
-
-## Add to .gitignore
+## Add to `.gitignore`
 
 ```gitignore
-# tiderace state — machine-local, do not commit
-.tiderace.db
-.tiderace-coverage/
+# tiderace impact-analysis state — machine-local, do not commit
+.riptide-state.json
 ```

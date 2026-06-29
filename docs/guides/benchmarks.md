@@ -1,64 +1,90 @@
 # Benchmarks
 
-tiderace ships a reproducible benchmark harness that compares it against the common Python
-test runners on a generated fixture suite. Run it yourself rather than trusting a fixed
-number — results vary by machine and, especially, by how fast `pytest` imports on your setup.
+tiderace ships a reproducible benchmark harness. Run it yourself rather than trusting a fixed number
+— results vary by machine and, especially, by how fast your Python imports the test suite's
+dependencies.
+
+!!! info "Naming"
+    The binaries currently build as `riptide` / `riptide-daemon` — a retired codename being
+    consolidated under tiderace. Read them as tiderace. In the harness, *old* / *tiderace (old)*
+    refers to the **retired** engine (Rust orchestrating parallel pytest workers + SQLite), kept
+    only as a baseline.
+
+## The three-way harness
+
+`benchmarks/bench_3way.sh` compares **pytest** vs the **old** (retired) engine vs the **native**
+pure-Rust engine over the same corpus:
 
 ```bash
-python benchmarks/run_benchmarks.py
+# defaults: corpus = benchmarks/fixtures/fx_corpus, python = .riptide-fx-venv/bin/python
+benchmarks/bench_3way.sh [corpus-dir] [venv-python]
 ```
 
-This generates a deterministic fixture and times these scenarios with
-[hyperfine](https://github.com/sharkdp/hyperfine), writing a table to `benchmarks/RESULTS.md`:
+It needs [hyperfine](https://github.com/sharkdp/hyperfine) and both engines built. The script sets
+`RIPTIDE_PYTHON` and `RIPTIDE_SHIM` for you and runs three scenarios. Note how it drives the native
+engine:
 
-- **tiderace — cold full run** (`--all`)
-- **tiderace — warm run, no changes** (skips everything)
-- **tiderace — warm run, one module touched** (runs only affected tests)
-- **pytest** baseline
-- **pytest-xdist** (`-n auto`)
-- **pytest-testmon** (cold and warm)
-- **unittest** discovery
+- **Cold full run** uses `riptide-daemon run . --all` — no-fork + restore is the **default** path
+  (no flag). The `RIPTIDE_FORCE_FORK=1` variant is the debug/benchmark baseline that reverts to
+  fork-per-test, so the script can show what removing the fork buys.
+- **Warm no-change** uses `riptide-daemon run .` (impact-aware) against persisted
+  `.riptide-state.json` — nothing should execute.
+- **Inner loop** uses `riptide-daemon bench <dir> 4` to time a warm rerun of one test.
 
-Tune the workload:
+## The scenarios & the measured numbers
 
-```bash
-python benchmarks/run_benchmarks.py --modules 50 --tests-per-module 10 --runs 5
-python benchmarks/run_benchmarks.py --work-ms 20   # simulate I/O-bound tests
-```
+Measured on `benchmarks/fixtures/fx_corpus` (509 fixture tests; numpy/sqlite), hyperfine. From
+[`RESULTS-3way.md`](https://github.com/snoodleboot-io/tiderace/blob/main/benchmarks/RESULTS-3way.md):
 
-## How to read the results
+| scenario | pytest | **tiderace** | speedup |
+|---|---:|---:|---:|
+| **Cold** — full run (all 509 execute) | 0.94 s | **0.66 s** | **1.4× faster** |
+| **Warm** — no changes (impact-skip) | 0.84 s | **9.4 ms** | **89×** |
+| **Warm** — inner loop, 1 changed test | 0.27 s | **~5 ms** | **~50–70×** |
 
-tiderace's advantage is **warm / impact runs** that skip unchanged tests — that is the
-everyday edit→test loop, where it is dramatically faster than running the whole suite.
+## How to read it (the honest framing)
 
-For a **cold full run of many fast tests**, tiderace trades some speed for compatibility: it
-drives real `pytest` in subprocesses. By default it runs tests **batched** — one pytest
-process per worker — which is far faster than one process per test, but still pays one
-interpreter startup per worker, so single-process `pytest` can edge it out on trivial suites.
-This is the documented trade-off in [ADR-009](../design/decisions.md); for running
-*everything* once, `pytest-xdist` is often the fastest option.
+Two levers compound, and they matter in different scenarios:
+
+- **Cold full run — tiderace now *beats* pytest (1.4×).** This is the surprising result: deleting the
+  per-test `fork()` via the [no-fork ladder](../design/architecture.md#the-isolation-ladder) drops
+  System time roughly 3.6 s → 0.5 s (about 6× fewer syscalls), and the snapshot/restore that replaces
+  it is cheap while keeping full per-test isolation. The residual cost is the **per-worker import**
+  (each pool wellspring imports the project once), not the fork.
+
+- **Warm / impact — where tiderace dominates.** With no changes, impact-skip runs **nothing** — the
+  wellspring isn't even launched — so a re-run is ~9 ms (89× pytest). A one-test inner loop is ~5 ms
+  (~50–70×). This is the everyday edit→test loop, and it's the design's whole point.
 
 !!! note "Honest framing"
-    The numbers in `benchmarks/RESULTS.md` are illustrative and machine-specific. The shape
-    is the point: **tiderace wins the warm/impact loop; it is competitive-but-not-fastest on
-    cold full runs.** That is exactly what its design optimises for.
+    The cold full run *used* to trail pytest (pytest runs one process, isolates nothing). The no-fork
+    ladder closed and then reversed that gap. But the impact loop is still where the order-of-magnitude
+    wins live — fork-vs-no-fork is in the noise there because impact-skip already ran (almost) nothing.
 
 ## Real-world libraries
 
-`benchmarks/real_world.sh` runs the same comparison against the *actual* test suites of
-common OSS libraries (cachetools, jmespath, toolz, inflection) — it clones them, installs
-them into a throwaway venv, and times pytest vs tiderace cold/warm:
+`benchmarks/real_world.sh` runs the comparison against the *actual* test suites of common OSS
+libraries (cachetools, jmespath, toolz, inflection) — it clones them, installs them into a throwaway
+venv, and times pytest vs the engine cold, warm (no change), and warm after editing one source file:
 
 ```bash
 benchmarks/real_world.sh
 ```
 
-Representative results (warm = no-change re-run): tiderace's impact loop runs **6–100× faster**
-than a full pytest run where tests have real cost, while a cold full run stays comparable to
-or slower than pytest. Exact numbers vary by machine.
+The shape is the same: the warm/impact loop is dramatically faster where tests have real cost; the
+cold full run is competitive-to-faster depending on import weight. Exact numbers vary by machine.
 
-## Methodology
+## Reproduce
 
-See `benchmarks/README.md` in the repository for the full workload model, the priming steps
-(warm scenarios prime once with coverage to build the dependency graph), and how per-runner
-errors are recorded rather than crashing the harness.
+```bash
+# Build both engines first
+cargo build --release --manifest-path engine/Cargo.toml   # native engine
+
+# Then run the three-way harness
+benchmarks/bench_3way.sh
+```
+
+Full result tables and methodology live in
+[`benchmarks/RESULTS-3way.md`](https://github.com/snoodleboot-io/tiderace/blob/main/benchmarks/RESULTS-3way.md)
+and [`benchmarks/RESULTS-inproc.md`](https://github.com/snoodleboot-io/tiderace/blob/main/benchmarks/RESULTS-inproc.md)
+(the in-process / FFI transport experiment, which confirmed the fork — not the pipe — was the cost).

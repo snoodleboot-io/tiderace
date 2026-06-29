@@ -1,102 +1,80 @@
-# State Database
+# State & Cache
 
-tiderace persists state in a local SQLite database (`.tiderace.db` by default). This file is machine-local and should not be committed to version control.
+tiderace keeps no SQLite database. Persisted state lives in two places: a local **warm-state JSON
+file** (`.riptide-state.json`) that drives impact-aware re-runs, and a **content-addressed result
+cache** that turns the suite into a build system. Neither is coverage.py and neither is a relational DB.
 
-## Schema
+## `.riptide-state.json` — the warm impact state
 
-### `file_hashes`
+The active impact-skip layer (`engine-daemon/src/persist.rs`) writes a single JSON file at
+`<root>/.riptide-state.json`. It is the native analogue of the old engine's `.tiderace.db`, but it is
+just two maps:
 
-Stores the last-seen SHA-256 hash of every Python source file.
+```rust
+pub struct PersistedState {
+    /// relative source path -> content hash (hex) at the time it was last run.
+    pub files: BTreeMap<String, String>,
+    /// node id -> last result + the files it touched.
+    pub tests: BTreeMap<String, TestRecord>,
+}
 
-```sql
-CREATE TABLE file_hashes (
-    path        TEXT PRIMARY KEY,
-    hash        TEXT NOT NULL,
-    updated_at  TEXT NOT NULL      -- ISO 8601 timestamp
-);
+pub struct TestRecord {
+    pub outcome: String,   // e.g. "passed" / "failed"
+    pub detail: String,    // failure detail, if any
+    pub deps: Vec<String>, // the source files this test touched (from coverage)
+}
 ```
 
-Used to detect which files changed since the last run.
+- **`files`** — path → content hash, captured when the file was last run. The diff against freshly
+  computed hashes tells tiderace which files changed.
+- **`tests`** — node id → `{ outcome, detail, deps }`. `deps` is the test's executed-source footprint
+  from [coverage](coverage.md); it is what makes the skip decision precise.
 
-### `test_results`
+The lifecycle is small:
 
-Stores the outcome of every test execution.
-
-```sql
-CREATE TABLE test_results (
-    test_id     TEXT PRIMARY KEY,  -- e.g. "tests/test_auth.py::test_login"
-    file_path   TEXT NOT NULL,     -- e.g. "tests/test_auth.py"
-    status      TEXT NOT NULL,     -- "passed" | "failed" | "error" | "skipped"
-    duration_ms INTEGER NOT NULL,
-    stdout      TEXT,
-    stderr      TEXT,
-    ran_at      TEXT NOT NULL
-);
+```mermaid
+flowchart LR
+    LOAD["load .riptide-state.json<br/>(missing → empty = cold start)"] --> HASH["hash current files"]
+    HASH --> CHG["changed_files():<br/>files whose hash differs"]
+    CHG --> PLAN["plan(): partition tests<br/>into to_run / cached"]
+    PLAN --> RUN["run to_run<br/>(isolation ladder)"]
+    RUN --> SAVE["save updated state<br/>(new hashes + records)"]
 ```
 
-Used to always re-run previously failing tests.
+- `changed_files(state, current)` returns every path whose stored hash differs (or vanished).
+- `plan(state, candidates, changed)` partitions candidates into `to_run` and `cached`: a test runs if
+  it was **never seen** or **any** of its recorded `deps` changed; otherwise its cached outcome stands.
+- A missing or unparseable file yields empty state — a clean cold start. To reset, delete the file.
 
-### `test_file_deps`
+This file is **machine-local** working state and should not be committed.
 
-Maps each test to the source files it executed (built from coverage data).
+## The content-addressed cache
 
-```sql
-CREATE TABLE test_file_deps (
-    test_id   TEXT NOT NULL,
-    dep_path  TEXT NOT NULL,
-    PRIMARY KEY (test_id, dep_path)
-);
-```
+The cross-machine layer (`engine-core/src/cache/`, ADR-E004) is a separate concern from the local
+state file. A test's outcome is keyed by its full input closure (`CacheKey` / `CacheKeyBuilder`) and
+stored behind the `Cache` trait. Production wires a `TieredCache(Local, Remote)`:
 
-This is the core of impact analysis. When `dep_path` changes, `test_id` must re-run.
+- **`get`** checks the local tier; on a miss it checks the remote tier and populates local, so a green
+  test someone already ran on CI is free on a fresh machine.
+- **`put`** writes through to both tiers — but only for **cacheable** (pure) outcomes. The `purity`
+  module gates `Cache::put` on `Purity::is_cacheable`, so a nondeterministic test (clock, network,
+  RNG) is never silently cached. The orchestrator's preference order is **cache hit → impact-skip →
+  run**.
 
-### `coverage_data`
+`LocalCache`, `NullCache` (for `--no-cache` / debugging), and `CachedOutcome` round out the module.
+The **remote backend is the main unbuilt piece** — the key, types, tiering, and seam exist; the
+HTTP/object-store client is the follow-on.
 
-Stores per-run coverage summaries for reporting.
+## Two layers, one idea
 
-```sql
-CREATE TABLE coverage_data (
-    run_id        TEXT NOT NULL,
-    file_path     TEXT NOT NULL,
-    lines_covered TEXT NOT NULL,  -- JSON array of line numbers
-    lines_total   INTEGER NOT NULL,
-    ran_at        TEXT NOT NULL,
-    PRIMARY KEY (run_id, file_path)
-);
-```
+Both layers answer "has this work already been done?", at different granularities:
 
-## Operations
+| | `.riptide-state.json` (impact-skip) | content-addressed cache |
+|---|---|---|
+| Scope | per project, local | cross-machine |
+| Keyed on | per-test deps + file content hashes | full input closure (`CacheKey`) |
+| When it skips | a test's deps didn't change | the exact inputs were seen before (here or in CI) |
+| Status | active path | local built; remote tier unbuilt |
 
-### Resetting State
-
-```bash
-tiderace clear
-# or manually:
-rm .tiderace.db
-```
-
-After clearing, the next run will execute all tests and rebuild the state from scratch.
-
-### Inspecting State
-
-Since it's a standard SQLite database, you can inspect it directly:
-
-```bash
-sqlite3 .tiderace.db
-
-# See all test results
-SELECT test_id, status, duration_ms FROM test_results ORDER BY ran_at DESC;
-
-# See which tests depend on a file
-SELECT test_id FROM test_file_deps WHERE dep_path LIKE '%auth%';
-
-# See files that changed most recently
-SELECT path, updated_at FROM file_hashes ORDER BY updated_at DESC LIMIT 10;
-```
-
-## Sharing State
-
-The DB is intentionally machine-local. Each developer's machine maintains its own state reflecting their local working tree. CI runners also maintain their own DB (typically per-job or cached across runs).
-
-!!! tip "Caching in CI"
-    Cache `.tiderace.db` between CI runs keyed on the branch name for maximum impact analysis benefit. See the [CI/CD guide](../guides/releases.md) for the GitHub Actions cache configuration.
+See [impact analysis](impact-analysis.md) for how the state file drives selection, and ADR-E004 for
+the cache rationale.

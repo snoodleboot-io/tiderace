@@ -8,8 +8,12 @@
 >   SQLite impact analysis.
 > - **native (fork)** — `riptide-daemon run --all`: own Rust engine, **fork-per-test** isolation
 >   (ADR-E003), parallel pool of warm wellsprings.
-> - **native --fast** — `riptide-daemon run --fast`: optimistic **no-fork + snapshot/restore** (impure
->   tests run in-process and have their mutation undone; opaque modules auto-fork for soundness).
+> - **native --fast** — optimistic **no-fork + snapshot/restore** (impure tests run in-process and have
+>   their mutation undone; opaque modules auto-fork for soundness).
+>
+> **Note (as of 2026-06):** no-fork+restore is now the **default** execution path — the `--fast` flag was
+> removed (the engine decides per test). These rows labelled "--fast" are the default behaviour today;
+> `RIPTIDE_FORCE_FORK=1` is the inverse (the "native (fork)" baseline). Numbers unchanged.
 
 ## Summary — warm + cold at a glance
 

@@ -1,26 +1,29 @@
 # Using tiderace in CI
 
-tiderace works in CI out of the box — but whether you feel its speedup comes down to **one
-thing: persisting its state between runs.** A fresh CI checkout has no `.tiderace.db`, so
-without a cache **every CI run is a full cold run** (impact analysis has nothing to compare
-against). Cache the state and subsequent runs only re-run what changed.
+tiderace works in CI out of the box. Whether you feel its speedup comes down to **one thing:
+persisting `.riptide-state.json` between runs.** A fresh CI checkout has no state, so without a cache
+**every run is a full cold run** — impact analysis has nothing to compare against. Cache the state
+and subsequent runs re-run only what changed.
+
+!!! info "Naming"
+    The binaries currently build as `riptide` / `riptide-daemon` — a retired codename being
+    consolidated under tiderace. Read them as tiderace.
 
 ## Two modes: pick your trade-off
 
 | Mode | Command | What you get | When |
 |---|---|---|---|
-| **Safe** | `tiderace tests/ --all` | Batched parallel run of the **whole** suite every time. No skipping. | Default for CI correctness; protected branches, release pipelines |
-| **Fast** | `tiderace tests/` (with cached state) | Impact analysis re-runs only affected tests. | PR/feature CI where you want speed and accept that selection is only as good as the dependency graph |
+| **Safe** | `riptide-daemon run <tests> --all` | Full parallel run of the whole suite **every time**. No skipping, no dependence on prior state. | Protected branches, release pipelines, anywhere correctness must not depend on a cache. |
+| **Fast** | `riptide-daemon run <tests>` (with cached state) | Impact-aware: re-runs only tests whose deps changed since the cached run; coverage kept fresh automatically. | PR / feature CI where you want speed and accept that selection is only as good as the cached graph. |
 
-Impact analysis is conservative — it re-runs on any uncertainty (own file changed, never run,
-previously failed, or a recorded dependency changed) — so the risk of skipping a test that
-should run is low. But it is **only as accurate as the coverage dependency graph**. If you
-rely on impact analysis in CI, run with `--coverage` so the graph stays fresh as imports
-change (and you get a coverage report for free).
+Impact analysis is **conservative** — it runs a test whenever its own file changed, a recorded
+dependency changed, or it has no recorded footprint yet (first run / cache miss). So a cold or
+stale cache is never *incorrect*, only un-accelerated.
 
 ## GitHub Actions
 
-Build tiderace from source (until prebuilt binaries are published), cache its state, and run:
+Build the engine from source (until prebuilt binaries are published), cache `.riptide-state.json`,
+and run:
 
 ```yaml
 name: tests
@@ -34,57 +37,64 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - run: python -m pip install --upgrade pip pytest coverage
+          python-version: "3.12"          # 3.12+ required (sys.monitoring coverage)
 
-      # Build tiderace (or download a release binary once published)
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install --git https://github.com/snoodleboot-io/tiderace tiderace
 
-      # THE important bit: persist impact-analysis state across runs.
+      # Build the engine from the engine/ workspace.
+      - name: Build tiderace
+        run: cargo build --release --manifest-path engine/Cargo.toml
+
+      - name: Configure the engine
+        run: |
+          echo "RIPTIDE_SHIM=$PWD/engine/py-shim/shim.py" >> "$GITHUB_ENV"
+          echo "RIPTIDE_PYTHON=$(which python)"           >> "$GITHUB_ENV"
+
+      # THE important bit for fast mode: persist impact-analysis state across runs.
       - uses: actions/cache@v4
         with:
-          path: |
-            .tiderace.db
-            .tiderace-coverage
+          path: .riptide-state.json
           key: tiderace-${{ github.ref }}-${{ github.sha }}
           restore-keys: |
             tiderace-${{ github.ref }}-
             tiderace-
 
-      # Fast mode: only impacted tests, graph kept fresh with --coverage.
-      - run: tiderace tests/ --coverage --python python
+      # Fast mode: impact-aware run (coverage on, state persisted).
+      - run: ./engine/target/release/riptide-daemon run tests/
 ```
 
-For **safe mode**, replace the last step with `tiderace tests/ --all --coverage` — you still get
-batched parallelism, just no skipping.
+For **safe mode**, swap the last step for a forced full run (and you can drop the cache step):
+
+```yaml
+      - run: ./engine/target/release/riptide-daemon run tests/ --all
+```
 
 ### Notes on the cache key
 
-- `restore-keys` lets a new commit reuse the most recent cache for the branch (then `main`),
-  so the graph carries forward instead of starting cold on every commit.
-- The state files are small (SQLite + coverage data). They're safe to cache; if the cache is
-  ever stale or missing, tiderace just does a full run — never an incorrect one.
+- `restore-keys` lets a new commit reuse the most recent state for the branch (then any branch), so
+  the dependency graph carries forward instead of starting cold on every commit.
+- `.riptide-state.json` is small (per-test deps + content hashes). It's safe to cache: a stale or
+  missing cache just produces a full run — never an incorrect result.
 
 ## Other CI systems
 
-The pattern is identical anywhere — cache two paths and run tiderace:
+The pattern is identical anywhere — cache one path, run the daemon:
 
-- **Cache** `.tiderace.db` and `.tiderace-coverage/` between pipeline runs (GitLab `cache:`,
-  CircleCI `save_cache`/`restore_cache`, etc.).
-- **Run** `tiderace tests/ [--all] --coverage --python <interpreter>`.
-- **Fail the build** on test failures — tiderace exits non-zero when any test fails or errors
-  (see [Exit Codes](../api/cli.md)). No extra wiring needed.
+- **Cache** `.riptide-state.json` between pipeline runs (GitLab `cache:`, CircleCI
+  `save_cache` / `restore_cache`, etc.).
+- **Run** `riptide-daemon run tests/` (fast) or `riptide-daemon run tests/ --all` (safe).
+- **Fail the build** on test failures — `run` exits non-zero when any test fails or errors. No extra
+  wiring needed.
 
 ## What *not* to use in CI
 
-`tiderace watch` and the warm worker pool are a **local development** convenience — they keep
-a long-lived process and share interpreter state across runs, which suits an editor loop, not
-a one-shot CI job. CI should use a normal run (fresh subprocesses), or `--isolate` if a suite
-needs strict per-test isolation. See [ADR-009](../design/decisions.md).
+`riptide-daemon watch` and the long-lived `serve` session are **local-development** tools — they
+keep a warm process and share interpreter state across runs, which suits an editor loop, not a
+one-shot CI job. CI should use a fresh `run` (impact-aware) or `run --all` (full). See
+[Watch Mode](watch.md).
 
 ## First run / cache miss
 
-A cold run (no cache, or after `tiderace clear`) runs the whole suite and **builds** the graph.
-That run is the slow one; it is correct, just not accelerated. Every cached run after it is
-where tiderace pays you back.
+A cold run (no cached state) runs the whole suite and **builds** the dependency graph. That run is
+the slow one; it is correct, just not accelerated. Every cached run after it is where tiderace pays
+you back.
