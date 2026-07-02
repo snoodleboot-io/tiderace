@@ -81,3 +81,35 @@ jobs:
         run: cargo test --all
       - name: Release build
         run: cargo build --release
+
+  engine-coverage:
+    name: engine · coverage (line >= 85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Provision the fx venv (numpy + pytest) at the repo root
+        # The fork-based acceptance + daemon e2e tests resolve <repo>/.riptide-fx-venv by path (no env
+        # needed). Without it they self-skip and the exec/fork + daemon paths go uncovered, so the gate
+        # would only measure the pure-logic core. fx_corpus imports numpy + pytest.
+        run: |
+          python -m venv .riptide-fx-venv
+          .riptide-fx-venv/bin/pip install --upgrade pip
+          .riptide-fx-venv/bin/pip install numpy pytest
+      - name: Coverage gate (engine workspace, line >= 85)
+        working-directory: engine
+        # Exclude binary glue with no logic from the denominator: main.rs (CLI entry / arg dispatch) and
+        # socket.rs (the Unix-socket serve loop — a killed-process path that can't flush its profile,
+        # the analogue of the previous watcher.rs exclusion). Everything else — including the exec/fork +
+        # daemon live paths, covered because the venv is provisioned above — is measured. Local baseline
+        # ~89.5% lines; the gate sits at 85 for headroom.
+        run: cargo llvm-cov --workspace --ignore-filename-regex '(main|socket)\.rs' --fail-under-lines 85

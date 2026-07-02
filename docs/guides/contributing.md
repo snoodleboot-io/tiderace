@@ -51,6 +51,21 @@ cargo fmt                                    # format
 
 CI enforces both — PRs that fail `clippy` or `fmt` are blocked.
 
+## Coverage gate
+
+CI gates line coverage of the engine workspace at **≥ 85%** (`cargo llvm-cov`). To reproduce locally
+you need `.riptide-fx-venv` at the repo root (numpy + pytest) so the fork/daemon live tests run rather
+than self-skip — otherwise the exec paths look uncovered:
+
+```bash
+python -m venv .riptide-fx-venv && .riptide-fx-venv/bin/pip install numpy pytest   # once, at repo root
+cd engine
+cargo llvm-cov --workspace --ignore-filename-regex '(main|socket)\.rs' --fail-under-lines 85
+```
+
+`main.rs` (CLI entry) and `socket.rs` (the socket serve loop) are excluded — binary glue with no logic
+that a killed process can't flush coverage for.
+
 ## The Python shim proofs
 
 The shim and the native authoring package carry standalone **proof scripts** that demonstrate
