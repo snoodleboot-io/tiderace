@@ -83,7 +83,7 @@ jobs:
         run: cargo build --release
 
   engine-coverage:
-    name: engine · coverage (line >= 85)
+    name: engine · coverage (line >= 88)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -105,11 +105,11 @@ jobs:
           python -m venv .riptide-fx-venv
           .riptide-fx-venv/bin/pip install --upgrade pip
           .riptide-fx-venv/bin/pip install numpy pytest
-      - name: Coverage gate (engine workspace, line >= 85)
+      - name: Coverage gate (engine workspace, line >= 88)
         working-directory: engine
         # Exclude binary glue with no logic from the denominator: main.rs (CLI entry / arg dispatch) and
         # socket.rs (the Unix-socket serve loop — a killed-process path that can't flush its profile,
         # the analogue of the previous watcher.rs exclusion). Everything else — including the exec/fork +
         # daemon live paths, covered because the venv is provisioned above — is measured. Local baseline
-        # ~89.5% lines; the gate sits at 85 for headroom.
-        run: cargo llvm-cov --workspace --ignore-filename-regex '(main|socket)\.rs' --fail-under-lines 85
+        # ~91% lines; the gate sits at 88 for headroom.
+        run: cargo llvm-cov --workspace --ignore-filename-regex '(main|socket)\.rs' --fail-under-lines 88

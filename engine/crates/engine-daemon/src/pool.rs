@@ -83,3 +83,94 @@ pub fn default_workers() -> usize {
         .map(|n| n.get())
         .unwrap_or(4)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{default_workers, locality_key, run_parallel};
+    use engine_core::domain::{NodeId, ScopePath, TestItem, TestStyle};
+    use std::path::{Path, PathBuf};
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("repo root")
+    }
+    // The live test gates on the fx venv (resolved by path), exactly like daemon_e2e — it runs where
+    // the venv exists (incl. the coverage CI job) and skips cleanly otherwise.
+    fn venv_python() -> Option<PathBuf> {
+        let p = repo_root().join(".riptide-fx-venv/bin/python");
+        p.exists().then_some(p)
+    }
+    fn shim() -> PathBuf {
+        repo_root().join("engine/py-shim/shim.py")
+    }
+    fn item(node_id: &str) -> TestItem {
+        let module = node_id.split("::").next().unwrap_or(node_id);
+        TestItem::new(
+            NodeId::new(node_id),
+            TestStyle::Function,
+            ScopePath::module(module),
+        )
+    }
+
+    #[test]
+    fn locality_key_is_the_module_part_of_the_node_id() {
+        assert_eq!(locality_key("pkg/test_a.py::test_x"), "pkg/test_a.py");
+        assert_eq!(locality_key("bare"), "bare");
+    }
+
+    #[test]
+    fn default_workers_is_at_least_one() {
+        assert!(default_workers() >= 1);
+    }
+
+    #[test]
+    fn empty_items_short_circuit_without_launching_a_wellspring() {
+        let out = run_parallel("python3", Path::new("shim.py"), Path::new("/tmp"), vec![], 4, 5000, false)
+            .expect("empty batch is Ok");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn runs_a_two_module_corpus_across_two_workers() {
+        let Some(python) = venv_python() else {
+            eprintln!("skipping: .riptide-fx-venv not present");
+            return;
+        };
+        // Two modules so the LocalityScheduler distributes them across the two workers.
+        let dir = std::env::temp_dir().join(format!("riptide_pool_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("test_a.py"),
+            "def test_a1():\n    assert 1 == 1\n\ndef test_a2():\n    assert 2 == 2\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("test_b.py"),
+            "def test_b1():\n    assert 3 == 3\n\ndef test_b2():\n    assert 1 == 2\n",
+        )
+        .unwrap();
+
+        let items = vec![
+            item("test_a.py::test_a1"),
+            item("test_a.py::test_a2"),
+            item("test_b.py::test_b1"),
+            item("test_b.py::test_b2"),
+        ];
+        let results = run_parallel(&python.to_string_lossy(), &shim(), &dir, items, 2, 5000, false)
+            .expect("pool run succeeds");
+
+        assert_eq!(results.len(), 4, "every scheduled test returns exactly one result");
+        let mut failed: Vec<String> = results
+            .iter()
+            .filter(|r| r.outcome.is_failure())
+            .map(|r| r.node_id.as_str().to_string())
+            .collect();
+        failed.sort();
+        assert_eq!(failed, vec!["test_b.py::test_b2".to_string()], "only test_b2 fails");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
