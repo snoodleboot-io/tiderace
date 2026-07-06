@@ -539,6 +539,10 @@ def static_impurity(func) -> str | None:
 # --------------------------------------------------------------------------- purity guard (→ batching)
 _MISSING = object()
 _OPAQUE = object()
+# Purity tri-state: a reason string (impure), `None` (measured pure), or `_UNKNOWN_PURITY` (not measured
+# — the test forked, ran async, or was trusted-pure so we skipped the snapshot). Only a *measured pure*
+# verdict is recordable for the bare-no-fork fast path (ADR-E014 / TID-1).
+_UNKNOWN_PURITY = object()
 
 
 def _snapshot_shared(module) -> dict:
@@ -741,7 +745,8 @@ class Engine:
             self.active.append(_Active(d, key, value, gen))
             live.add(key)
 
-    def run(self, node_id: str, style: str, deadline_ms: int, force_no_fork: bool = False) -> dict:
+    def run(self, node_id: str, style: str, deadline_ms: int, force_no_fork: bool = False,
+            trusted_pure: bool = False) -> dict:
         # `force_no_fork`: run THIS test in-process (no fork) — the pure-test fast path (~90× cheaper).
         # The caller asserts it's pure (purity guard); the guard re-checks and flags any escapee.
         module_key = _module_key(node_id)
@@ -764,7 +769,9 @@ class Engine:
 
         # Soundness: an optimistic no-fork request is only honored when we can snapshot/restore the
         # module's shared state. A module with opaque (un-deep-copyable) globals must still fork.
-        if force_no_fork and self.restore:
+        # A trusted-pure test skips this check: it's known pure (won't mutate), so restorability is moot
+        # and it runs bare no-fork. An untrusted no-fork request must be snapshot-restorable or it forks.
+        if force_no_fork and self.restore and not trusted_pure:
             try:
                 if not _restorable(importlib.import_module(_module_name(module_key))):
                     force_no_fork = False
@@ -783,32 +790,42 @@ class Engine:
         outcomes: list[tuple[str, str]] = []
         coverage: dict[str, set] = {}  # union of touched lines across all variants of this node
         impurity = None  # first impurity reason across variants (any impure ⇒ the node is impure)
+        node_pure = None  # tri-state across variants: None (unmeasured), True (all measured pure), False
         for combo in combos:
             self._sync_wider(closure, node_id)
             for case_kwargs in case_kwargs_list:
                 oc, detail, cov, purity = self._fork_run(
                     node_id, style, fixture_requested, closure, combo, deadline_ms, case_kwargs,
-                    force_no_fork)
+                    force_no_fork, trusted_pure)
                 outcomes.append((oc, detail))
                 for path, lines in cov.items():
                     coverage.setdefault(path, set()).update(lines)
-                if purity is not None and impurity is None:
-                    impurity = purity
+                if purity is _UNKNOWN_PURITY:
+                    continue  # this variant measured nothing — leave the node verdict as-is
+                if purity is None:  # measured pure
+                    if node_pure is None:
+                        node_pure = True
+                else:  # measured impure
+                    node_pure = False
+                    if impurity is None:
+                        impurity = purity
         outcome, detail = _aggregate(outcomes)
         outcome, detail = _apply_xfail(marks, outcome, detail)
         resp = {"node_id": node_id, "outcome": outcome, "detail": detail}
         if coverage:  # additive field (Phase-3 CONTRACT §6); omitted when capture is off/empty
             resp["coverage"] = {path: sorted(lines) for path, lines in coverage.items()}
-        if self.purity_guard:  # additive: whether this test is batchable (didn't mutate shared state)
-            resp["pure"] = impurity is None
+        if node_pure is not None:  # additive: purity was measured (guard or restore) — record the verdict
+            resp["pure"] = node_pure
             if impurity is not None:
                 resp["impurity"] = impurity
         return resp
 
     def _fork_run(self, node_id, style, requested, closure, combo, deadline_ms, case_kwargs=None,
-                  force_no_fork=False) -> tuple:
-        """Run one (combo, case) variant; returns `(outcome, detail, coverage, purity)`. `force_no_fork`
-        runs it in THIS process (the pure-test fast path) without forking."""
+                  force_no_fork=False, trusted_pure=False) -> tuple:
+        """Run one (combo, case) variant; returns `(outcome, detail, coverage, purity)` where purity is a
+        reason string (impure), `None` (measured pure), or `_UNKNOWN_PURITY` (not measured). `force_no_fork`
+        runs it in THIS process (the pure-test fast path) without forking; `trusted_pure` additionally
+        skips the snapshot (bare no-fork)."""
         case_kwargs = case_kwargs or {}
         if self.no_fork or force_no_fork:
             # No-COW fallback: run the test in THIS process (no isolation, but the same fixture
@@ -816,9 +833,9 @@ class Engine:
             # torn down per test in-process; wider scopes still live once in the parent.
             try:
                 return self._child_exec(node_id, style, requested, closure, combo, case_kwargs,
-                                        in_process=True)
+                                        in_process=True, trusted_pure=trusted_pure)
             except BaseException as exc:  # noqa: BLE001 — any in-process test error → Outcome::Error
-                return "error", "".join(traceback.format_exception_only(type(exc), exc)), {}, None
+                return "error", "".join(traceback.format_exception_only(type(exc), exc)), {}, _UNKNOWN_PURITY
 
         read_fd, write_fd = os.pipe()
         pid = os.fork()
@@ -830,8 +847,13 @@ class Engine:
                 payload = {"outcome": outcome, "detail": detail[:4000]}
                 if coverage:
                     payload["coverage"] = coverage
-                if purity is not None:
-                    payload["purity"] = purity
+                # Carry the purity tri-state across the pipe: pure=True/False when measured (guard on),
+                # omitted when unknown (the default forked path measures nothing).
+                if purity is None:
+                    payload["pure"] = True
+                elif purity is not _UNKNOWN_PURITY:
+                    payload["pure"] = False
+                    payload["impurity"] = purity
                 os.write(write_fd, json.dumps(payload).encode())
             except BaseException:  # noqa: BLE001 — never hang the child on the way out
                 pass
@@ -848,7 +870,7 @@ class Engine:
                 pass
             os.waitpid(pid, 0)
             os.close(read_fd)
-            return "error", "timeout", {}, None
+            return "error", "timeout", {}, _UNKNOWN_PURITY
         data = b""
         while True:
             chunk = os.read(read_fd, 65536)
@@ -859,15 +881,23 @@ class Engine:
         _, status = os.waitpid(pid, 0)
         if not data:
             if os.WIFSIGNALED(status):
-                return "error", f"child killed by signal {os.WTERMSIG(status)}", {}, None
+                return "error", f"child killed by signal {os.WTERMSIG(status)}", {}, _UNKNOWN_PURITY
             if os.WIFEXITED(status) and os.WEXITSTATUS(status) != 0:
-                return "error", f"child exited {os.WEXITSTATUS(status)}", {}, None
-            return "error", "no result from child", {}, None
+                return "error", f"child exited {os.WEXITSTATUS(status)}", {}, _UNKNOWN_PURITY
+            return "error", "no result from child", {}, _UNKNOWN_PURITY
         res = json.loads(data.decode())
-        return res["outcome"], res.get("detail", ""), res.get("coverage", {}), res.get("purity")
+        # Reconstruct the purity tri-state from the pipe: pure omitted ⇒ unknown; True ⇒ measured pure;
+        # False ⇒ impure (with reason).
+        if "pure" not in res:
+            purity = _UNKNOWN_PURITY
+        elif res["pure"]:
+            purity = None
+        else:
+            purity = res.get("impurity") or "impure"
+        return res["outcome"], res.get("detail", ""), res.get("coverage", {}), purity
 
     def _child_exec(self, node_id, style, requested, closure, combo, case_kwargs=None,
-                    in_process=False) -> tuple:
+                    in_process=False, trusted_pure=False) -> tuple:
         """In the forked child: set up function-scope fixtures (incl. parametrized + reinit-after-fork
         resources, which thus get a FRESH handle per child), run the body, tear down in reverse.
         `case_kwargs` are the @riptide.cases values bound to the test's bare params. Returns
@@ -892,7 +922,7 @@ class Engine:
                 outcome, detail = asyncio.run(
                     self._child_exec_async(node_id, style, requested, closure, combo, case_kwargs)
                 )
-                return outcome, detail, cov.stop(), None  # purity guard skips async (scope: sync)
+                return outcome, detail, cov.stop(), _UNKNOWN_PURITY  # async purity not measured
             finally:
                 cov.stop()
         try:
@@ -909,13 +939,15 @@ class Engine:
             # Purity guard / restore: snapshot shared state right before the body, compare right after.
             # When running in-process (no fork) with `restore`, undo any mutation so the next test is
             # isolated WITHOUT a fork — the snapshot/restore fast path for impure tests too.
-            need_snap = self.purity_guard or (self.restore and in_process)
+            # `trusted_pure` (TID-1): a recorded-pure, unchanged test skips the snapshot entirely and runs
+            # BARE no-fork (~90×) — no measurement, no restore. Otherwise snapshot to measure/restore.
+            need_snap = (self.purity_guard or (self.restore and in_process)) and not trusted_pure
             mod = importlib.import_module(_module_name(module_key)) if need_snap else None
             before = _snapshot_shared(mod) if mod is not None else None
             env_before = dict(os.environ) if mod is not None else None
             outcome, detail = _invoke(node_id, style, test_args)
-            purity = _purity_verdict(mod, before, env_before) if mod is not None else None
-            if self.restore and in_process and purity is not None and mod is not None:
+            purity = _purity_verdict(mod, before, env_before) if mod is not None else _UNKNOWN_PURITY
+            if self.restore and in_process and mod is not None and purity is not None:
                 _restore_shared(mod, before, env_before)  # undo the mutation → next test isolated
             return outcome, detail, cov.stop(), purity
         finally:
@@ -1266,7 +1298,7 @@ def serve() -> int:
             _write_frame(
                 _STDOUT,
                 engine.run(req["node_id"], req["style"], req.get("deadline_ms", 5000),
-                           req.get("force_no_fork", False)),
+                           req.get("force_no_fork", False), req.get("trusted_pure", False)),
             )
     finally:
         engine.teardown_all()

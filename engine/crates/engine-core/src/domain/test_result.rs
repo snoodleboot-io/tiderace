@@ -14,6 +14,10 @@ pub struct TestResult {
     /// footprint, used by impact-aware re-runs. Empty unless coverage capture was on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub touched_files: Vec<String>,
+    /// Purity verdict (TID-1): `Some(true)` measured pure, `Some(false)` impure, `None` not measured.
+    /// A recorded `Some(true)` promotes an unchanged test to the bare-no-fork tier on the next run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pure: Option<bool>,
 }
 
 impl TestResult {
@@ -29,12 +33,19 @@ impl TestResult {
             duration_ms,
             detail: detail.into(),
             touched_files: Vec::new(),
+            pure: None,
         }
     }
 
     /// Attach the touched-file footprint (builder style).
     pub fn with_touched(mut self, touched_files: Vec<String>) -> Self {
         self.touched_files = touched_files;
+        self
+    }
+
+    /// Attach the purity verdict (builder style).
+    pub fn with_pure(mut self, pure: Option<bool>) -> Self {
+        self.pure = pure;
         self
     }
 }

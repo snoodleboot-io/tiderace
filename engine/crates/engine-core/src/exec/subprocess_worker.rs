@@ -102,7 +102,13 @@ impl Worker for SubprocessWorker {
             EngineError::Exec("SubprocessWorker has no target; call with_target".into())
         })?;
         let mut proc = SubprocessWorker::launch(&target)?;
-        run_batch(&mut proc.transport, items, self.deadline_ms, false)
+        run_batch(
+            &mut proc.transport,
+            items,
+            self.deadline_ms,
+            false,
+            &std::collections::HashSet::new(),
+        )
     }
 }
 

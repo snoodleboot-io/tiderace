@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::thread;
 
@@ -20,6 +20,7 @@ pub fn run_parallel(
     workers: usize,
     deadline_ms: u64,
     optimistic_no_fork: bool,
+    trusted: &HashSet<String>,
 ) -> Result<Vec<TestResult>, String> {
     if items.is_empty() {
         return Ok(Vec::new());
@@ -49,11 +50,18 @@ pub fn run_parallel(
             continue;
         }
         let (py, sh, rt) = (python.to_string(), shim.to_path_buf(), root.to_path_buf());
+        // Only this batch's trusted-pure node ids (the shim only sees this batch).
+        let batch_trusted: HashSet<String> = batch_items
+            .iter()
+            .filter(|it| trusted.contains(it.node_id.as_str()))
+            .map(|it| it.node_id.to_string())
+            .collect();
         handles.push(thread::spawn(move || -> Result<Vec<TestResult>, String> {
             let mut worker = ForkWorker::launch(&py, &sh, &rt)
                 .map_err(|e| format!("failed to launch wellspring: {e}"))?
                 .with_deadline_ms(deadline_ms)
-                .with_optimistic_no_fork(optimistic_no_fork);
+                .with_optimistic_no_fork(optimistic_no_fork)
+                .with_trusted_pure(batch_trusted);
             worker
                 .run(&batch_items)
                 .map_err(|e| format!("execution failed: {e}"))
@@ -88,6 +96,7 @@ pub fn default_workers() -> usize {
 mod tests {
     use super::{default_workers, locality_key, run_parallel};
     use engine_core::domain::{NodeId, ScopePath, TestItem, TestStyle};
+    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
     fn repo_root() -> PathBuf {
@@ -127,8 +136,17 @@ mod tests {
 
     #[test]
     fn empty_items_short_circuit_without_launching_a_wellspring() {
-        let out = run_parallel("python3", Path::new("shim.py"), Path::new("/tmp"), vec![], 4, 5000, false)
-            .expect("empty batch is Ok");
+        let out = run_parallel(
+            "python3",
+            Path::new("shim.py"),
+            Path::new("/tmp"),
+            vec![],
+            4,
+            5000,
+            false,
+            &HashSet::new(),
+        )
+        .expect("empty batch is Ok");
         assert!(out.is_empty());
     }
 
@@ -159,17 +177,34 @@ mod tests {
             item("test_b.py::test_b1"),
             item("test_b.py::test_b2"),
         ];
-        let results = run_parallel(&python.to_string_lossy(), &shim(), &dir, items, 2, 5000, false)
-            .expect("pool run succeeds");
+        let results = run_parallel(
+            &python.to_string_lossy(),
+            &shim(),
+            &dir,
+            items,
+            2,
+            5000,
+            false,
+            &HashSet::new(),
+        )
+        .expect("pool run succeeds");
 
-        assert_eq!(results.len(), 4, "every scheduled test returns exactly one result");
+        assert_eq!(
+            results.len(),
+            4,
+            "every scheduled test returns exactly one result"
+        );
         let mut failed: Vec<String> = results
             .iter()
             .filter(|r| r.outcome.is_failure())
             .map(|r| r.node_id.as_str().to_string())
             .collect();
         failed.sort();
-        assert_eq!(failed, vec!["test_b.py::test_b2".to_string()], "only test_b2 fails");
+        assert_eq!(
+            failed,
+            vec!["test_b.py::test_b2".to_string()],
+            "only test_b2 fails"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

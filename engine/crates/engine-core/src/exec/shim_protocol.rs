@@ -33,6 +33,10 @@ pub struct ExecRequest<'a> {
     /// still forks if the module isn't snapshot-restorable (soundness). `false` ⇒ byte-identical frame.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force_no_fork: bool,
+    /// This test is *recorded pure and unchanged* (TID-1): run it BARE no-fork — skip the snapshot/restore
+    /// entirely (~90×). Only ever set for a `force_no_fork` request. `false` ⇒ byte-identical frame.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trusted_pure: bool,
 }
 
 impl<'a> ExecRequest<'a> {
@@ -47,6 +51,7 @@ impl<'a> ExecRequest<'a> {
             reinit: Vec::new(),
             fixture_args: FixtureArgs::new(),
             force_no_fork: false,
+            trusted_pure: false,
         }
     }
 
@@ -74,6 +79,10 @@ pub struct ExecResponse {
     /// Per-test touched source: `relative_path -> sorted line numbers` (empty unless capture is on).
     #[serde(default)]
     pub coverage: std::collections::BTreeMap<String, Vec<u32>>,
+    /// Purity verdict (TID-1): `Some(true)` measured pure, `Some(false)` measured impure, `None` not
+    /// measured (forked / async / trusted-pure). Recordable verdicts drive the bare-no-fork fast path.
+    #[serde(default)]
+    pub pure: Option<bool>,
 }
 
 /// Write a length-prefixed (u32 LE) JSON frame.

@@ -38,7 +38,9 @@ fn main() -> ExitCode {
     // Impact-aware `run` needs coverage to record each test's footprint (the warm-mode skip). The
     // wellspring (a child process) inherits this env. `--all` opts out (full run, no coverage).
     let force_all = args.iter().any(|a| a == "--all");
-    if mode == "run" && !force_all {
+    // Coverage on for both `run` (impact-skip) and `run --all` (so purity verdicts + dep footprints are
+    // persisted, letting the next full run route recorded-pure unchanged tests to bare no-fork — TID-1).
+    if mode == "run" {
         std::env::set_var("RIPTIDE_COVERAGE", "1");
     }
     // No-fork + snapshot/restore is the DEFAULT execution path (not an opt-in flag): the engine runs

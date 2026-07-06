@@ -55,11 +55,15 @@ pub(crate) fn run_batch<T: ShimTransport + ?Sized>(
     items: &[TestItem],
     deadline_ms: u64,
     force_no_fork: bool,
+    trusted: &std::collections::HashSet<String>,
 ) -> Result<Vec<TestResult>> {
     let mut results = Vec::with_capacity(items.len());
     for item in items {
         let mut req = ExecRequest::bare(item.node_id.as_str(), item.style.wire(), deadline_ms);
         req.force_no_fork = force_no_fork; // optimistic no-fork; the shim forks non-restorable modules
+                                           // TID-1: a recorded-pure, unchanged test runs BARE no-fork (skip the snapshot). Only meaningful
+                                           // on a no-fork request; the shim ignores it otherwise.
+        req.trusted_pure = force_no_fork && trusted.contains(item.node_id.as_str());
         let start = Instant::now();
         let resp = transport.exchange(&req)?;
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -71,7 +75,8 @@ pub(crate) fn run_batch<T: ShimTransport + ?Sized>(
                 duration_ms,
                 resp.detail,
             )
-            .with_touched(touched),
+            .with_touched(touched)
+            .with_pure(resp.pure),
         );
     }
     Ok(results)
@@ -194,6 +199,7 @@ mod tests {
                 outcome,
                 detail,
                 coverage: Default::default(),
+                pure: None,
             })
         }
     }
@@ -213,7 +219,14 @@ mod tests {
             .answer("m.py::test_bad", "failed", "assert 1 == 2");
         let items = [item("m.py::test_ok"), item("m.py::test_bad")];
 
-        let results = run_batch(&mut shim, &items, 5_000, false).expect("offline batch runs");
+        let results = run_batch(
+            &mut shim,
+            &items,
+            5_000,
+            false,
+            &std::collections::HashSet::new(),
+        )
+        .expect("offline batch runs");
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].node_id.as_str(), "m.py::test_ok");
@@ -227,15 +240,28 @@ mod tests {
     #[test]
     fn unknown_wire_token_becomes_error_outcome_through_the_loop() {
         let mut shim = ScriptedShim::new().answer("m.py::t", "kaboom", "weird");
-        let results = run_batch(&mut shim, &[item("m.py::t")], 5_000, false).unwrap();
+        let results = run_batch(
+            &mut shim,
+            &[item("m.py::t")],
+            5_000,
+            false,
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
         assert_eq!(results[0].outcome, Outcome::Error);
     }
 
     #[test]
     fn mid_run_shim_close_surfaces_as_a_typed_error_not_a_panic() {
         let mut shim = ScriptedShim::new().closes_after(1);
-        let err = run_batch(&mut shim, &[item("m.py::a"), item("m.py::b")], 5_000, false)
-            .expect_err("a shim that closes mid-batch must error");
+        let err = run_batch(
+            &mut shim,
+            &[item("m.py::a"), item("m.py::b")],
+            5_000,
+            false,
+            &std::collections::HashSet::new(),
+        )
+        .expect_err("a shim that closes mid-batch must error");
         assert!(matches!(err, EngineError::Exec(_)));
     }
 
@@ -282,7 +308,14 @@ mod tests {
         assert_eq!(transport.ready().unwrap().pid, 4242);
 
         let items = [item("m.py::test_ok"), item("m.py::test_bad")];
-        let results = run_batch(&mut transport, &items, 5_000, false).expect("loopback batch");
+        let results = run_batch(
+            &mut transport,
+            &items,
+            5_000,
+            false,
+            &std::collections::HashSet::new(),
+        )
+        .expect("loopback batch");
 
         transport.close_input(); // EOF → the fake-shim thread's read loop ends
         shim.join().expect("fake shim thread");

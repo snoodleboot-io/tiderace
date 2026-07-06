@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use engine_core::collection::{Collector, RegexCollector};
@@ -83,8 +83,13 @@ impl EngineHandler {
 
     /// Run the requested tests across a **parallel pool** of wellsprings (one per core), not the single
     /// warm wellspring — the fix for sequential full runs. Tests run no-fork + restore by default; the
-    /// shim forks non-restorable (opaque) modules for soundness.
-    fn run_items_parallel(&self, requested: &[String]) -> Result<Vec<TestResult>, String> {
+    /// shim forks non-restorable (opaque) modules for soundness. `trusted` node ids (recorded pure +
+    /// unchanged, TID-1) run BARE no-fork (skip the snapshot → ~90×).
+    fn run_items_parallel(
+        &self,
+        requested: &[String],
+        trusted: &HashSet<String>,
+    ) -> Result<Vec<TestResult>, String> {
         let all = self.collect()?;
         let items: Vec<TestItem> = if requested.is_empty() {
             all
@@ -101,17 +106,53 @@ impl EngineHandler {
             crate::pool::default_workers(),
             5000,
             optimistic_no_fork(), // no-fork + restore by default (RIPTIDE_FORCE_FORK=1 to disable)
+            trusted,
         )
     }
 
-    /// Full run across the parallel pool (the one-shot `run` / `run --all` path). Requires the
-    /// wellsprings to have `RIPTIDE_RESTORE=1` (the CLI always sets it).
+    /// Full run across the parallel pool (the one-shot `run --all` path). Now **purity-aware** (TID-1):
+    /// it loads the persisted state, runs *recorded-pure + unchanged* tests BARE no-fork (skip the
+    /// snapshot), re-verifies the rest under restore, and persists the updated verdicts + footprints.
+    /// So the second `run --all` on an unchanged tree runs the pure suite at the bare-no-fork tier.
     pub fn run_full_parallel(&self) -> Result<Vec<RpcResult>, String> {
-        Ok(self
-            .run_items_parallel(&[])?
-            .into_iter()
-            .map(to_rpc)
-            .collect())
+        let state_path = self.root.join(".riptide-state.json");
+        let mut state = PersistedState::load(&state_path);
+
+        // Trusted = recorded pure AND none of its recorded deps changed since it was last verified.
+        let current = self.hash_known_files(&state);
+        let changed = changed_files(&state, &current);
+        let trusted: HashSet<String> = state
+            .tests
+            .iter()
+            .filter(|(_, rec)| {
+                rec.pure == Some(true) && !rec.deps.iter().any(|d| changed.contains(d))
+            })
+            .map(|(node, _)| node.clone())
+            .collect();
+
+        let fresh = self.run_items_parallel(&[], &trusted)?;
+        self.persist_results(&mut state, &fresh);
+        state
+            .save(&state_path)
+            .map_err(|e| format!("state save failed: {e}"))?;
+        Ok(fresh.into_iter().map(to_rpc).collect())
+    }
+
+    /// Fold a batch of results into the persisted state (outcome + detail + deps + purity verdict) and
+    /// rebaseline the content hashes of every touched file. Shared by the impact-aware + full runs.
+    fn persist_results(&self, state: &mut PersistedState, results: &[TestResult]) {
+        for r in results {
+            state.tests.insert(
+                r.node_id.to_string(),
+                TestRecord {
+                    outcome: outcome_token(r.outcome).to_string(),
+                    detail: r.detail.clone(),
+                    deps: r.touched_files.clone(),
+                    pure: r.pure,
+                },
+            );
+        }
+        self.rebaseline_hashes(state);
     }
 
     /// **Impact-aware run** (the warm-mode gap): load persisted state, re-run only the tests whose
@@ -146,21 +187,14 @@ impl EngineHandler {
             .collect();
 
         // Execute only the impacted tests (skip the wellspring launch entirely if none), in parallel.
+        // Impacted tests are stale (their deps changed), so we don't trust a prior purity verdict — they
+        // run under restore, which re-measures the verdict that persist_results then records.
         if !p.to_run.is_empty() {
-            let fresh = self.run_items_parallel(&p.to_run)?;
+            let fresh = self.run_items_parallel(&p.to_run, &HashSet::new())?;
             for r in &fresh {
-                state.tests.insert(
-                    r.node_id.to_string(),
-                    TestRecord {
-                        outcome: outcome_token(r.outcome).to_string(),
-                        detail: r.detail.clone(),
-                        deps: r.touched_files.clone(),
-                    },
-                );
                 results.push(to_rpc(r.clone()));
             }
-            // Rebaseline the hashes of every file any test now depends on.
-            self.rebaseline_hashes(&mut state);
+            self.persist_results(&mut state, &fresh);
             state
                 .save(&state_path)
                 .map_err(|e| format!("state save failed: {e}"))?;

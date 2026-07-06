@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::domain::{TestItem, TestResult};
@@ -11,6 +12,7 @@ pub struct ForkWorker {
     wellspring: Wellspring,
     deadline_ms: u64,
     optimistic_no_fork: bool,
+    trusted: HashSet<String>,
 }
 
 impl ForkWorker {
@@ -20,6 +22,7 @@ impl ForkWorker {
             wellspring: Wellspring::launch(python, shim, root)?,
             deadline_ms: 5_000,
             optimistic_no_fork: false,
+            trusted: HashSet::new(),
         })
     }
 
@@ -37,6 +40,13 @@ impl ForkWorker {
         self
     }
 
+    /// Node ids known to be *pure and unchanged* (TID-1): each runs BARE no-fork (skip the snapshot).
+    /// Only honored together with `with_optimistic_no_fork(true)`.
+    pub fn with_trusted_pure(mut self, trusted: HashSet<String>) -> Self {
+        self.trusted = trusted;
+        self
+    }
+
     /// The underlying Wellspring pid (for diagnostics/tests).
     pub fn wellspring_pid(&self) -> i64 {
         self.wellspring.pid()
@@ -47,6 +57,12 @@ impl Worker for ForkWorker {
     fn run(&mut self, items: &[TestItem]) -> Result<Vec<TestResult>> {
         let deadline_ms = self.deadline_ms;
         let nf = self.optimistic_no_fork;
-        run_batch(self.wellspring.transport_mut(), items, deadline_ms, nf)
+        run_batch(
+            self.wellspring.transport_mut(),
+            items,
+            deadline_ms,
+            nf,
+            &self.trusted,
+        )
     }
 }

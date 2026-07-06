@@ -21,6 +21,10 @@ pub struct TestRecord {
     pub outcome: String,
     pub detail: String,
     pub deps: Vec<String>,
+    /// Purity verdict (TID-1): `Some(true)` measured pure. A pure test whose deps are all unchanged is
+    /// re-run BARE no-fork next time. `#[serde(default)]` ⇒ old state files (no field) load as `None`.
+    #[serde(default)]
+    pub pure: Option<bool>,
 }
 
 impl PersistedState {
@@ -91,6 +95,7 @@ mod tests {
                 outcome: "passed".into(),
                 detail: String::new(),
                 deps: vec!["src.py".into()],
+                pure: Some(true),
             },
         );
         s.tests.insert(
@@ -99,6 +104,7 @@ mod tests {
                 outcome: "passed".into(),
                 detail: String::new(),
                 deps: vec!["other.py".into()],
+                pure: None,
             },
         );
         s
