@@ -69,8 +69,8 @@ Two complementary layers exploit it:
   input closure (`CacheKey`) in a `TieredCache(Local, Remote)`. Because the key is content-addressed,
   a result CI computed is reusable on any machine with the same inputs — a *build system for tests*.
   A `purity` gate keeps nondeterministic outcomes out of the cache. The shareable remote tier is a
-  `DirCache` (a directory / CI cache path / shared mount); wiring it into the daemon run loop is the
-  remaining step.
+  `DirCache` (a directory / CI cache path / shared mount); the daemon consults it in `run` when
+  `RIPTIDE_CACHE_DIR` is set (**cache hit → impact-skip → run**).
 
 ---
 

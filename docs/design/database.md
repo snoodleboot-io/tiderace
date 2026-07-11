@@ -64,8 +64,9 @@ stored behind the `Cache` trait. Production wires a `TieredCache(Local, Remote)`
 `LocalCache`, `NullCache` (for `--no-cache` / debugging), and `CachedOutcome` round out the module.
 The shareable **remote tier is `DirCache`** — a directory of content-hashed JSON entries (`<hex>.json`),
 so pointing it at a CI cache path / shared mount / artifact makes a result computed on one machine a free
-hit on any other. An HTTP/object-store client is a drop-in behind the same `Cache` trait. Wiring the
-cache into the daemon's run loop is the remaining step.
+hit on any other. An HTTP/object-store client is a drop-in behind the same `Cache` trait. The daemon
+consults the cache in `run` (**cache hit → impact-skip → run**) when `RIPTIDE_CACHE_DIR` is set; only
+*pure* outcomes are cached (the purity gate keeps hits sound).
 
 ## Two layers, one idea
 

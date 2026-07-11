@@ -310,8 +310,10 @@ Two complementary layers:
   test is never run — and because the key is content-addressed, a result CI computed is reusable on any
   machine with the same inputs. The `purity` gate excludes nondeterministic tests from caching. The remote
   tier is a shareable **`DirCache`** (a directory: a CI cache path / shared mount / artifact); an HTTP or
-  object-store client is a drop-in behind the same `Cache` trait. Wiring the cache into the daemon's run
-  loop (cache hit → impact-skip → run) is the remaining step (tracked by TID-7).
+  object-store client is a drop-in behind the same `Cache` trait. The daemon consults it in `run`
+  (**cache hit → impact-skip → run**): set `RIPTIDE_CACHE_DIR` to a shared directory and a result CI
+  computed is served without re-running, even when this machine's local impact state is stale. Only
+  *pure* outcomes are cached (the purity gate keeps it sound).
 
 ---
 
