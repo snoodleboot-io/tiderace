@@ -1,87 +1,66 @@
 # Watch Mode
 
-`tiderace watch` keeps a pool of **warm** Python workers running and re-runs only the
-tests impacted by each file you save. Because the workers import `pytest` once and stay
-alive between runs, every cycle after the first pays **no interpreter or pytest startup** —
-you get sub-second feedback as you edit.
+`riptide-daemon watch` keeps a **warm** CPython interpreter — your project imported **once** — and
+re-runs only the tests impacted by each file you save. Because the interpreter stays alive between
+runs, every cycle after the first pays **no interpreter startup**: you get millisecond feedback as
+you edit.
+
+!!! info "Naming"
+    The binaries currently build as `riptide` / `riptide-daemon` — a retired codename being
+    consolidated under tiderace. Read them as tiderace.
 
 ```bash
-tiderace watch tests/
+riptide-daemon watch tests/
 ```
 
 ```
-  ✓ collected 47 tests
-  ⚡ warm pool ready: 8 workers
-  ✓ 47 passed · 0 failed · 0 skipped · 0.9s
-
-  👀 watching for changes — Ctrl-C to stop
-
-  ⚡ 1 file(s) changed → 6 test(s)
-  ✓ 6 passed · 0 failed · 0 skipped · 0.18s
+watching tests/ (Ctrl-C to stop)…
+src/auth.py:    Ran(2)
+test_auth.py:   Recollected(5)
+conftest.py:    Recycled(12)
 ```
 
 ## How it works
 
-1. On startup, tiderace collects your tests and spawns `-n` warm workers (default: CPU count),
-   each of which imports pytest once.
-2. It runs an initial pass to establish a baseline, then watches the tree.
-3. When you save a file, tiderace hashes the change, runs [impact analysis](../design/impact-analysis.md)
-   to pick the affected tests, and dispatches just those node ids to the warm pool.
-4. Changed files are evicted from each worker's module cache before the run, so a warm
-   re-run **always reflects the code on disk** — never a stale pass.
-
-## Options
-
-`watch` honours the same global options as a normal run:
-
-```bash
-# More workers, explicit interpreter
-tiderace watch tests/ -n 12 --python .venv/bin/python
-
-# Watch specific paths
-tiderace watch tests/unit tests/integration
+```mermaid
+flowchart TD
+    SAVE["you save a file"] --> HASH["content-hash the file"]
+    HASH --> SAME{"content actually<br/>changed?"}
+    SAME -->|"no (mtime touch only)"| IDLE["Idle — nothing runs"]
+    SAME -->|yes| KIND{"what kind of file?"}
+    KIND -->|"source file"| IMP["re-run impacted tests<br/>(dep graph) — Ran(n)"]
+    KIND -->|"test file"| REC["re-collect + re-run<br/>Recollected(n)"]
+    KIND -->|"conftest / config / C-ext"| RCY["recycle warm interpreter<br/>then re-run — Recycled(n)"]
 ```
 
-| Option | Effect in watch mode |
-|---|---|
-| `-n, --workers` | Size of the warm pool |
-| `--python` | Interpreter the workers run |
-| `--timeout` | Per-test limit; a hung test is killed and that worker respawned |
-| `--pattern` | Test-file discovery regex |
+On startup `watch` discovers your tests and seeds the dependency graph (empty until coverage runs
+accrue). Then it watches the tree, coalescing each save's burst of filesystem events within a short
+quiet window, and does the **minimum** work per change:
 
-See the [CLI Reference](../api/cli.md) and [Configuration](configuration.md) for the full
-list and `pyproject.toml` defaults.
+- **Source edit** → re-run only the tests whose recorded dependencies include that file (`Ran(n)`).
+- **Test-file edit** → re-collect and re-run (`Recollected(n)`).
+- **`conftest.py` / config / C-extension change** → recycle the warm interpreter (its imports are
+  now stale), then re-run (`Recycled(n)`).
+- **No real change** (e.g. an mtime-only touch with identical content) → `Idle`, nothing runs.
 
-## Precise vs. conservative selection
+## Cold start is conservative, then tightens
 
-How narrowly watch re-runs depends on whether a per-test dependency graph exists:
-
-- **With a coverage graph** (you have run `tiderace --coverage` at least once), editing a
-  source file re-runs only the tests whose recorded dependencies changed.
-- **Without one**, tiderace is conservative: editing a *source* file re-runs every test that
-  lacks a dependency graph (it cannot map the edit to specific tests). Editing a *test* file
-  always re-runs just that file's tests.
-
-To get the tightest watch loops, prime the graph once:
-
-```bash
-tiderace --coverage tests/      # build the per-test dependency graph
-tiderace watch tests/           # now source edits re-run only impacted tests
-```
-
-## Robustness
-
-The warm pool is built to survive a long editing session:
-
-- A test that **hangs** is killed at `--timeout` and its worker is respawned — the loop never wedges.
-- A test that **crashes** its worker (e.g. a segfaulting C extension) is detected; the worker
-  is replaced and the run continues.
-- A change to **`conftest.py`** recycles the pool, since fixtures and collection are cached in
-  the warm interpreters.
+The dependency graph is empty until coverage from real runs populates it. So the **first** edits in
+a fresh `watch` session conservatively re-run the full candidate set (correct, just not yet precise);
+as runs accrue coverage footprints, selection narrows to exactly the impacted tests. The impact-aware
+daemon `run` already records this footprint to `.riptide-state.json`, so a project you've `run`
+recently starts `watch` with a warmer graph.
 
 ## When *not* to use it
 
-Warm workers share a process across runs, which is a convenience for **trusted local
-development**. For CI, or when running untrusted code, prefer a normal run (which uses
-fresh subprocesses) or `--isolate` for one process per test. See
-[ADR-009](../design/decisions.md) for the design rationale.
+`watch` keeps a **long-lived warm process** that shares interpreter state across runs. That's a
+deliberate convenience for **trusted local development** — it's not an isolation guarantee across the
+whole session. **Do not use the warm process as your CI gate.** For CI, run a fresh one-shot:
+
+```bash
+riptide-daemon run tests/          # impact-aware fresh run
+riptide-daemon run tests/ --all    # full fresh run
+```
+
+Each of those launches a clean wellspring and applies the [isolation ladder](../design/architecture.md#the-isolation-ladder)
+per test — the right model for a one-shot gate. See [CI](ci.md).

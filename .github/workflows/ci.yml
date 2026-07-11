@@ -10,9 +10,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-and-test:
-    name: build · lint · test
+  engine-linux:
+    name: engine · linux · build · lint · test
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: engine
     steps:
       - uses: actions/checkout@v4
 
@@ -27,18 +30,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install Python test dependencies
-        # Integration tests run the real binary against real pytest, so these
-        # must be present (coverage powers source-level impact analysis).
-        run: python -m pip install --upgrade pip pytest coverage
+            engine/target
+          key: ${{ runner.os }}-engine-cargo-${{ hashFiles('engine/Cargo.lock') }}
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -46,33 +39,77 @@ jobs:
       - name: Clippy (warnings as errors)
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Unit + integration tests
-        env:
-          # Point the integration suite at the CI Python that has pytest.
-          TIDERACE_TEST_PYTHON: python
+      # The fork-based live integration tests self-skip without the fx venv (numpy/sqlite), which is
+      # deliberately not provisioned here — so this covers unit/lib + daemon + the self-skipping
+      # acceptance suite. The Python shim proofs are exercised separately (py-riptide/proof_*.py).
+      - name: Unit + lib + daemon tests
         run: cargo test --all
 
       - name: Release build
         run: cargo build --release
 
-  coverage:
-    # Gate at the 80% line target. `watcher.rs` (the notify blocking event loop) is
-    # excluded from the denominator: it can only run inside a long-lived `tiderace
-    # watch` process which the test must KILL, and a killed process never flushes
-    # its instrumented coverage profile — so it is validated by an integration test
-    # instead of being counted. Everything else (engine, pool, runner) is measured.
-    name: coverage (line >= 80)
+  engine-windows:
+    # ADR-E008 capability matrix: validate the pure-Rust engine compiles and its unit/lib + daemon
+    # logic passes on Windows, which has no fork(). The fork-based live integration tests self-skip
+    # without the fx venv, so this gate covers compile + clippy + fmt + unit/lib/daemon. The no-fork
+    # SubprocessWorker acceptance on Windows (driving the --no-fork shim against a real Python) is the
+    # remaining Phase-7 piece in ROADMAP-v2.
+    name: engine · windows · build · lint · unit
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine/target
+          key: ${{ runner.os }}-engine-cargo-${{ hashFiles('engine/Cargo.lock') }}
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy (warnings as errors)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Unit + lib + daemon tests (fork integration self-skips without the venv)
+        run: cargo test --all
+      - name: Release build
+        run: cargo build --release
+
+  engine-coverage:
+    name: engine · coverage (line >= 88)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install --upgrade pip pytest coverage
-      - name: Coverage gate
-        env:
-          TIDERACE_TEST_PYTHON: python
-        run: cargo llvm-cov --all --ignore-filename-regex 'watcher\.rs' --fail-under-lines 80
+      - name: Provision the fx venv (numpy + pytest) at the repo root
+        # The fork-based acceptance + daemon e2e tests resolve <repo>/.riptide-fx-venv by path (no env
+        # needed). Without it they self-skip and the exec/fork + daemon paths go uncovered, so the gate
+        # would only measure the pure-logic core. fx_corpus imports numpy + pytest.
+        run: |
+          python -m venv .riptide-fx-venv
+          .riptide-fx-venv/bin/pip install --upgrade pip
+          .riptide-fx-venv/bin/pip install numpy pytest
+      - name: Coverage gate (engine workspace, line >= 88)
+        working-directory: engine
+        # Exclude binary glue with no logic from the denominator: main.rs (CLI entry / arg dispatch) and
+        # socket.rs (the Unix-socket serve loop — a killed-process path that can't flush its profile,
+        # the analogue of the previous watcher.rs exclusion). Everything else — including the exec/fork +
+        # daemon live paths, covered because the venv is provisioned above — is measured. Local baseline
+        # ~91% lines; the gate sits at 88 for headroom.
+        run: cargo llvm-cov --workspace --ignore-filename-regex '(main|socket)\.rs' --fail-under-lines 88

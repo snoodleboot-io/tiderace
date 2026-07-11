@@ -1,0 +1,13 @@
+[package]
+name = "engine-cli"
+description = "Pure-Rust Python test engine — thin CLI front-end over engine-core."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "riptide"
+path = "src/main.rs"
+
+[dependencies]
+engine-core = { path = "../engine-core" }

@@ -1,136 +1,135 @@
 # Quick Start
 
-## Your First Run
+This walks you from a fresh build to the warm inner loop in a few minutes. tiderace is a
+**pure-Rust test engine** — it runs your Python tests directly, with **no pytest at runtime**.
 
-Point tiderace at your test directory. It will discover all `test_*.py` and `*_test.py` files automatically:
+!!! info "Naming"
+    The product is **tiderace**. The engine binaries currently build as `riptide` and
+    `riptide-daemon` (a retired codename being consolidated under tiderace) — read them as
+    tiderace. The legacy `tiderace` binary that orchestrated pytest is the previous generation.
 
-```bash
-tiderace tests/
-```
+## 1. Build the engine
 
-On the first run, tiderace:
-
-1. Collects all tests via fast regex-based scanning
-2. Hashes every `.py` file in the project
-3. Runs all tests in parallel
-4. Stores results and file hashes in `.tiderace.db`
-
-```
-  ✓ collected 47 tests
-  ⚡ no previous state — running all tests
-
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    tiderace ⚡ Rust-powered test engine
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    tests: 47   skipped (unchanged): 0   workers: 8   coverage: off
-
-  ✓ [1/47] tests/test_auth.py::test_login 312ms
-  ✓ [2/47] tests/test_auth.py::test_logout 289ms
-  ...
-```
-
-## Second Run (No Changes)
-
-Run again without changing anything:
+tiderace builds from source from the `engine/` Cargo workspace. You need a Rust toolchain and a
+Python 3.12+ interpreter (the engine uses CPython's `sys.monitoring` for coverage).
 
 ```bash
-tiderace tests/
+git clone https://github.com/snoodleboot-io/tiderace
+cd tiderace/engine
+cargo build --release
 ```
 
-```
-  ✓ collected 47 tests
-  ⚡ no files changed
-  ⚡ All tests skipped — no changes detected!
-```
+This produces two binaries under `engine/target/release/`:
 
-**Zero tests run. Instant feedback.** Skipping unchanged tests works with or without coverage.
+- `riptide` — one-shot CLI (`collect`, `run`).
+- `riptide-daemon` — the warm server (`run`, `run --all`, `serve`, `watch`, `bench`).
 
-## After Changing a Test File
+## 2. Point the engine at Python
 
-Edit a test file, then run again:
+The engine is **env-driven**. Two variables matter to start:
 
 ```bash
-tiderace tests/
+# Required: the Python shim the engine runs inside CPython (it imports your code & invokes bodies).
+export RIPTIDE_SHIM="$PWD/py-shim/shim.py"
+
+# Optional: the interpreter (defaults to python3). Use your project's venv if it has deps.
+export RIPTIDE_PYTHON="$(which python3)"
 ```
 
-```
-  ✓ collected 47 tests
-  ⚡ 1 file(s) changed:
-    tests/test_auth.py
+`RIPTIDE_SHIM` is mandatory — without it the binaries exit with an error. See
+[Configuration](configuration.md) for the full set of variables.
 
-  tests: 5   skipped (unchanged): 42   workers: 8
-```
+## 3. First run — everything executes
 
-A test is always re-run when its own test file changes (or when it never ran before, or previously failed/errored).
-
-## Source-Level Impact Needs Coverage
-
-Mapping a *source* edit (e.g. `src/auth.py`) to the specific tests that depend on it requires a coverage dependency graph. Build it by running once with `--coverage`:
+Point the daemon at your tests. The impact-aware `run` does a full pass the first time (there's no
+prior state to compare against), recording each test's coverage footprint:
 
 ```bash
-tiderace tests/ --coverage
+./target/release/riptide-daemon run /path/to/tests
 ```
 
-After the run a coverage report is printed and the dependency graph is stored. Now a source change re-runs only the affected tests:
+```
+12 ran, 0 cached, 12 total, 0 failing
+```
+
+Behind that line, tiderace:
+
+1. Collected your tests via fast regex scanning (Rust).
+2. Built the fixture closure per test (Rust).
+3. Launched a warm wellspring per core and ran every test through the
+   [isolation ladder](../design/architecture.md#the-isolation-ladder) — pure tests in-process, the
+   rest snapshot/restored, only opaque modules forked.
+4. Captured per-test coverage via `sys.monitoring` and persisted it to **`.riptide-state.json`**
+   (per-test deps + file content hashes).
+
+## 4. Second run — nothing changes, nothing runs
+
+Run the exact same command again without touching any files:
+
+```bash
+./target/release/riptide-daemon run /path/to/tests
+```
+
+```
+0 ran, 12 cached, 12 total, 0 failing
+```
+
+**Zero tests execute** — tiderace hashes the files, sees nothing changed, and serves the prior
+outcomes. With no changes the warm interpreter isn't even launched. This is the impact-skip path.
+
+## 5. After an edit — only impacted tests re-run
+
+Edit a test file or a source file it depends on, then run again:
 
 ```bash
 # edit src/auth.py, then:
-tiderace tests/
+./target/release/riptide-daemon run /path/to/tests
 ```
 
 ```
-  ✓ collected 47 tests
-  ⚡ 1 file(s) changed:
-    src/auth.py
-
-  tests: 8   skipped (unchanged): 39   workers: 8
+2 ran, 10 cached, 12 total, 0 failing
 ```
 
-Only the 8 tests whose recorded dependencies include `auth.py` are re-run.
+Only the tests whose recorded dependencies include the changed file re-execute. Impact analysis is
+**conservative**: a test is re-run when its own file changed, when a recorded dependency changed, or
+when it has no recorded footprint yet (e.g. the very first run).
 
-Without a coverage graph, tiderace cannot map a source edit to individual tests, so it is conservative: it re-runs every test that lacks recorded dependencies. **Run once with `--coverage` to unlock precise source-level impact analysis.**
+## 6. Force a full run
 
-```
-  Coverage
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  src/auth.py      [██████████] 100%  42/42
-  src/models.py    [████████░░]  83%  25/30
-  src/utils.py     [██████░░░░]  61%  11/18
-
-  Overall: 87.4%
-```
-
-## Common Commands
+When you want every test to execute regardless of state — a clean baseline, or a CI gate — use
+`run --all`:
 
 ```bash
-# Run with 8 parallel workers
-tiderace tests/ -n 8
-
-# Force run all tests regardless of changes
-tiderace tests/ --all
-
-# Collect and list all tests without running
-tiderace collect tests/
-
-# Reset state (next run will re-run everything)
-tiderace clear
-
-# Use a specific Python binary
-tiderace tests/ --python .venv/bin/python
+./target/release/riptide-daemon run /path/to/tests --all
 ```
 
-## Next Steps
+This runs the whole suite across the parallel pool. (`--all` opts out of the impact-skip and its
+coverage recording; use plain `run` to keep the dependency graph fresh.)
 
-- [Configuration](configuration.md) — customize patterns, workers, DB path
+## 7. The inner loop — `watch`
+
+For an editor loop, keep the interpreter warm and re-run only what each save impacts:
+
+```bash
+./target/release/riptide-daemon watch /path/to/tests
+```
+
+```
+watching /path/to/tests (Ctrl-C to stop)…
+src/auth.py: Ran(2)
+test_auth.py: Recollected(5)
+conftest.py: Recycled(12)
+```
+
+Each save classifies the change (source edit → re-run impacted; test file → re-collect; conftest →
+recycle the warm interpreter) and does the **minimum** work — millisecond feedback. `watch` keeps a
+long-lived warm process, so it's a **local-dev** tool; CI should use fresh `run` / `run --all`. See
+[Watch Mode](watch.md).
+
+## Next steps
+
+- [Configuration](configuration.md) — every environment variable and the `--all` flag
+- [Watch Mode](watch.md) — the warm inner loop in detail
+- [CI](ci.md) — safe vs fast modes, caching `.riptide-state.json`
 - [How impact analysis works](../design/impact-analysis.md)
-- [CI/CD setup](../guides/releases.md)
-
-## Benchmark It Yourself
-
-To compare tiderace against `pytest`, `pytest-xdist`, `pytest-testmon`, and `unittest` on a generated fixture suite, run the harness (results are written to `benchmarks/RESULTS.md`):
-
-```bash
-python benchmarks/run_benchmarks.py
-```
-
-Expect tiderace's cold full run to trail in-process pytest (subprocess-per-test, ~250ms each); its win is warm/impact runs that skip unchanged tests.
+- [Benchmarks](benchmarks.md) — run the comparison yourself

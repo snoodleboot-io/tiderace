@@ -1,11 +1,23 @@
 /target
 
-# tiderace runtime state
-.tiderace.db
-.tiderace-coverage/
+# tiderace engine runtime state
+.riptide-state.json
+.riptide-coverage/
 
-# Phase 1 benchmark environment (provisioned by Lane 0)
+# Conformance corpora: real third-party repos (anyio/click/flask/…) fetched locally for the
+# `riptide migrate` conformance harness. NEVER commit them — they carry their own licenses.
+conformance/vendor/
+
+# Benchmark / spike / fixture environments (provisioned by Lane 0)
 .tiderace-bench-venv/
+.riptide-spike-venv/
+.riptide-fx-venv/
+
+# pure-rust-test-engine build artifacts (sources ARE committed)
+spike/target/
+spike-inproc/target/
+engine/target/
+engine/crates/engine-inproc/target/
 
 # Session files are per-developer working state, not committed (see core-session.md)
 .prompticorn/sessions/
@@ -26,3 +38,4 @@ benchmarks/.hyperfine/
 
 # mkdocs build output
 /site/
+engine/crates/engine-inproc/Cargo.lock

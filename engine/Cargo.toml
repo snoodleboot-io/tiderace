@@ -1,0 +1,27 @@
+# Pure-Rust test engine workspace — the tiderace engine.
+#
+# Lives under engine/ (the earlier pytest-orchestrator crate that used to sit at the repo root has been
+# removed). See planning/current/pure-rust-test-engine/ and design/01-architecture.md for the layout.
+[workspace]
+resolver = "2"
+members = ["crates/engine-core", "crates/engine-cli", "crates/engine-daemon"]
+# ② in-process/FFI backend (ADR-E013): a separate optional crate that links libpython (PyO3). Excluded
+# from the default workspace build + the Windows CI job so the core engine stays dependency-free; built
+# explicitly with `PYO3_PYTHON=<python-with-libpython> cargo build --manifest-path crates/engine-inproc/Cargo.toml`.
+exclude = ["crates/engine-inproc"]
+
+[workspace.package]
+edition = "2021"
+version = "0.0.1"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+regex = "1"
+# FS watching for the warm daemon (Phase 6, ADR-E007). Same version the legacy crate already vendors.
+notify = "6.1.1"
+
+[profile.release]
+opt-level = 3

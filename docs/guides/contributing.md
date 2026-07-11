@@ -1,122 +1,128 @@
 # Development Setup
 
+tiderace's engine lives in the `engine/` Cargo workspace. This is where you build, test, and lint.
+
+!!! info "Naming"
+    The binaries currently build as `riptide` / `riptide-daemon` — a retired codename being
+    consolidated under tiderace. Read them as tiderace.
+
 ## Prerequisites
 
-- Rust 1.75+ (`rustup install stable`)
-- Python 3.8+
-- `pytest` and `coverage` (`pip install pytest coverage`)
+- **Rust toolchain** (stable) — `rustup install stable`.
+- **Python 3.12+** — required for the `sys.monitoring` coverage path and the shim proofs.
 
-## Clone and Build
+No pytest or coverage.py needed: tiderace is its own runner.
+
+## Clone and build
 
 ```bash
 git clone https://github.com/snoodleboot-io/tiderace
-cd tiderace
+cd tiderace/engine
 cargo build
 ```
 
-The debug binary is at `target/debug/tiderace`.
+Debug binaries land in `engine/target/release/` (or `engine/target/debug/` for `cargo build`):
+`riptide` (the CLI) and `riptide-daemon` (the warm server).
 
-## Run Tests
+## Run the tests
+
+The engine's logic is unit- and integration-tested in pure Rust (the `ShimTransport` seam lets the
+execution path run with no Python at all via a scripted test double):
 
 ```bash
-# Unit tests (pure Rust, no Python needed)
-cargo test --bins
+cd engine
 
-# Full suite incl. integration tests that run the real binary against temporary
-# Python projects. Point them at a Python that has pytest installed:
-TIDERACE_TEST_PYTHON=/path/to/python cargo test --all
+# Core engine: collection, fixtures, scheduler, exec, coverage, impact, cache
+cargo test -p engine-core
+
+# Daemon: impact-aware run, persistence, watch, RPC server
+cargo test -p engine-daemon
+
+# Everything
+cargo test
 ```
 
-Integration tests (`tests/cli.rs`) scaffold throwaway projects and exercise the genuine
-Rust → pytest → SQLite path. They **skip** (not fail) when no Python with pytest is found, so
-`cargo test` stays green on a machine without it.
-
-## Code Style
+## Lint & format
 
 ```bash
-cargo fmt        # format
 cargo clippy --all-targets -- -D warnings   # lint (warnings are errors in CI)
+cargo fmt                                    # format
 ```
 
 CI enforces both — PRs that fail `clippy` or `fmt` are blocked.
 
-## Coverage
+## Coverage gate
+
+CI gates line coverage of the engine workspace at **≥ 88%** (`cargo llvm-cov`). To reproduce locally
+you need `.riptide-fx-venv` at the repo root (numpy + pytest) so the fork/daemon live tests run rather
+than self-skip — otherwise the exec paths look uncovered:
 
 ```bash
-cargo install cargo-llvm-cov   # once
-TIDERACE_TEST_PYTHON=/path/to/python \
-  cargo llvm-cov --all --ignore-filename-regex 'watcher\.rs' --fail-under-lines 80
+python -m venv .riptide-fx-venv && .riptide-fx-venv/bin/pip install numpy pytest   # once, at repo root
+cd engine
+cargo llvm-cov --workspace --ignore-filename-regex '(main|socket)\.rs' --fail-under-lines 88
 ```
 
-`watcher.rs` is excluded because its blocking `notify` loop only runs inside a long-lived
-`tiderace watch` process that the test must kill — a killed process never flushes its coverage
-profile, so it's validated by an integration test instead of being counted.
+`main.rs` (CLI entry) and `socket.rs` (the socket serve loop) are excluded — binary glue with no logic
+that a killed process can't flush coverage for.
 
-## Mutation testing
+## The Python shim proofs
 
-Beyond line coverage, [`cargo-mutants`](https://mutants.rs) checks that the tests actually
-*catch* changes by mutating the source and confirming a test fails:
+The shim and the native authoring package carry standalone **proof scripts** that demonstrate
+specific behaviours (isolation tiers, purity, coverage, type-DI). They run directly with `python3`
+(3.12+) — no Rust, no test framework:
 
 ```bash
-cargo install cargo-mutants   # once
-TIDERACE_TEST_PYTHON=/path/to/python cargo mutants
+cd engine/py-riptide
+
+python3 proof_static_purity.py      # static AST impurity pre-filter
+python3 proof_snapshot_restore.py   # no-fork + restore isolation
+python3 proof_purity_guard.py       # purity verdict recording
+python3 proof_n6_coverage.py        # sys.monitoring coverage capture
+python3 proof_type_di.py            # native @provides / @uses type resolution
+# …other proof_*.py in the same directory
 ```
 
-Mutation runs are slow (they rebuild and re-test per mutant), so run them on the pure-logic
-modules while iterating rather than the whole crate:
+The shim itself is `engine/py-shim/shim.py` — the only code that runs inside CPython.
 
-```bash
-cargo mutants --file tiderace/collector.rs --file tiderace/impact.rs --file tiderace/runner.rs
-```
-
-A surviving mutant means a behaviour no test pins down — add a test for it.
-
-## Project Layout
+## Repository layout
 
 ```
 tiderace/
-├── tiderace/             # Rust source
-│   ├── main.rs          # CLI + orchestration (run/collect/clear/coverage/watch)
-│   ├── config.rs        # pyproject.toml [tool.tiderace]
-│   ├── collector.rs     # test discovery (functions, classes, unittest, async)
-│   ├── hasher.rs        # file fingerprinting
-│   ├── db.rs            # SQLite layer
-│   ├── impact.rs        # affected test selection
-│   ├── runner.rs        # batched/isolated execution + coverage contexts
-│   ├── pool.rs          # persistent warm worker pool (watch)
-│   ├── watcher.rs       # debounced file watching (notify)
-│   ├── worker.py        # embedded Python worker for the warm pool
-│   └── reporter.rs      # terminal output
-├── tests/cli.rs         # end-to-end integration tests
-├── benchmarks/          # fixture generator + comparison harness
-├── docs/                # MkDocs source — user docs + whole-system design
-├── planning/            # development planning (per-feature PRD/ADR/design)
-├── .github/workflows/   # CI · release · docs
-├── Cargo.toml
-└── mkdocs.yml
+├── engine/                 # the pure-Rust engine (build from here)
+│   ├── Cargo.toml          # workspace manifest
+│   ├── crates/
+│   │   ├── engine-core/    # collection · fixtures · scheduler · exec · coverage · impact · cache
+│   │   ├── engine-cli/     # → riptide (collect, run)
+│   │   ├── engine-daemon/  # → riptide-daemon (run, serve, watch, bench)
+│   │   └── engine-inproc/  # → inproc-probe (experimental embedded-CPython / FFI backend)
+│   ├── py-shim/            # shim.py — the execution substrate (import, invoke, isolate, coverage)
+│   └── py-riptide/         # native authoring pkg (riptide/) + proof_*.py + migrate
+├── benchmarks/             # bench_3way.sh, real_world.sh, RESULTS-*.md, fixtures/
+├── docs/                   # MkDocs source — user guides + whole-system design
+├── planning/               # per-feature planning (PRD / ADR / design)
+└── ARCHITECTURE.md         # the authoritative architecture reference
 ```
 
-## Branching Model
+## Branching model
 
 tiderace uses **trunk-based development**:
 
-- All work lands on `main` via short-lived branches (< 2 days)
-- No long-lived feature branches
-- Feature flags in code for in-progress work
-- `main` is always releasable
+- All work lands on `main` via short-lived branches.
+- No long-lived feature branches; `main` is always releasable.
 
-## Commit Convention
+## Commit convention
 
 Use [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
-feat: add pyproject.toml config support
+feat: add no-fork restore tier to the isolation ladder
 fix: handle empty test directories gracefully
-docs: update impact analysis design doc
-chore: bump rusqlite to 0.31.1
+docs: update impact-analysis design doc
+chore: bump pyo3 to 0.26
 ```
 
-The CI uses these to compute semantic version bumps automatically.
+CI uses these to compute semantic version bumps automatically.
 
 | Prefix | Version bump |
 |---|---|

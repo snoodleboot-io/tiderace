@@ -1,121 +1,91 @@
 # Module Design
 
-## `main.rs` — Entry point & orchestration
+tiderace is a Cargo workspace (`engine/`) of four Rust crates plus two Python packages. Trait seams
+between modules (ADR-E005) keep each boundary testable in isolation. This page walks the crates and
+their module directories; for the authoritative code map see
+[`ARCHITECTURE.md`](https://github.com/snoodleboot-io/tiderace/blob/main/ARCHITECTURE.md).
 
-Owns the CLI (`clap`) and wires the pipeline together. Subcommands: default run, `collect`,
-`clear`, `coverage`, and `watch`. Resolves effective settings with precedence **CLI flag >
-`pyproject.toml` > built-in default**, then drives collector → hasher → impact → runner →
-reporter. Intentionally thin — the glue, not the logic.
-
----
-
-## `config.rs` — Configuration
-
-Parses `[tool.tiderace]` from `pyproject.toml`. Every key is optional; unknown keys are
-rejected so typos surface. Keys: `workers`, `python`, `coverage`, `isolate`, `pattern`, `db`,
-`paths`, `timeout`.
-
----
-
-## `collector.rs` — Test discovery
-
-Regex scan of Python sources — no interpreter needed. Recognises:
-
-- top-level `def test_*` and `async def test_*`
-- `class Test*` methods (pytest convention)
-- `unittest.TestCase` subclasses **by base class**, regardless of name
-- methods of non-test classes are correctly skipped
-
-```rust
-pub struct TestItem {
-    pub test_id: String,        // pytest node id
-    pub file_path: String,
-    pub function_name: String,
-    pub class_name: Option<String>,
-}
+```mermaid
+flowchart TB
+    RIP["riptide<br/>(engine-cli)"] --> CORE
+    DAE["riptide-daemon<br/>(engine-daemon)"] --> CORE
+    PROBE["inproc-probe<br/>(engine-inproc) ②"] --> CORE
+    CORE["engine-core (the engine library)"] -->|frames| SHIM["py-shim/shim.py"]
+    AUTH["py-riptide/riptide<br/>(authoring)"] -.imported by.-> SHIM
 ```
 
-Parametrized tests are collected as their base node id; pytest expands them at runtime and the
-runner aggregates the `node_id[param]` cases back together.
+## `engine-core` — the engine library
 
----
+All collection, graph, schedule, exec, coverage, impact, and cache logic. Module directories
+(`engine-core/src/`):
 
-## `hasher.rs` — File fingerprinting
+- **`collection`** — `RegexCollector` (`regex_collector.rs`) discovers test files and node ids by
+  fast regex scan; no interpreter, no `--collect-only`. Behind the `Collector` trait.
+- **`fixtures`** — the `FixtureGraph` (`fixture_graph.rs`) and resolvers (`fixture_resolver.rs`,
+  `layered_resolver.rs`): build each test's fixture **closure** across scopes, with `override_table`,
+  `finalizer` ordering, `param_value`/`fixture_args` parametrization, and `closure_hash` (a fixture
+  closure's identity, used as a cache-key input).
+- **`scheduler`** — `LocalityScheduler` (`locality_scheduler.rs`, ADR-E010): groups a module's tests
+  together (scope locality) and LPT-balances them into `WorkerBatch`es (`worker_batch.rs`) across N
+  workers. `round_robin_scheduler.rs` is a simpler baseline; both behind the `Scheduler` trait.
+- **`coverage`** — `DepGraph` (`dep_graph.rs`) and `CoverageReport` (`coverage_report.rs`): the
+  per-test executed-source footprint captured via `sys.monitoring` (ADR-E006), keyed by `file_lines`.
+- **`impact`** — `ImpactAnalyzer` (`impact_analyzer.rs`), `Change`, and `Selection`: from the dep
+  graph + changed files, select the tests that must run.
+- **`cache`** — the content-addressed result cache (ADR-E004): `CacheKey`/`CacheKeyBuilder`, the
+  `Cache` trait, `TieredCache` (local + optional remote), `LocalCache`, `NullCache`, `CachedOutcome`,
+  and `purity` (`Purity::is_cacheable` — the soundness gate that excludes impure outcomes).
+- **`exec`** — execution: `Wellspring` (`wellspring.rs`) imports the project once and forks per test;
+  `ForkWorker`, `SubprocessWorker`, the `Worker` trait and `WorkerCaps`; `WatermarkStack`
+  (`watermark_stack.rs`) tracks fixture setup/teardown across scopes so finalizers fire in order;
+  the `ShimTransport` seam (`transport.rs` — `PipeTransport`, `ReadyInfo`) and the wire types
+  (`shim_protocol.rs` — `ExecRequest`/`ExecResponse`, `read_frame`/`write_frame`); plus
+  `fork_permit`, `fork_plan`, and `memory_governor` for fork admission/back-pressure.
+- **`domain`** — the shared vocabulary: `NodeId`, `Scope`/`ScopePath`, `Outcome`, `TestItem`,
+  `TestResult`, `TestStyle`, `RunReport`.
+- **`hooks`** — `HookHost` + `HookEvent`/`Hook`/`Priority`: an in-engine event/plugin seam.
+- **`reporter`** — the `Reporter` trait with `terminal`, `json`, `junit_xml`, `github`, and `sarif`
+  backends.
 
-- `hash_file(path)` → SHA-256 hex
-- `hash_all_python_files(root)` → `HashMap<path, hash>` (leading `./` normalized so keys match
-  the collector and coverage)
-- `find_changed_files(current, db)` / `save_hashes(...)`
+## `engine-daemon` — the warm server
 
-Skips `.git`, `__pycache__`, `.venv`, `venv`, `node_modules`.
+Keeps CPython warm and adds impact-aware, parallel, file-watching execution. The `riptide-daemon`
+binary (`main.rs`). Module files (`engine-daemon/src/`):
 
----
+- **`engine_handler.rs`** — orchestrates a run: collect → graph → schedule → execute; chooses no-fork
+  + restore by default (`optimistic_no_fork()` unless `RIPTIDE_FORCE_FORK=1`) and drives impact-aware
+  re-runs (`run_impacted`).
+- **`pool.rs`** — the parallel pool: one warm `Wellspring` per core, fed `WorkerBatch`es from the
+  `LocalityScheduler`.
+- **`persist.rs`** — `.riptide-state.json` (`PersistedState`, `changed_files()`, `plan()`); the active
+  impact-skip layer (see [state & cache](database.md)).
+- **`watch.rs` / `fs_watcher.rs` / `invalidator.rs`** — `watch` mode: debounced filesystem events feed
+  the invalidator, which uses the dep graph to re-run only impacted tests on each save.
+- **`rpc_server.rs` / `socket.rs` / `session.rs` / `rpc_method.rs`** — `serve` mode: a per-project Unix
+  socket answering RPC (`Discover`, `Run`, `Health`, `Recycle`, `Shutdown`) over a persistent warm
+  session.
 
-## `db.rs` — Persistence
+## `engine-cli` — the one-shot CLI
 
-Wraps `rusqlite::Connection`; inline SQL, no ORM. `save_file_hash`/`get_file_hash`,
-`save_test_result`/`get_last_result`, `save_test_deps`/`get_test_deps`,
-`save_coverage`/`get_coverage`. All writes use `INSERT OR REPLACE`.
+The `riptide` binary (`main.rs`): one-shot `collect` and `run`. Reads `RIPTIDE_SHIM` (path to
+`py-shim/shim.py`, required) and `RIPTIDE_PYTHON` (default `python3`).
 
----
+## `engine-inproc` — the in-process backend (②, experimental)
 
-## `impact.rs` — Affected-test selection
+The `inproc-probe` binary (`main.rs`) and `InProcessTransport`: one embedded CPython driven by PyO3
+FFI — no subprocess, no pipe — proving the `ShimTransport` seam (ADR-E011/E013). A research path toward
+import-once + parallel fork; not the production path.
 
-```rust
-pub struct ImpactAnalyzer<'a> {
-    db: &'a Database,
-    changed_files: Vec<String>,
-    test_files: HashSet<String>,   // tells test-file vs source-file changes apart
-}
-```
+## `py-shim/shim.py` — the execution substrate
 
-A test runs if: its own file changed; it never ran before; a recorded dependency changed; or
-it previously failed/errored. With **no** dependency graph, any *source* change re-runs it
-conservatively. No changes at all → everything skips. ([ADR-007](decisions.md))
+The only logic that runs inside CPython. Imports user code, invokes test bodies, and implements the
+**isolation ladder**: `static_impurity` (AST pre-filter), `_restorable` (can this module be snapshot
++ restored?), `_restore_shared` (snapshot/undo of module globals + `os.environ`), and `Engine.run`
+(picks bare no-fork / no-fork + restore / `os.fork()`). It also captures coverage via `sys.monitoring`
+and records purity verdicts. Reads `RIPTIDE_COVERAGE`, `RIPTIDE_RESTORE`, `RIPTIDE_FORCE_FORK`.
 
----
+## `py-riptide/riptide` — native authoring & migration
 
-## `runner.rs` — Execution
-
-```rust
-pub struct Runner {
-    pub workers: usize,
-    pub python_bin: String,
-    pub with_coverage: bool,
-    pub coverage_dir: PathBuf,
-    pub timeout: Duration,
-    pub isolate: bool,
-}
-```
-
-- **Batched** (default): one `pytest -rA` process per worker; per-test status parsed from the
-  summary and aggregated across parametrized `node_id[param]` cases. Per-test timeout, `--`
-  argument-injection guard, bounded output capture.
-- **Isolated** (`--isolate`): one process per test (exit-code status).
-- **Coverage**: batched under `coverage run` with `dynamic_context = test_function`; deps
-  extracted from `coverage json --show-contexts` and matched by node-id suffix
-  ([ADR-011](decisions.md)).
-
----
-
-## `pool.rs` + `worker.py` — Warm worker pool
-
-`pool.rs` manages long-lived `worker.py` processes (embedded in the binary) that import pytest
-once and run node ids over newline-delimited JSON. Per-request timeout → kill + respawn;
-crash detection via stdout EOF; a dedicated reader thread per worker avoids pipe deadlock.
-`worker.py` evicts changed first-party modules from `sys.modules` before each run so a warm
-re-run never executes stale code. Powers `tiderace watch`.
-
----
-
-## `watcher.rs` — File watching
-
-Debounced recursive watch via `notify` + `notify-debouncer-full` (rename-aware), yielding a
-deduplicated batch of changed `.py` paths and ignoring artifact dirs and tiderace's own state.
-
----
-
-## `reporter.rs` — Terminal output
-
-`print_header`, `print_progress`, `print_summary`, coverage report. Uses `colored` (respects
-`NO_COLOR`).
+The optional native authoring package (ADR-E012): `@provides` / `@cases` / `@uses` type-DI decorators
+(`builtins`, `_resolve.py`, `_spec.py`), and `migrate.py` — the `riptide migrate` AST codemod that
+rewrites a pytest suite to the native model. Lets a suite drop the pytest dependency entirely.
