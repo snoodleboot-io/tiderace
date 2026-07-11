@@ -62,8 +62,10 @@ stored behind the `Cache` trait. Production wires a `TieredCache(Local, Remote)`
   run**.
 
 `LocalCache`, `NullCache` (for `--no-cache` / debugging), and `CachedOutcome` round out the module.
-The **remote backend is the main unbuilt piece** — the key, types, tiering, and seam exist; the
-HTTP/object-store client is the follow-on.
+The shareable **remote tier is `DirCache`** — a directory of content-hashed JSON entries (`<hex>.json`),
+so pointing it at a CI cache path / shared mount / artifact makes a result computed on one machine a free
+hit on any other. An HTTP/object-store client is a drop-in behind the same `Cache` trait. Wiring the
+cache into the daemon's run loop is the remaining step.
 
 ## Two layers, one idea
 

@@ -6,8 +6,8 @@
 //! the **executed-source closure from coverage** ([`crate::coverage`]), not a static guess, which is
 //! what makes the cache *sound*. Impure tests are never silently cached ([`Purity`]).
 //!
-//! Seams (ADR-E005): the [`Cache`] trait with [`LocalCache`] + [`TieredCache`] for CI sharing and
-//! [`NullCache`] for debugging. One type per file.
+//! Seams (ADR-E005): the [`Cache`] trait with [`LocalCache`] + [`TieredCache`] for CI sharing (backed
+//! by a shareable [`DirCache`] remote tier) and [`NullCache`] for debugging. One type per file.
 //!
 //! Orchestrator preference order (ADR-E004): **cache hit → impact-skip → run**.
 
@@ -16,6 +16,7 @@
 mod cache;
 mod cache_key;
 mod cached_outcome;
+mod dir_cache;
 mod local_cache;
 mod null_cache;
 mod purity;
@@ -24,6 +25,7 @@ mod tiered_cache;
 pub use cache::Cache;
 pub use cache_key::{CacheKey, CacheKeyBuilder};
 pub use cached_outcome::CachedOutcome;
+pub use dir_cache::DirCache;
 pub use local_cache::LocalCache;
 pub use null_cache::NullCache;
 pub use purity::{NoSandbox, Purity, SandboxHooks};

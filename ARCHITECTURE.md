@@ -308,8 +308,10 @@ Two complementary layers:
 - **Content-addressed cache (`engine-core/cache`, ADR-E004).** The cross-machine layer: a test's outcome
   keyed by its full input closure (`CacheKey`), in a `TieredCache(Local, Remote)`. A cache *hit* means the
   test is never run — and because the key is content-addressed, a result CI computed is reusable on any
-  machine with the same inputs. The `purity` gate excludes nondeterministic tests from caching. (The
-  remote backend is the main unbuilt piece; the types, key, and seam exist.)
+  machine with the same inputs. The `purity` gate excludes nondeterministic tests from caching. The remote
+  tier is a shareable **`DirCache`** (a directory: a CI cache path / shared mount / artifact); an HTTP or
+  object-store client is a drop-in behind the same `Cache` trait. Wiring the cache into the daemon's run
+  loop (cache hit → impact-skip → run) is the remaining step (tracked by TID-7).
 
 ---
 

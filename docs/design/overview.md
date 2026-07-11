@@ -68,8 +68,9 @@ Two complementary layers exploit it:
 - **Content-addressed cache** (`engine-core/cache`, ADR-E004): a test's outcome keyed by its full
   input closure (`CacheKey`) in a `TieredCache(Local, Remote)`. Because the key is content-addressed,
   a result CI computed is reusable on any machine with the same inputs — a *build system for tests*.
-  A `purity` gate keeps nondeterministic outcomes out of the cache. The remote backend is the main
-  unbuilt piece; the key, types, and seam exist.
+  A `purity` gate keeps nondeterministic outcomes out of the cache. The shareable remote tier is a
+  `DirCache` (a directory / CI cache path / shared mount); wiring it into the daemon run loop is the
+  remaining step.
 
 ---
 
