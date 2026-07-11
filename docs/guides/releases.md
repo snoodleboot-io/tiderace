@@ -1,32 +1,44 @@
 # Release Process
 
-tiderace uses **trunk-based development** with **semantic versioning**. Releases are automated via
-CI — developers never manually tag or bump versions.
+tiderace uses **trunk-based development** with **semantic versioning**. A release is cut by pushing a
+version tag; CI then builds and publishes the binaries.
 
 !!! info "Naming"
     The binaries currently build as `riptide` / `riptide-daemon` from the `engine/` workspace — a
     retired codename being consolidated under tiderace. Read them as tiderace.
 
-## Version rules
+## Versioning
 
-| Change type | Who can trigger | Version bump |
-|---|---|---|
-| Bug fix, docs, perf | Any PR | patch `0.0.x` |
-| New feature (backwards compatible) | Any PR | minor `0.x.0` |
-| Breaking change | **CI only** (via `BREAKING_CHANGE=true` env) | major `x.0.0` |
+Versions follow semver (`MAJOR.MINOR.PATCH`):
 
-**Major version bumps never happen from a developer's local machine.** The `BREAKING_CHANGE` gate is
-enforced exclusively in the release workflow.
+| Change | Bump |
+|---|---|
+| Bug fix, docs, perf | patch `0.0.x` |
+| New, backwards-compatible feature | minor `0.x.0` |
+| Breaking change | major `x.0.0` |
+
+## Cutting a release
+
+Releases are triggered by a **version tag**, not by a push to `main`:
+
+```bash
+git tag v0.2.0          # the semver for everything since the last tag
+git push origin v0.2.0  # → triggers .github/workflows/release.yml
+```
+
+`release.yml` (also runnable manually via **workflow_dispatch**) then:
+
+1. builds `riptide` and `riptide-daemon` from the `engine/` workspace (`cargo build --release`),
+2. stages them as `riptide-linux-x86_64` / `riptide-daemon-linux-x86_64` with a `sha256sums.txt`,
+3. uploads them as a build artifact and — on a tag push — **attaches them to the GitHub Release**.
 
 ## Workflow overview
 
 ```mermaid
 flowchart TD
-    PUSH["developer push → main"] --> CI1["CI: test + lint (engine/ workspace)"]
-    CI1 --> CI2["CI: compute next semver from commits"]
-    CI2 --> CI3["CI: build binaries<br/>riptide · riptide-daemon (engine/target/release)"]
-    CI3 --> CI4["CI: create GitHub Release + upload binaries"]
-    CI4 --> CI5["CI: publish docs to GitHub Pages"]
+    PUSH["push / PR → main"] --> CI["ci.yml: build · lint · test · coverage<br/>(engine/ workspace, linux + windows)"]
+    PUSH --> DOCS["docs.yml: build + deploy the MkDocs site"]
+    TAG["push tag v*"] --> REL["release.yml: build riptide · riptide-daemon<br/>→ attach to the GitHub Release"]
 ```
 
 ## CI workflows
@@ -35,29 +47,15 @@ See `.github/workflows/` for the full definitions:
 
 | File | Trigger | Purpose |
 |---|---|---|
-| `ci.yml` | Push to any branch, PRs | Build, test, clippy, fmt over the `engine/` workspace |
-| `release.yml` | Push to `main` | Semver compute, build binaries, publish release |
-| `docs.yml` | Push to `main` | Build and deploy the MkDocs site |
-| `security.yml` | Schedule (weekly) | `cargo audit` dependency scan |
-
-The release build compiles from the `engine/` Cargo workspace and ships the two binaries
-(`riptide`, `riptide-daemon`) from `engine/target/release/`.
+| `ci.yml` | Push to `main`, PRs | Build · clippy · fmt · test + the coverage gate over the `engine/` workspace (linux + windows) |
+| `release.yml` | Tag push (`v*`) or manual dispatch | Build the `riptide` / `riptide-daemon` binaries and attach them to the GitHub Release |
+| `docs.yml` | Push to `main` (docs paths) | Build and deploy the MkDocs site to GitHub Pages |
 
 ## Caching in CI
 
-Release and test workflows cache **`.riptide-state.json`** (impact-analysis state) between runs,
-keyed on branch name, so CI gets the same impact-analysis benefit as local development — only
-changed-file tests re-run between commits on the same branch:
+The project's workflows cache the **Cargo** registry, git dependencies, and `engine/target` (keyed on
+`engine/Cargo.lock`) so builds stay fast — that's the only thing they cache.
 
-```yaml
-- uses: actions/cache@v4
-  with:
-    path: .riptide-state.json
-    key: tiderace-state-${{ github.ref_name }}-${{ hashFiles('tests/**') }}
-    restore-keys: |
-      tiderace-state-${{ github.ref_name }}-
-      tiderace-state-main-
-```
-
-A stale or missing cache just produces a full run — never an incorrect result. See [CI](ci.md) for
-the safe-vs-fast run modes.
+Caching **`.riptide-state.json`** (impact-analysis state) is a pattern for running tiderace *in your
+own project's CI* to skip unchanged tests — see [CI](ci.md). It doesn't apply to this pipeline, which
+builds and tests the engine itself rather than running a downstream suite through the daemon.
