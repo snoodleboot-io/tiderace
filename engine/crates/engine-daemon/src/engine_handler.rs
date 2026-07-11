@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
+use engine_core::cache::{Cache, CacheKey, CacheKeyBuilder, CachedOutcome, DirCache};
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestItem, TestResult};
 use engine_core::exec::{ForkWorker, Worker};
@@ -26,6 +27,10 @@ pub struct EngineHandler {
     shim: PathBuf,
     root: PathBuf,
     worker: Option<ForkWorker>, // warm wellspring, kept alive across Run requests
+    /// Content-addressed result cache (ADR-E004, TID-7). Enabled by `RIPTIDE_CACHE_DIR` pointing at a
+    /// directory (a CI cache path / shared mount), which makes a result computed on one machine a free
+    /// hit on any other with the same inputs. `None` ⇒ cache off (impact-skip only).
+    cache: Option<DirCache>,
 }
 
 impl EngineHandler {
@@ -34,11 +39,16 @@ impl EngineHandler {
         shim: impl Into<PathBuf>,
         root: impl Into<PathBuf>,
     ) -> Self {
+        let cache = std::env::var("RIPTIDE_CACHE_DIR")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(DirCache::new);
         Self {
             python: python.into(),
             shim: shim.into(),
             root: root.into(),
             worker: None,
+            cache,
         }
     }
 
@@ -171,9 +181,9 @@ impl EngineHandler {
         let current = self.hash_known_files(&state);
         let changed = changed_files(&state, &current);
         let p = plan(&state, &candidates, &changed);
-        let (ran_count, cached_count) = (p.to_run.len(), p.cached.len());
+        let cached_count = p.cached.len();
 
-        // Serve cached tests from the persisted record (no execution).
+        // impact-skip: serve locally-unchanged tests from the persisted record (no execution).
         let mut results: Vec<RpcResult> = p
             .cached
             .iter()
@@ -186,15 +196,74 @@ impl EngineHandler {
             })
             .collect();
 
-        // Execute only the impacted tests (skip the wellspring launch entirely if none), in parallel.
-        // Impacted tests are stale (their deps changed), so we don't trust a prior purity verdict — they
-        // run under restore, which re-measures the verdict that persist_results then records.
+        // Preference order (ADR-E004): **cache hit → impact-skip → run**. impact-skip handled the
+        // locally-unchanged set above; for the impacted set, consult the content-addressed cache before
+        // executing — a test whose exact inputs were already computed elsewhere (e.g. CI populated the
+        // shared `RIPTIDE_CACHE_DIR`) is served without running, even though this machine's local state
+        // was stale.
+        let mut executed = 0usize;
+        let mut cache_served = 0usize;
         if !p.to_run.is_empty() {
-            let fresh = self.run_items_parallel(&p.to_run, &HashSet::new())?;
-            for r in &fresh {
-                results.push(to_rpc(r.clone()));
+            let py_ver = self.python_version();
+
+            let mut hits: Vec<(String, CachedOutcome, Vec<String>)> = Vec::new();
+            let mut to_execute: Vec<String> = Vec::new();
+            for node in &p.to_run {
+                let served = self.cache.as_ref().and_then(|cache| {
+                    let deps = state.tests.get(node)?.deps.clone();
+                    let key = self.cache_key(node, &deps, &py_ver)?;
+                    cache.get(&key).map(|o| (o, deps))
+                });
+                match served {
+                    Some((outcome, deps)) => hits.push((node.clone(), outcome, deps)),
+                    None => to_execute.push(node.clone()),
+                }
             }
-            self.persist_results(&mut state, &fresh);
+            cache_served = hits.len();
+
+            // Serve cache hits and refresh their local record so impact-skip serves them next time too.
+            // (Only pure outcomes are ever cached — see the `put` below — so `pure: Some(true)` holds.)
+            for (node, outcome, deps) in hits {
+                results.push(RpcResult {
+                    node_id: node.clone(),
+                    outcome: outcome_token(outcome.outcome()).to_string(),
+                    duration_ms: 0,
+                });
+                state.tests.insert(
+                    node,
+                    TestRecord {
+                        outcome: outcome_token(outcome.outcome()).to_string(),
+                        detail: outcome.detail().to_string(),
+                        deps,
+                        pure: Some(true),
+                    },
+                );
+            }
+
+            // Run the cache misses (stale purity ⇒ no trusted-pure; restore re-measures the verdict).
+            if !to_execute.is_empty() {
+                executed = to_execute.len();
+                let fresh = self.run_items_parallel(&to_execute, &HashSet::new())?;
+                for r in &fresh {
+                    results.push(to_rpc(r.clone()));
+                }
+                self.persist_results(&mut state, &fresh);
+                // Populate the shared cache with fresh **pure** outcomes (impure is never cached —
+                // ADR-E004 soundness). The key is the executed-source closure from this run's coverage.
+                if let Some(cache) = &self.cache {
+                    for r in &fresh {
+                        if r.pure == Some(true) {
+                            if let Some(key) =
+                                self.cache_key(&r.node_id.to_string(), &r.touched_files, &py_ver)
+                            {
+                                cache.put(&key, CachedOutcome::new(r.outcome, r.detail.clone()));
+                            }
+                        }
+                    }
+                }
+            } else {
+                self.rebaseline_hashes(&mut state); // cache-hit-only: keep file hashes current
+            }
             state
                 .save(&state_path)
                 .map_err(|e| format!("state save failed: {e}"))?;
@@ -202,8 +271,8 @@ impl EngineHandler {
 
         Ok(ImpactSummary {
             results,
-            ran: ran_count,
-            cached: cached_count,
+            ran: executed,
+            cached: cached_count + cache_served,
         })
     }
 
@@ -235,6 +304,56 @@ impl EngineHandler {
             Ok(bytes) => hex(&content_hash(&bytes)),
             Err(_) => "missing".to_string(),
         }
+    }
+
+    /// The platform term for the cache key — partitions the cache across OS/arch so a result never
+    /// crosses platforms (ADR-E004 invalidation).
+    fn platform() -> String {
+        format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+    }
+
+    /// The interpreter's version (e.g. `"3.12.4"`), a cache-key term so a result computed under one
+    /// Python is never served under another. Best-effort — `"unknown"` on failure (still consistent
+    /// within a machine, just coarser sharing). Queried once per `run_impacted` (a single subprocess).
+    fn python_version(&self) -> String {
+        std::process::Command::new(&self.python)
+            .arg("--version")
+            .output()
+            .ok()
+            .map(|o| {
+                let out = if o.stdout.is_empty() {
+                    o.stderr
+                } else {
+                    o.stdout
+                };
+                String::from_utf8_lossy(&out)
+                    .split_whitespace()
+                    .last()
+                    .unwrap_or("unknown")
+                    .to_string()
+            })
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// The content-addressed [`CacheKey`] for `node` over `deps`' **current** content, or `None` if
+    /// `deps` is empty (no recorded footprint ⇒ not soundly cacheable) or any dep is unreadable. Built
+    /// the same way for `get` and `put`, so a hit ⟺ the executed-source closure is byte-identical to
+    /// when the outcome was produced.
+    fn cache_key(&self, node: &str, deps: &[String], py_version: &str) -> Option<CacheKey> {
+        if deps.is_empty() {
+            return None;
+        }
+        let mut b = CacheKeyBuilder::new(
+            node,
+            env!("CARGO_PKG_VERSION"),
+            py_version,
+            Self::platform(),
+        );
+        for dep in deps {
+            let bytes = std::fs::read(self.root.join(dep)).ok()?; // unreadable dep ⇒ no sound key
+            b.executed_source(dep.clone(), content_hash(&bytes));
+        }
+        Some(b.finish())
     }
 }
 
@@ -302,5 +421,66 @@ fn outcome_token(outcome: Outcome) -> &'static str {
         Outcome::XFail => "xfail",
         Outcome::XPass => "xpass",
         Outcome::Error => "error",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("riptide_ck_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn cache_key_is_deterministic_node_python_and_content_sensitive() {
+        let dir = temp("sens");
+        std::fs::write(dir.join("src.py"), b"x = 1").unwrap();
+        let h = EngineHandler::new("python3", "shim.py", dir.clone());
+        let deps = vec!["src.py".to_string()];
+
+        let k = h.cache_key("t.py::a", &deps, "3.12").unwrap();
+        assert_eq!(
+            k,
+            h.cache_key("t.py::a", &deps, "3.12").unwrap(),
+            "same inputs → same key"
+        );
+        assert_ne!(
+            k,
+            h.cache_key("t.py::b", &deps, "3.12").unwrap(),
+            "node partitions the key"
+        );
+        assert_ne!(
+            k,
+            h.cache_key("t.py::a", &deps, "3.13").unwrap(),
+            "python version partitions the key"
+        );
+
+        std::fs::write(dir.join("src.py"), b"x = 2").unwrap();
+        assert_ne!(
+            k,
+            h.cache_key("t.py::a", &deps, "3.12").unwrap(),
+            "a content change misses the cache"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_key_none_when_unsound() {
+        let dir = temp("unsound");
+        let h = EngineHandler::new("python3", "shim.py", dir.clone());
+        assert!(
+            h.cache_key("t.py::a", &[], "3.12").is_none(),
+            "no recorded deps → no sound key"
+        );
+        assert!(
+            h.cache_key("t.py::a", &["missing.py".to_string()], "3.12")
+                .is_none(),
+            "an unreadable dep → no key (run instead)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

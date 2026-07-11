@@ -17,6 +17,7 @@ child). There is exactly one command-line flag — `--all` — on the daemon's `
 | `RIPTIDE_COVERAGE` | off | Record per-test coverage via `sys.monitoring`. The daemon **sets this automatically** for impact-aware `run` (it needs the footprint to know what to skip next time). Set it yourself only for ad-hoc coverage. |
 | `RIPTIDE_RESTORE` | set by daemon | Enables the no-fork + snapshot/restore isolation path. The daemon sets `RIPTIDE_RESTORE=1` on every mode — it's the **default** execution model, not an opt-in. Nothing to choose. |
 | `RIPTIDE_FORCE_FORK` | off | **Debug / benchmark only.** Reverts to `fork()`-per-test isolation, bypassing the no-fork ladder. Use it to A/B the ladder or chase an isolation bug — not in normal use. |
+| `RIPTIDE_CACHE_DIR` | off | Directory for the **content-addressed result cache** (ADR-E004). Point it at a CI cache path / shared mount / artifact dir and a *pure* test's outcome computed on one machine is served without re-running on any other with the same inputs — even when local impact state is stale. Off ⇒ impact-skip only. |
 | `RIPTIDE_SOCKET` | `<tmp>/riptide-daemon.sock` | `serve` mode: the Unix socket path the RPC server binds. |
 
 ```bash
