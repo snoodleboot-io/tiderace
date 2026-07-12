@@ -1278,6 +1278,47 @@ def _preimport(root: str) -> None:
                     pass
 
 
+def _probe_module_safe(module_key: str, paths: list) -> dict:
+    """Sub-interpreter safety probe (ADR-E015, TID-9). Import the module (and thus its transitive
+    closure) in a **fresh isolated sub-interpreter** (`concurrent.interpreters`, PEP 734 / per-interpreter
+    GIL); if it loads there the module is *safe* to run on the sub-interpreter tier, otherwise not (e.g.
+    a single-phase-init C-extension like numpy: `... does not support loading in subinterpreters`).
+    Reports `safe=None` when the API is unavailable (< CPython 3.14) so the caller falls back."""
+    module_name = _module_name(module_key)
+    try:
+        from concurrent import interpreters
+    except Exception:  # noqa: BLE001 — no sub-interpreter API ⇒ undeterminable, caller falls back to fork
+        return {"module": module_key, "safe": None, "reason": "concurrent.interpreters unavailable (CPython < 3.14)"}
+    interp = interpreters.create()
+    try:
+        interp.exec("import sys\nsys.path[:0] = %r\nimport %s\n" % (paths, module_name))
+        return {"module": module_key, "safe": True}
+    except Exception as exc:  # noqa: BLE001 — an import failure in the sub-interp ⇒ unsafe (the point)
+        text = str(exc).strip()
+        reason = text.splitlines()[-1][:200] if text else type(exc).__name__
+        return {"module": module_key, "safe": False, "reason": reason}
+    finally:
+        try:
+            interp.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def probe() -> int:
+    """`--probe` mode: classify each requested module as sub-interpreter-safe (ADR-E015 detection).
+    Same framed pipe as `serve`: reads `{"module": "<rel/path.py>"}` frames, replies
+    `{"module", "safe": true|false|null, "reason"?}`. No tests run — this only decides eligibility."""
+    root = sys.argv[1]
+    sys.path.insert(0, root)
+    paths = list(sys.path)  # the sub-interpreter inherits the same import roots (root + site-packages + …)
+    _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
+    while True:
+        req = _read_frame(_STDIN)
+        if req is None:
+            return 0
+        _write_frame(_STDOUT, _probe_module_safe(req["module"], paths))
+
+
 def serve() -> int:
     root = sys.argv[1]
     no_fork = "--no-fork" in sys.argv[2:]
@@ -1305,4 +1346,4 @@ def serve() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(serve())
+    sys.exit(probe() if "--probe" in sys.argv[2:] else serve())

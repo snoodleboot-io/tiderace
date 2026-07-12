@@ -47,6 +47,13 @@ fn main() -> ExitCode {
     // tests in-process and undoes their mutation, and the shim forks any non-restorable (opaque) module
     // for soundness. Wellsprings inherit this env. Nothing for the user to choose.
     std::env::set_var("RIPTIDE_RESTORE", "1");
+
+    // `probe` classifies each module for the sub-interpreter tier (ADR-E015, TID-9) — read-only, no
+    // wellspring/handler needed. Handle it before `python`/`shim` are moved into the handler.
+    if mode == "probe" {
+        return cmd_probe(&python, &shim, &root);
+    }
+
     let mut handler = EngineHandler::new(python, shim, root.clone());
 
     match mode {
@@ -143,6 +150,65 @@ fn cmd_run(handler: &mut EngineHandler) -> ExitCode {
         }
         Err(message) => {
             eprintln!("error: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `probe <root>` — classify each collected module as sub-interpreter-safe (ADR-E015, TID-9) and print
+/// the verdict. Foundation for the sub-interpreter execution tier; changes no execution today.
+fn cmd_probe(python: &str, shim: &Path, root: &Path) -> ExitCode {
+    use engine_core::collection::{Collector, RegexCollector};
+    let items = match RegexCollector::new().collect(root) {
+        Ok(items) => items,
+        Err(e) => {
+            eprintln!("error: collection failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // Distinct module rel-paths (the file part of each node id).
+    let mut modules: Vec<String> = items
+        .iter()
+        .map(|it| {
+            it.node_id
+                .as_str()
+                .split("::")
+                .next()
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect();
+    modules.sort();
+    modules.dedup();
+
+    match engine_daemon::probe_modules(python, shim, root, &modules) {
+        Ok(verdicts) => {
+            let (mut safe, mut unsafe_n, mut unknown) = (0usize, 0usize, 0usize);
+            for (m, v) in &verdicts {
+                let tag = match v {
+                    Some(true) => {
+                        safe += 1;
+                        "safe"
+                    }
+                    Some(false) => {
+                        unsafe_n += 1;
+                        "UNSAFE"
+                    }
+                    None => {
+                        unknown += 1;
+                        "unknown"
+                    }
+                };
+                println!("{tag}\t{m}");
+            }
+            eprintln!(
+                "{} modules: {safe} safe, {unsafe_n} unsafe, {unknown} unknown (sub-interpreter tier)",
+                verdicts.len()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
             ExitCode::FAILURE
         }
     }

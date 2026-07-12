@@ -6,7 +6,7 @@ owns all the logic); the binaries add no behaviour of their own.
 | Binary | Crate | Role |
 |---|---|---|
 | `riptide` | `engine-cli` | one-shot `collect` / `run` |
-| `riptide-daemon` | `engine-daemon` | warm server: impact-aware `run`, full `run --all`, `serve` (RPC), `watch`, `bench` |
+| `riptide-daemon` | `engine-daemon` | warm server: impact-aware `run`, full `run --all`, `serve` (RPC), `watch`, `bench`, `probe` |
 
 !!! info "Naming"
     The product is **tiderace**. The engine binaries build as `riptide` / `riptide-daemon` — a retired
@@ -56,8 +56,8 @@ riptide collect tests/
 ```
 
 ```
-tests/test_auth.py::test_login	PytestFunction
-tests/test_auth.py::TestRegistration::test_valid_email	PytestClassMethod
+tests/test_auth.py::test_login	Function
+tests/test_auth.py::TestRegistration::test_valid_email	ClassMethod
 collected 2 tests
 ```
 
@@ -82,7 +82,7 @@ FAIL	tests/test_auth.py::test_logout
 ## `riptide-daemon` — warm server
 
 ```
-riptide-daemon <run|serve|watch|bench> <root> [--all] [iters]
+riptide-daemon <run|serve|watch|bench|probe> <root> [--all] [iters]
 ```
 
 All modes require `RIPTIDE_SHIM`. A missing root or unknown mode is a usage error (exit `64`). Every
@@ -158,6 +158,19 @@ includes the wellspring launch (cold); the rest reuse the warm import (warm). Ex
 
 ```bash
 RIPTIDE_SHIM=py-shim/shim.py riptide-daemon bench tests/ 10
+```
+
+### `riptide-daemon probe <root>` — sub-interpreter safety classification
+
+Classify each collected module as **sub-interpreter-safe** (ADR-E015): it imports the module in an
+isolated sub-interpreter (`concurrent.interpreters`, CPython 3.14+) and prints `safe` / `UNSAFE` /
+`unknown` per module. Read-only, runs nothing — the foundation for the sub-interpreter execution tier
+(Windows parallelism). `unknown` on interpreters without the API (→ callers fall back to fork).
+
+```bash
+RIPTIDE_SHIM=py-shim/shim.py RIPTIDE_PYTHON=python3.14 riptide-daemon probe tests/
+# safe    tests/test_pure.py
+# UNSAFE  tests/test_uses_numpy.py
 ```
 
 ```
