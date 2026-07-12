@@ -47,7 +47,7 @@ jobs:
         # runs against a bare interpreter (the fork-based suites still self-skip without the fx venv).
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Unit + lib + daemon tests
         run: cargo test --all
 
@@ -87,7 +87,7 @@ jobs:
         # Provides `python` on PATH so the no-fork acceptance runs on Windows (no fork() here).
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Unit + lib + daemon tests (no-fork acceptance runs; fork integration self-skips)
         run: cargo test --all
       - name: Release build
@@ -107,7 +107,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Provision the fx venv (numpy + pytest) at the repo root
         # The fork-based acceptance + daemon e2e tests resolve <repo>/.riptide-fx-venv by path (no env
         # needed). Without it they self-skip and the exec/fork + daemon paths go uncovered, so the gate
