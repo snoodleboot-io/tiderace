@@ -145,6 +145,13 @@ def _return_values(own: list) -> list:
     return out
 
 
+def _provides_no_value(fn: ast.FunctionDef) -> bool:
+    """True when a fixture returns/yields **no value at all** — a pure setup/teardown fixture (often
+    autouse). It provides `None`, so `-> None` is the faithful annotation rather than an un-inferable
+    type. (A fixture that returns a value in even one path is NOT no-value → left to `cant`.)"""
+    return not _return_values(_own_nodes(fn))
+
+
 def _simple_assignments(own: list) -> dict:
     """`name -> value node` for single-target `name = <expr>` assignments (last write wins)."""
     m: dict = {}
@@ -268,6 +275,12 @@ class _Migrator(ast.NodeTransformer):
                         node.returns = ast.parse(inferred, mode="eval").body
                         self.report.mapped(node.lineno, f"provider `{node.name}`: return type inferred "
                                            f"→ `-> {inferred}` (B3)")
+                    elif _provides_no_value(node):
+                        # A fixture that returns/yields no value is a pure setup/teardown fixture (often
+                        # autouse) — it provides None. `-> None` is the faithful annotation, not a guess.
+                        node.returns = ast.copy_location(ast.Constant(value=None), node)
+                        self.report.mapped(node.lineno, f"provider `{node.name}` yields no value "
+                                           f"(setup/teardown) → `-> None`")
                     else:
                         self.report.cant(node.lineno, f"provider `{node.name}` has no return type — riptide wires by "
                                          f"type; add `-> <Type>` (e.g. `def {node.name}() -> Db:`)")

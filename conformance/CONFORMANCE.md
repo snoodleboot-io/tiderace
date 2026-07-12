@@ -18,18 +18,22 @@ python3 conformance.py vendor/click vendor/cachetools
 
 ## Results
 
-| repo | pin | test files | can't-map | first pass | post-B1 | post-B3 | **post-B5/B4** |
+| repo | pin | test files | first pass | post-B1 | post-B3 | post-B5/B4 | **post-no-value** |
 |---|---|---:|---:|---:|---:|---:|---:|
-| pallets/click | `8.1.7` (874ca2b) | 9 | 70% | 93% | 94% | **94%** |
-| tkem/cachetools | `v5.5.0` (6c78a8f) | 0 | n/a | n/a | n/a | n/a |
-| pallets/flask | `3.0.3` (c12a5d8) | 33 | — | 66% | 79% | **80%** |
-| agronholm/anyio | `4.4.0` (053e8f0) | 1 | — | 80% | 80% | **99%** |
-| **TOTAL** | | **43** | — | 79% | 85% | **89%** |
+| pallets/click | `8.1.7` (874ca2b) | 70% | 93% | 94% | 94% | **95%** |
+| tkem/cachetools | `v5.5.0` (6c78a8f) | n/a | n/a | n/a | n/a | n/a |
+| pallets/flask | `3.0.3` (c12a5d8) | — | 66% | 79% | 80% | **83%** |
+| agronholm/anyio | `4.4.0` (053e8f0) | — | 80% | 80% | 99% | **99%** |
+| **TOTAL** | | | 79% | 85% | 89% | **91%** |
 
 *Progression: first pass 70% (click only) → B1 builtins → B3 type-inference (79%→85%) → B5 provider
-params + B4 request decision (85%→**89%**, can't-map 61→43). B2 usefixtures shipped but corpus-neutral
-(its targets are untyped). Remaining 43: untyped providers/params (the unconfident inference remainder),
-6 usefixtures (untyped targets), 3 unsupported builtins, 1 from-pytest import.*
+params + B4 request decision (85%→89%, can't-map 61→43) → **no-value providers** (89%→**91%**, can't-map
+43→36). A pytest fixture that yields/returns no value is a pure setup/teardown fixture (often autouse) —
+it provides `None`, so `migrate` now annotates it `-> None` (mapped) instead of flagging it untyped;
+this closed 8 (6 flask + 2 click). B2 usefixtures shipped but corpus-neutral (its targets are untyped).
+Remaining 36: untyped value-providers/params (lowercase factory & method calls — un-inferable by AST,
+correctly flagged), 6 usefixtures (untyped cross-file targets), 3 unsupported builtins, 1 from-pytest
+import.*
 
 **cachetools is a pure `unittest.TestCase` suite** — *nothing pytest-specific to migrate*. riptide
 already drives it via stdlib `unittest.TestCase.run()` (ADR-E001), so it runs **as-is, no migration**.
