@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use engine_core::cache::{Cache, CacheKey, CacheKeyBuilder, CachedOutcome, DirCache};
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestItem, TestResult};
-use engine_core::exec::{ForkWorker, Worker};
+use engine_core::exec::{ForkWorker, SubInterpWorker, Worker};
 
-use crate::persist::{changed_files, plan, PersistedState, TestRecord};
+use crate::persist::{changed_files, plan, PersistedState, SafeModule, TestRecord};
+use crate::probe::probe_modules;
 use crate::rpc_method::{RpcRequest, RpcResponse, RpcResult};
 use crate::rpc_server::RpcHandler;
 use crate::watch::content_hash;
@@ -140,12 +141,94 @@ impl EngineHandler {
             .map(|(node, _)| node.clone())
             .collect();
 
-        let fresh = self.run_items_parallel(&[], &trusted)?;
+        // ADR-E015 / TID-11: with the sub-interpreter tier on (`RIPTIDE_SUBINTERP=1`), route the
+        // sub-interp-**safe** modules through a parallel sub-interpreter pool (no fork; sound because
+        // both module globals and os.environ are per-interpreter) and everything else through the fork
+        // pool. Sub-interpreters are the only parallelism Windows (no fork) has. Off ⇒ fork pool only.
+        let fresh = if subinterp_enabled() {
+            let items = self.collect()?;
+            let modules: Vec<String> = {
+                let mut m: Vec<String> = items.iter().map(|it| module_of(&it.node_id)).collect();
+                m.sort();
+                m.dedup();
+                m
+            };
+            let safe = self.safe_set(&mut state, &modules)?;
+            let (si_items, fork_items): (Vec<TestItem>, Vec<TestItem>) = items
+                .into_iter()
+                .partition(|it| safe.contains(&module_of(&it.node_id)));
+
+            let mut fresh = Vec::new();
+            if !si_items.is_empty() {
+                let mut w = SubInterpWorker::new(5000)
+                    .with_target(self.python.clone(), &self.shim, &self.root)
+                    .with_pool_size(crate::pool::default_workers());
+                fresh.extend(
+                    w.run(&si_items)
+                        .map_err(|e| format!("subinterp pool: {e}"))?,
+                );
+            }
+            if !fork_items.is_empty() {
+                let fork_nodes: Vec<String> =
+                    fork_items.iter().map(|it| it.node_id.to_string()).collect();
+                fresh.extend(self.run_items_parallel(&fork_nodes, &trusted)?);
+            }
+            fresh
+        } else {
+            self.run_items_parallel(&[], &trusted)?
+        };
+
         self.persist_results(&mut state, &fresh);
         state
             .save(&state_path)
             .map_err(|e| format!("state save failed: {e}"))?;
         Ok(fresh.into_iter().map(to_rpc).collect())
+    }
+
+    /// The sub-interpreter-safe module set for `modules`, using the persisted verdicts where the module's
+    /// content is unchanged and **probing only the new/changed ones** (ADR-E015 TID-9 cache + TID-11).
+    /// Updates `state.safe_modules`. Undeterminable modules (probe unavailable, < 3.14) are treated as
+    /// unsafe → routed to fork (always sound).
+    fn safe_set(
+        &self,
+        state: &mut PersistedState,
+        modules: &[String],
+    ) -> Result<HashSet<String>, String> {
+        let to_probe: Vec<String> = modules
+            .iter()
+            .filter(|m| {
+                state
+                    .safe_modules
+                    .get(*m)
+                    .map(|rec| rec.hash != self.hash_file(m))
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        if !to_probe.is_empty() {
+            let verdicts = probe_modules(&self.python, &self.shim, &self.root, &to_probe)?;
+            for m in &to_probe {
+                match verdicts.get(m) {
+                    Some(Some(safe)) => {
+                        state.safe_modules.insert(
+                            m.clone(),
+                            SafeModule {
+                                hash: self.hash_file(m),
+                                safe: *safe,
+                            },
+                        );
+                    }
+                    _ => {
+                        state.safe_modules.remove(m); // undeterminable ⇒ don't cache; fall to fork
+                    }
+                }
+            }
+        }
+        Ok(modules
+            .iter()
+            .filter(|m| state.safe_modules.get(*m).map(|r| r.safe).unwrap_or(false))
+            .cloned()
+            .collect())
     }
 
     /// Fold a batch of results into the persisted state (outcome + detail + deps + purity verdict) and
@@ -363,6 +446,17 @@ fn optimistic_no_fork() -> bool {
     std::env::var("RIPTIDE_FORCE_FORK").as_deref() != Ok("1")
 }
 
+/// Whether the sub-interpreter tier is enabled (ADR-E015 / TID-11). `RIPTIDE_SUBINTERP=1` opts in —
+/// safe modules then run through the parallel sub-interpreter pool. Its purpose is Windows parallelism.
+fn subinterp_enabled() -> bool {
+    std::env::var("RIPTIDE_SUBINTERP").as_deref() == Ok("1")
+}
+
+/// The module rel-path of a node id (`pkg/test_x.py::C::t` -> `pkg/test_x.py`).
+fn module_of(node: &engine_core::domain::NodeId) -> String {
+    node.as_str().split("::").next().unwrap_or("").to_string()
+}
+
 fn to_rpc(r: TestResult) -> RpcResult {
     RpcResult {
         node_id: r.node_id.to_string(),
@@ -427,6 +521,82 @@ fn outcome_token(outcome: Outcome) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("repo root")
+    }
+
+    /// Sub-interp safety needs CPython 3.14 (`concurrent.interpreters`) + numpy for the unsafe case —
+    /// gate the `safe_set` test on the fx venv.
+    fn fx_venv() -> Option<String> {
+        let p = repo_root().join(".riptide-fx-venv/bin/python");
+        p.exists().then(|| p.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn safe_set_classifies_probes_once_and_caches() {
+        let Some(python) = fx_venv() else {
+            eprintln!("skipping: .riptide-fx-venv (3.14 + numpy) not present");
+            return;
+        };
+        let dir = temp("safeset");
+        std::fs::write(
+            dir.join("test_pure.py"),
+            "def test_a():\n    assert 1 == 1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("test_np.py"),
+            "import numpy\ndef test_n():\n    assert int(numpy.array([1]).sum()) == 1\n",
+        )
+        .unwrap();
+        let handler = EngineHandler::new(
+            python,
+            repo_root().join("engine/py-shim/shim.py"),
+            dir.clone(),
+        );
+        let mut state = PersistedState::default();
+        let modules = vec!["test_pure.py".to_string(), "test_np.py".to_string()];
+
+        let safe = handler.safe_set(&mut state, &modules).expect("safe_set");
+        assert!(
+            safe.contains("test_pure.py"),
+            "pure module is sub-interp-safe"
+        );
+        assert!(!safe.contains("test_np.py"), "numpy module is not safe");
+        assert_eq!(
+            state.safe_modules.get("test_pure.py").map(|r| r.safe),
+            Some(true)
+        );
+        assert_eq!(
+            state.safe_modules.get("test_np.py").map(|r| r.safe),
+            Some(false)
+        );
+
+        // Second call: verdicts are cached by content hash, so the result is stable (no re-probe needed).
+        let hashes: Vec<String> = state
+            .safe_modules
+            .values()
+            .map(|r| r.hash.clone())
+            .collect();
+        let safe2 = handler
+            .safe_set(&mut state, &modules)
+            .expect("safe_set cached");
+        assert_eq!(safe, safe2);
+        assert_eq!(
+            hashes,
+            state
+                .safe_modules
+                .values()
+                .map(|r| r.hash.clone())
+                .collect::<Vec<_>>(),
+            "unchanged modules keep their cached verdict"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn temp(tag: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("riptide_ck_{tag}_{}", std::process::id()));
