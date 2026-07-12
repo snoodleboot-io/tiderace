@@ -23,6 +23,7 @@ informs **ADR-E002**).
 | [E012](ADR-E012-native-type-driven-authoring.md) | Native type-driven authoring (`@provides`/`@cases`/`@uses`) | ✅ Accepted (design) | 04, 10 |
 | [E013](ADR-E013-inprocess-isolation.md) | In-process backend isolation: fork-from-embedded (②) | ✅ Accepted (design) | 05, 11 |
 | [E014](ADR-E014-no-fork-restore-ladder.md) | No-fork + restore isolation ladder (default execution path) | ✅ **Implemented + measured** | 05, 04, 06 |
+| [E015](ADR-E015-subinterp-tier.md) | Conditional sub-interpreter tier (`SubInterpWorker`) for Windows parallelism | ✅ Accepted (design) · spiked, build phased (TID-2) | 05, 08 |
 
 **Status legend:** "Accepted (design)" = agreed for the design phase; revisitable when the
 de-risking spike produces real numbers. **E014 is implemented + measured** — the no-fork ladder is the
