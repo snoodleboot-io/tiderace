@@ -25,6 +25,7 @@ long-option flags). All `RIPTIDE_*` names are read directly by the binaries / th
 | `RIPTIDE_COVERAGE` | wellspring (set by `riptide-daemon run`) | off | Capture each test's source footprint via `sys.monitoring`. Set automatically by impact-aware `run`; cleared by `run --all`. |
 | `RIPTIDE_RESTORE` | wellspring (set by all `riptide-daemon` modes) | on (daemon) | Enable the no-fork + snapshot/restore isolation ladder (the default execution path). |
 | `RIPTIDE_FORCE_FORK` | wellspring | off | Debug/benchmark only: fork every test, bypassing the no-fork ladder. **Not a user flag.** |
+| `RIPTIDE_SUBINTERP` | `riptide-daemon run --all` | off | Opt into the **sub-interpreter tier** (ADR-E015): sub-interpreter-*safe* modules run through a parallel sub-interpreter pool (no fork), the rest through fork. Its purpose is **Windows** parallelism (no `fork()` there); on Linux the fork pool already parallelizes, so it's ~parity. `RIPTIDE_SUBINTERP_WORKERS` sets the pool size (default: CPU count). |
 
 The wellspring is a child process and inherits the parent's environment, so the engine sets
 `RIPTIDE_COVERAGE` / `RIPTIDE_RESTORE` for the Python side; you normally only set `RIPTIDE_SHIM` and

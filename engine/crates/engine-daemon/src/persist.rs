@@ -13,6 +13,18 @@ pub struct PersistedState {
     pub files: BTreeMap<String, String>,
     /// node id -> last result + the files it touched.
     pub tests: BTreeMap<String, TestRecord>,
+    /// module rel-path -> its cached sub-interpreter-safety verdict (ADR-E015 / TID-9 cache, consumed
+    /// by TID-11 routing). Re-probed only when the module's content hash changes. `#[serde(default)]`
+    /// so older state files load fine.
+    #[serde(default)]
+    pub safe_modules: BTreeMap<String, SafeModule>,
+}
+
+/// A module's cached sub-interpreter-safety verdict, keyed by content so a change re-probes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SafeModule {
+    pub hash: String,
+    pub safe: bool,
 }
 
 /// One test's persisted result + dependency footprint.
