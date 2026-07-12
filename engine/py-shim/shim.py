@@ -1319,6 +1319,77 @@ def probe() -> int:
         _write_frame(_STDOUT, _probe_module_safe(req["module"], paths))
 
 
+# Runs INSIDE each pool sub-interpreter (ADR-E015 Phase 2). Builds its own warm Engine — `restore=True`
+# gives per-test isolation *within* the interpreter, and the sub-interpreter boundary isolates it from
+# the other workers. Pulls tasks off the shared queue, runs them in-process, pushes results back.
+_SUBINTERP_WORKER_LOOP = """
+import sys
+sys.path[:0] = list(_paths)
+import shim as _shim
+_eng = _shim.Engine(_shim._discover(_root), root=_root, no_fork=True, restore=True)
+try:
+    while True:
+        _task = _in_q.get()
+        if _task is None:
+            break
+        try:
+            _r = _eng.run(_task["node_id"], _task["style"], _task.get("deadline_ms", 5000),
+                          force_no_fork=True)
+            _out_q.put({"node_id": _task["node_id"], "outcome": _r["outcome"],
+                        "detail": _r.get("detail", "")})
+        except BaseException as _exc:  # noqa: BLE001 — never drop a task's response
+            _out_q.put({"node_id": _task["node_id"], "outcome": "error", "detail": repr(_exc)})
+finally:
+    _eng.teardown_all()
+"""
+
+
+def subinterp() -> int:
+    """`--subinterp` mode (ADR-E015 Phase 2): run a batch of *safe* tests across a pool of isolated
+    sub-interpreters, parallel via per-interpreter GILs (PEP 684). Batch protocol: read one
+    `{"batch": [{node_id, style, deadline_ms}, …]}` frame, reply one `{"results": [{node_id, outcome,
+    detail}, …]}` frame (input order). The caller only routes sub-interpreter-safe modules here."""
+    import threading
+
+    from concurrent import interpreters  # 3.14+; the caller probes first, so this is expected present
+
+    root = sys.argv[1]
+    sys.path.insert(0, root)
+    paths = list(sys.path)
+    workers = max(1, int(os.environ.get("RIPTIDE_SUBINTERP_WORKERS") or (os.cpu_count() or 4)))
+
+    in_q = interpreters.create_queue()
+    out_q = interpreters.create_queue()
+    pool, threads = [], []
+    for _ in range(workers):
+        it = interpreters.create()
+        it.prepare_main(_paths=tuple(paths), _root=root, _in_q=in_q, _out_q=out_q)
+        t = threading.Thread(target=it.exec, args=(_SUBINTERP_WORKER_LOOP,), daemon=True)
+        t.start()
+        pool.append(it)
+        threads.append(t)
+
+    _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
+    try:
+        while True:
+            req = _read_frame(_STDIN)
+            if req is None:
+                return 0
+            batch = req.get("batch", [])
+            for task in batch:
+                in_q.put(task)
+            collected = {}
+            for _ in range(len(batch)):
+                r = out_q.get()
+                collected[r["node_id"]] = r
+            _write_frame(_STDOUT, {"results": [collected[t["node_id"]] for t in batch]})
+    finally:
+        for _ in pool:
+            in_q.put(None)  # stop each worker
+        for t in threads:
+            t.join(timeout=5)
+
+
 def serve() -> int:
     root = sys.argv[1]
     no_fork = "--no-fork" in sys.argv[2:]
@@ -1346,4 +1417,8 @@ def serve() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(probe() if "--probe" in sys.argv[2:] else serve())
+    if "--probe" in sys.argv[2:]:
+        sys.exit(probe())
+    if "--subinterp" in sys.argv[2:]:
+        sys.exit(subinterp())
+    sys.exit(serve())
