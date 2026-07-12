@@ -42,6 +42,12 @@ jobs:
       # The fork-based live integration tests self-skip without the fx venv (numpy/sqlite), which is
       # deliberately not provisioned here — so this covers unit/lib + daemon + the self-skipping
       # acceptance suite. The Python shim proofs are exercised separately (py-riptide/proof_*.py).
+      - name: Set up Python
+        # Enables the no-fork SubprocessWorker acceptance (nofork_acceptance.rs) — stdlib-only, so it
+        # runs against a bare interpreter (the fork-based suites still self-skip without the fx venv).
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Unit + lib + daemon tests
         run: cargo test --all
 
@@ -51,9 +57,9 @@ jobs:
   engine-windows:
     # ADR-E008 capability matrix: validate the pure-Rust engine compiles and its unit/lib + daemon
     # logic passes on Windows, which has no fork(). The fork-based live integration tests self-skip
-    # without the fx venv, so this gate covers compile + clippy + fmt + unit/lib/daemon. The no-fork
-    # SubprocessWorker acceptance on Windows (driving the --no-fork shim against a real Python) is the
-    # remaining Phase-7 piece in ROADMAP-v2.
+    # without the fx venv; the **no-fork SubprocessWorker acceptance** (nofork_acceptance.rs) DOES run
+    # here — it drives the `--no-fork` shim against the interpreter provisioned below, exercising the
+    # no-COW fallback on the platform it exists for (TID-5 / ROADMAP-v2 Phase-7).
     name: engine · windows · build · lint · unit
     runs-on: windows-latest
     defaults:
@@ -77,7 +83,12 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy (warnings as errors)
         run: cargo clippy --all-targets -- -D warnings
-      - name: Unit + lib + daemon tests (fork integration self-skips without the venv)
+      - name: Set up Python
+        # Provides `python` on PATH so the no-fork acceptance runs on Windows (no fork() here).
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Unit + lib + daemon tests (no-fork acceptance runs; fork integration self-skips)
         run: cargo test --all
       - name: Release build
         run: cargo build --release
