@@ -382,6 +382,7 @@ The authoritative rationale lives in `planning/current/pure-rust-test-engine/des
 | E012 | Native type-driven authoring |
 | E013 | In-process / FFI isolation (②) |
 | **E014** | **No-fork + restore isolation ladder (the default execution path)** |
+| E015 | Conditional sub-interpreter tier (`SubInterpWorker`) for Windows parallelism (design; spiked) |
 
 ---
 
