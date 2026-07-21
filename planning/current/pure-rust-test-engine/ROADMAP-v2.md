@@ -5,7 +5,7 @@
 > transport/in-process work ([ADR-E011](design/adr/ADR-E011-shim-transport-seam.md)), and turns the
 > remaining work into **two tracks of detailed checklists**.
 >
-> **Last updated:** 2026-06-24. Trunk: `main_v2` (phases 1–3 merged); phases 4–7 + Track B delivered on
+> **Last updated:** 2026-07-21 (see the 2026-07-21 addendum below; the 2026-06-24 summary is a snapshot). Trunk: `main_v2` (phases 1–3 merged); phases 4–7 + Track B delivered on
 > `feat/n5-conformance`. Conformance data: `conformance/`. Native perf: `benchmarks/RESULTS-native.md`.
 
 ---
@@ -25,6 +25,37 @@ side-bet — see the ticket [`planning/backlog/in-process-ffi-backend/`](../../b
   tests are slower than pytest (fork-per-test isolation tax — the lever ② targets).
 - **Health:** engine-core 118 lib + 2 integration + diff + 9 acceptance; engine-daemon 20 + 1 e2e;
   10 Python proofs; clippy -D + fmt clean.
+
+---
+
+## Addendum — delivered since (2026-07-21)
+
+The summary above is a snapshot of 2026-06-24 and **understates the current state**; work continued
+under Linear team `tidewire` (issues `TID-*`). What landed since, and what it changed:
+
+- **No-fork isolation ladder** ([ADR-E014](design/adr/ADR-E014-no-fork-restore-ladder.md)) — now the *default*
+  execution path, and the reason the "Purity guard" box above is checked: pure → bare no-fork (~90×),
+  impure → no-fork + snapshot/restore (~5–14×), opaque → fork. Sound by construction (opaque forks).
+- **Conditional sub-interpreter tier** ([ADR-E015](design/adr/ADR-E015-subinterp-tier.md), epic
+  **TID-2**, PRs #6–#8) — not in the v2 plan at all. A *universal* sub-interpreter backend was spiked
+  and rejected (numpy's `_multiarray_umath` refuses isolated sub-interpreters, taking pandas/scipy/
+  torch with it). What shipped instead is a **detect-and-route hybrid**: TID-9 probes each module's
+  sub-interpreter safety and caches the verdict; TID-10 adds `SubInterpWorker` (PEP 684 per-interpreter
+  GIL); TID-11 routes the safe subset to that pool and the rest to fork. Purpose is **Windows**
+  parallelism — Linux measures at parity (1.45 s vs 1.49 s) because the fork pool already parallelizes.
+  The Windows payoff is *proven correct but unmeasured* — **TID-12**.
+- **Cache** — remote/`DirCache` backend (TID-6) + live-loop wiring (TID-7), i.e. the two boxes checked
+  above.
+- **Migrate conformance** — **89% → 91%** (click 95%, flask 83%, anyio 99%; 352 mapped / 36 can't-map).
+  The `70% → 89%` figures in the summary above are superseded.
+- **Test-environment integrity** (PR #9) — live acceptance tests self-skipped when `.riptide-fx-venv`
+  was absent, and libtest reports an early return as `ok`; `engine · linux` never provisioned that venv,
+  so it had been running the whole live suite as no-ops. `RIPTIDE_REQUIRE_LIVE=1` now turns a
+  live-scenario skip into a failure in both venv-provisioning CI jobs. Treat any pre-#9 "suite green"
+  claim in this document with that caveat.
+
+**Still open:** TID-3 (free-threading — blocked, needs a `python3.14t` build), TID-4 (② parallel
+fork-out, below), TID-12 (Windows fallback + benchmark).
 
 ---
 
@@ -58,8 +89,8 @@ one-line ADR/doc note if a decision was made.
 | 1 Fork/Wellspring spike | ✅ done | GO |
 | 2 Workspace + domain + collection | ✅ done | |
 | 3 Fixtures + watermarks | ✅ done | merged to `main_v2` |
-| 4 Full styles + assertions | 🟢 **core done** | marks/`@cases` + RichDiff + async + unittest fidelity done; purity guard deferred to sandbox |
-| 5 Coverage + cache | 🟢 **core done** | coverage→DepGraph→impact + content-addressed cache done; live-loop wiring with Phase-6 daemon |
+| 4 Full styles + assertions | ✅ **done** | marks/`@cases` + RichDiff + async + unittest fidelity; **purity guard shipped** via the no-fork ladder (E014) — fs/clock/net interception still open |
+| 5 Coverage + cache | ✅ **done** | coverage→DepGraph→impact + content-addressed cache; **live-loop wiring done** (TID-7) + remote `DirCache` (TID-6) |
 | 6 Scheduler + daemon | ✅ **done** | LocalityScheduler + warm daemon (EngineHandler e2e, watch, `riptide-daemon` bin); inner loop ~7ms |
 | 7 Compat + reporting + hardening | 🟢 **core done** | 5 reporters + plugin host + Windows CI + measured perf; further governor tuning iterative |
 
@@ -75,8 +106,9 @@ one-line ADR/doc note if a decision was made.
 | **usefixtures (B2)** | ✅ done (capability; corpus-neutral — untyped targets) |
 | **request introspection (B4)** | ✅ done (decision; anyio 89%→99%) |
 | **provider-params (B5)** | ✅ done (anyio→99%); async providers remain |
-| **Migrate conformance** | **89% across 4 repos** (anyio 99%, click 94%, flask 80%) |
-| ② in-process/FFI backend | 🟡 isolation ADR ratified (E013); impl pending (`pyo3`) |
+| **Migrate conformance** | **91% across 4 repos** (anyio 99%, click 95%, flask 83%) — TID-8 |
+| ② in-process/FFI backend | 🟡 isolation ADR ratified (E013); `engine-inproc` built, benchmark refuted the transport premise; parallel fork-out = TID-4 (Backlog) |
+| **Sub-interpreter tier (E015)** | ✅ **done** — detect (TID-9) → `SubInterpWorker` (TID-10) → route (TID-11); Windows benchmark = TID-12 |
 
 ---
 
@@ -93,7 +125,9 @@ one-line ADR/doc note if a decision was made.
   - Done: failing `assert a == b` reports operands + a diff (`proof_n7`); ⏳ structured `RichDiff` Rust type + reporter wiring lands with Phase 7 reporters (currently rendered into `detail`)
 - [x] **Async tests** — `async def test_*` driven on a per-test event loop (`proof_n8`); async providers deferred to Track B (B5)
 - [x] **unittest fidelity** — `setUpClass`/`tearDownClass` honored; `@expectedFailure`→xfail, unexpected-success→failed, `subTest` failure→failed (`proof_n8`)
-- [ ] ⏳ **Purity guard** (deferred) — cross-fork shared-state-mutation detection. The impurity *policy* seam already exists (`cache::{Purity, SandboxHooks}`, Phase 5d); the *runtime detector* that feeds it is the ADR-E004 stage-2 sandbox (fs/clock/net/state interception) — a substantial standalone effort, sequenced with that sandbox rather than here. Conservative-by-default holds until then.
+- [x] **Purity guard** — shipped as the gate of the no-fork isolation ladder ([ADR-E014](design/adr/ADR-E014-no-fork-restore-ladder.md)), not as the ADR-E004 stage-2 sandbox originally scoped here.
+  - Done: static AST pre-filter + runtime shared-state-mutation detection (`shim.py`), tri-state verdict persisted per test (`TestRecord.pure`, **TID-1**) → known-pure tests take the bare no-fork tier; `proof_purity_guard.py`, `proof_static_purity.py`, `proof_trusted_pure.py`
+  - ⏳ still open: fs/clock/network *interception* (ADR-E004 stage 2). Purity here is about state mutation; a test that reads the clock or network is still trusted. Conservative-by-default holds for those.
 
 ### Phase 5 — Coverage + cache  🟢 **core delivered (2026-06-21)**
 *Designs: [07-cache](design/07-cache.md), [11-coverage-impact](design/11-coverage-impact.md), [13-cross-cutting](design/13-cross-cutting.md); [ADR-E004](design/adr/ADR-E004-content-addressed-cache.md), [ADR-E006](design/adr/ADR-E006-coverage-sys-monitoring.md). Consumes Phase-3 `ClosureHash`.*
@@ -111,9 +145,10 @@ one-line ADR/doc note if a decision was made.
 - [x] **`SandboxHooks` / `Purity`** — impurity policy seam; impure tests excluded from caching with a reason
   - Done: `Purity::impure(reason)` is never cached; `NoSandbox` default trusts the coverage closure
   - ⏳ remaining: actual fs/clock/network *interception* collector (ADR-E004 stage 2, conservative-by-default holds until then)
-- [ ] ⏳ **Live-loop wiring** — cache consult (hit→impact-skip→run) inside the worker loop + source content hashing + DepGraph persistence → lands with the Phase-6 daemon that owns the persistent run loop
+- [x] **Live-loop wiring** — cache consult (hit→impact-skip→run) in the daemon run loop + source content hashing + DepGraph persistence (**TID-7**, PR #3)
+  - Done: `EngineHandler` consults the `DirCache` before impact-skip (`engine_handler.rs`); `warm_run_is_a_cache_hit_then_an_edit_invalidates_only_the_impacted_test` + `impure_test_is_never_cached` prove hit→skip→run and the purity gate
 
-### Phase 6 — Scheduler + daemon  ⬜
+### Phase 6 — Scheduler + daemon  🟢 **delivered**
 *Designs: [06-scheduler](design/06-scheduler.md), [08-daemon](design/08-daemon.md); [ADR-E007](design/adr/ADR-E007-warm-daemon.md), [ADR-E010](design/adr/ADR-E010-locality-scheduler.md). Consumes Phase-3 `Watermark.rss_bytes` via `MemoryGovernor`.*
 
 - [x] **`LocalityScheduler`** — duration-aware LPT balancing + scope-locality (5 tests; makespan ≤ round-robin on uneven durations; a module co-locates; dominant group splits)
@@ -188,7 +223,7 @@ one-line ADR/doc note if a decision was made.
 - [x] **Isolation design** — ratified [ADR-E013](design/adr/ADR-E013-inprocess-isolation.md): **fork-from-embedded**. Per-test reset/subinterpreters parked.
 - [x] **`InProcessTransport: ShimTransport`** — built in `engine/crates/engine-inproc` (PyO3 0.26 + embedded CPython 3.14; excluded crate, default/Windows builds untouched). Imports once, drives the executor by FFI, **fork-from-embedded isolation proven** (mutation in a forked child doesn't leak).
 - [x] **Benchmark — done, and it REFUTED the premise** ([RESULTS-inproc.md](../../../benchmarks/RESULTS-inproc.md)): the pipe/transport is **not** the bottleneck — 500 trivial tests run **identically** in-process (~2.0 s) vs subprocess+pipe (~2.0 s); the cost is **`fork()` per test (~4 ms)**. ② as a transport swap is **not a perf win**.
-- [ ] ⏭ **Parallel fork-out from the one embedded interpreter** — the *actual* win (import-once **+** parallelism, vs the pool's N× import). Re-scoped on the [ticket](../../backlog/in-process-ffi-backend/). `PyConfig`/venv plumbing + broader C-ext smoke fold in here.
+- [ ] ⏭ **Parallel fork-out from the one embedded interpreter** — the *actual* win (import-once **+** parallelism, vs the pool's N× import). Re-scoped on the [ticket](../../backlog/in-process-ffi-backend/). `PyConfig`/venv plumbing + broader C-ext smoke fold in here. **Tracked as TID-4 (Backlog, Low)** — marginal wall-clock by its own analysis; the real gain is CI CPU-efficiency, ~zero warm.
 
 ---
 
