@@ -64,6 +64,16 @@ jobs:
           RIPTIDE_REQUIRE_LIVE: "1"
         run: cargo test --all
 
+      - name: Type-check the excluded engine-inproc crate
+        # `engine-inproc` (the PyO3 ② side-bet) is excluded from the workspace, so `--workspace` never
+        # touches it, and it has no tests of its own. It silently bit-rotted: TID-1 added
+        # `ExecResponse.pure` and this crate stopped compiling — unnoticed, because nothing built it.
+        #
+        # `cargo check` catches that in seconds and does NOT link, so it needs no libpython dev package
+        # (which is what makes a full build here awkward). Keep it a check, not a build.
+        working-directory: engine/crates/engine-inproc
+        run: cargo check --all-targets
+
       - name: Release build
         run: cargo build --release
 
