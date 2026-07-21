@@ -19,5 +19,6 @@ pub mod hooks;
 pub mod impact;
 pub mod reporter;
 pub mod scheduler;
+pub mod testing;
 
 pub use error::EngineError;

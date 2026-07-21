@@ -9,6 +9,7 @@
 //! On fork-capable platforms it *additionally* asserts the no-fork path is **result-identical** to
 //! `ForkWorker` on the same corpus — the §8 boundary-3 invariant that makes the fallback safe.
 
+use engine_core::testing::skip_live;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -95,7 +96,7 @@ fn write_corpus(tag: &str) -> PathBuf {
 #[test]
 fn subprocess_worker_no_fork_runs_a_real_python_correctly() {
     let Some(python) = any_python() else {
-        eprintln!("SKIP: no Python interpreter available");
+        skip_live("no Python interpreter available");
         return;
     };
     let dir = write_corpus("run");
@@ -132,7 +133,7 @@ fn no_fork_is_result_identical_to_fork() {
     use engine_core::exec::ForkWorker;
 
     let Some(python) = any_python() else {
-        eprintln!("SKIP: no Python interpreter available");
+        skip_live("no Python interpreter available");
         return;
     };
     let dir = write_corpus("diff");

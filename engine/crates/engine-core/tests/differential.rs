@@ -1,9 +1,11 @@
 //! Phase-2 acceptance: the engine's outcomes must match stock pytest on a fixture-free corpus
 //! covering all three test styles (pytest function, pytest class method, unittest.TestCase).
 //!
-//! This is a real end-to-end test across the Rust↔CPython boundary — never mocked. It is gated on
-//! the Lane-0 venv (`.riptide-spike-venv` with pytest) and skips cleanly if absent.
+//! This is a real end-to-end test across the Rust↔CPython boundary — never mocked. It is gated on a
+//! venv with pytest (the fx venv, else the Phase-1 `.riptide-spike-venv`); absent one it skips via
+//! `engine_core::testing::skip_live`, which fails instead under `RIPTIDE_REQUIRE_LIVE=1`.
 
+use engine_core::testing::skip_live;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -51,9 +53,19 @@ fn shim_path() -> PathBuf {
         .expect("shim path")
 }
 
+/// Any venv with pytest, which is all this oracle needs. Prefers the **fx venv** (the one CI and the
+/// rest of the live suite provision) and falls back to the Phase-1 Lane-0 `.riptide-spike-venv`.
+///
+/// The fallback used to be the *only* lookup, so once the spike venv went away this differential —
+/// the engine-vs-stock-pytest oracle — silently self-skipped and reported `ok`.
 fn venv_python() -> Option<PathBuf> {
-    let p = repo_root().join(".riptide-spike-venv/bin/python");
-    p.exists().then_some(p)
+    [
+        ".riptide-fx-venv/bin/python",
+        ".riptide-spike-venv/bin/python",
+    ]
+    .iter()
+    .map(|rel| repo_root().join(rel))
+    .find(|p| p.exists())
 }
 
 fn wire(outcome: Outcome) -> &'static str {
@@ -70,7 +82,9 @@ fn wire(outcome: Outcome) -> &'static str {
 #[test]
 fn engine_outcomes_match_pytest_across_three_styles() {
     let Some(python) = venv_python() else {
-        eprintln!("SKIP: .riptide-spike-venv not found — run the Phase-1 Lane-0 env gate first");
+        skip_live(
+            "no venv with pytest (`.riptide-fx-venv` / `.riptide-spike-venv`) — provision one",
+        );
         return;
     };
 

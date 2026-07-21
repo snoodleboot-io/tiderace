@@ -51,16 +51,47 @@ cargo fmt                                    # format
 
 CI enforces both — PRs that fail `clippy` or `fmt` are blocked.
 
-## Coverage gate
+## Live tests and the fx venv
 
-CI gates line coverage of the engine workspace at **≥ 88%** (`cargo llvm-cov`). To reproduce locally
-you need `.riptide-fx-venv` at the repo root (numpy + pytest) so the fork/daemon live tests run rather
-than self-skip — otherwise the exec paths look uncovered:
+The acceptance suites that assert the engine's load-bearing invariants — no-fork ≡ fork,
+sub-interpreter ≡ fork, purity/safety detection, the daemon end-to-end — need a real interpreter, and
+resolve `.riptide-fx-venv` at the repo root **by path**. Without it they self-skip.
+
+A skip is not visibly different from a pass. libtest has no "skipped" state, so an early `return`
+reports as `ok`, and the harness swallows the skip marker unless you pass `--nocapture`. A green
+`cargo test` can therefore mean the isolation ladder is sound *or* that none of it ran. (This is not
+theoretical: the venv symlinked into a versioned VSCode snap path, that revision was
+garbage-collected, and the workspace stayed green with 10 live tests skipping.)
+
+Provision it once, at the repo root:
 
 ```bash
-python -m venv .riptide-fx-venv && .riptide-fx-venv/bin/pip install numpy pytest   # once, at repo root
+python -m venv .riptide-fx-venv && .riptide-fx-venv/bin/pip install numpy pytest
+```
+
+!!! warning "Point at a stable interpreter"
+    `python` here must be a path that survives upgrades. A `uv`/snap interpreter under a
+    *revision-numbered* directory will break silently when that revision is collected.
+
+Then, to prove the live paths actually executed:
+
+```bash
 cd engine
-cargo llvm-cov --workspace --ignore-filename-regex '(main|socket)\.rs' --fail-under-lines 88
+RIPTIDE_REQUIRE_LIVE=1 cargo test --workspace   # a skip becomes a failure
+```
+
+`RIPTIDE_REQUIRE_LIVE=1` turns every live-scenario skip into a panic (`engine_core::testing`). Both
+CI jobs that provision the venv set it, so a broken environment fails the build instead of passing as
+a no-op. Leave it unset if you're working without a venv — the suites will skip as before.
+
+## Coverage gate
+
+CI gates line coverage of the engine workspace at **≥ 88%** (`cargo llvm-cov`). Reproducing it needs
+the fx venv above — without it the exec paths look uncovered and the gate only measures pure logic:
+
+```bash
+cd engine
+RIPTIDE_REQUIRE_LIVE=1 cargo llvm-cov --workspace --ignore-filename-regex '(main|socket)\.rs' --fail-under-lines 88
 ```
 
 `main.rs` (CLI entry) and `socket.rs` (the socket serve loop) are excluded — binary glue with no logic

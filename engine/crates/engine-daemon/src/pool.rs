@@ -96,6 +96,7 @@ pub fn default_workers() -> usize {
 mod tests {
     use super::{default_workers, locality_key, run_parallel};
     use engine_core::domain::{NodeId, ScopePath, TestItem, TestStyle};
+    use engine_core::testing::skip_live;
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
@@ -153,7 +154,7 @@ mod tests {
     #[test]
     fn runs_a_two_module_corpus_across_two_workers() {
         let Some(python) = venv_python() else {
-            eprintln!("skipping: .riptide-fx-venv not present");
+            skip_live("`.riptide-fx-venv` not present");
             return;
         };
         // Two modules so the LocalityScheduler distributes them across the two workers.
