@@ -72,6 +72,14 @@ impl SubprocessWorker {
             .arg(&target.shim)
             .arg(&target.root)
             .arg("--no-fork")
+            // Snapshot/restore is this worker's ONLY isolation mechanism — without fork there is no
+            // COW copy, so a test's mutations to module globals persist into the next test on that
+            // module. The shim enables restore from `--restore` / `RIPTIDE_RESTORE`, and this worker
+            // used to set neither: it inherited whatever the caller happened to export. Under the
+            // daemon that was `RIPTIDE_RESTORE=1`, but standalone it was unset, and the no-fork path
+            // silently ran with no isolation at all (an appended module-level list stayed appended).
+            // Set it explicitly — correctness here must not depend on the caller's environment.
+            .arg("--restore")
             // Pin native thread pools (threaded BLAS/OMP is a hazard even without fork).
             .env("OPENBLAS_NUM_THREADS", "1")
             .env("OMP_NUM_THREADS", "1")

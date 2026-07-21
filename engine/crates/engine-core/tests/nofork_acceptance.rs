@@ -163,3 +163,118 @@ fn no_fork_is_result_identical_to_fork() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An **opaque** module — one whose globals can't be snapshot-restored — under `--no-fork`.
+///
+/// The ladder's soundness argument is "an opaque module still forks." That rung doesn't exist on
+/// Windows, and the shim used to handle it two wrong ways: the optimistic path called `os.fork()` and
+/// raised an uncaught `AttributeError` (killing the worker), while `--no-fork` mode skipped the
+/// restorability check entirely and ran the module in-process, leaking un-restorable state into the
+/// next test. See `py-riptide/proof_windows_opaque_fork.py`.
+///
+/// So the expectation is genuinely platform-dependent, and this asserts both halves:
+/// * **fork-capable** (Unix) — the module forks and the tests pass, no leak;
+/// * **fork-less** (Windows) — the tests are reported as `Error` rather than run without isolation.
+///
+/// Either way the worker survives, which is the part that used to fail.
+const OPAQUE_CORPUS: &str = "\
+_GEN = (i for i in range(100))
+
+def test_a():
+    assert next(_GEN) == 0
+
+def test_b():
+    v = next(_GEN)
+    assert v == 0, f\"LEAK: generator advanced across tests, got {v}\"
+";
+
+#[test]
+fn opaque_module_is_isolated_by_fork_or_refused_never_leaked() {
+    let Some(python) = any_python() else {
+        skip_live("no Python interpreter available");
+        return;
+    };
+    let dir = write_corpus("opaque");
+    std::fs::write(dir.join("test_opaque.py"), OPAQUE_CORPUS).unwrap();
+    // Drop the default corpus so only the opaque module is collected.
+    let _ = std::fs::remove_file(dir.join("test_nofork.py"));
+
+    let items = RegexCollector::new().collect(&dir).expect("collection");
+    assert_eq!(items.len(), 2, "test_a + test_b");
+
+    let results = SubprocessWorker::new(5_000, 1)
+        .with_target(python, &shim(), &dir)
+        .run(&items)
+        .expect("the worker must survive an opaque module, whatever the platform");
+    assert_eq!(results.len(), 2);
+
+    for r in &results {
+        if cfg!(unix) {
+            assert_eq!(
+                r.outcome,
+                Outcome::Passed,
+                "fork-capable: {} should fork and pass (a leak shows up as Failed)",
+                r.node_id
+            );
+        } else {
+            assert_eq!(
+                r.outcome,
+                Outcome::Error,
+                "fork-less: {} must be refused, not run without isolation",
+                r.node_id
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A **restorable** module that mutates a module-level global — the ordinary case, and the one that
+/// silently broke.
+///
+/// Without `fork()` there is no COW copy, so snapshot/restore is this worker's only isolation. The
+/// worker didn't request it (no `--restore`, no `RIPTIDE_RESTORE`); it inherited whatever the caller
+/// exported. Under the daemon that happened to be `RIPTIDE_RESTORE=1`, so this looked fine — but
+/// standalone the flag was unset and every module-level mutation persisted into the next test on that
+/// module. The existing acceptance corpus never mutated globals, so nothing caught it.
+///
+/// `test_b` fails iff `test_a`'s append survived.
+const MUTATING_CORPUS: &str = "\
+_SEEN = []
+
+def test_a():
+    _SEEN.append(1)
+    assert _SEEN == [1]
+
+def test_b():
+    _SEEN.append(2)
+    assert _SEEN == [2], f\"LEAK: state from a previous test survived: {_SEEN}\"
+";
+
+#[test]
+fn no_fork_restores_module_state_between_tests() {
+    let Some(python) = any_python() else {
+        skip_live("no Python interpreter available");
+        return;
+    };
+    let dir = write_corpus("mutating");
+    std::fs::write(dir.join("test_mutating.py"), MUTATING_CORPUS).unwrap();
+    let _ = std::fs::remove_file(dir.join("test_nofork.py"));
+
+    let items = RegexCollector::new().collect(&dir).expect("collection");
+    assert_eq!(items.len(), 2);
+
+    let results = SubprocessWorker::new(5_000, 1)
+        .with_target(python, &shim(), &dir)
+        .run(&items)
+        .expect("no-fork run");
+
+    for r in &results {
+        assert_eq!(
+            r.outcome,
+            Outcome::Passed,
+            "{} — no-fork must restore module state between tests, not leak it",
+            r.node_id
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -544,6 +544,10 @@ _OPAQUE = object()
 # verdict is recordable for the bare-no-fork fast path (ADR-E014 / TID-1).
 _UNKNOWN_PURITY = object()
 
+# Windows has no `fork()`. The isolation ladder's bottom rung (fork an opaque module) therefore doesn't
+# exist there, so the shim must decide what to do instead rather than call `os.fork` and raise.
+_FORK_AVAILABLE = hasattr(os, "fork")
+
 
 def _snapshot_shared(module) -> dict:
     """A deep snapshot of a module's mutable top-level state — the names a test could mutate to
@@ -767,15 +771,24 @@ class Engine:
         case_params = [p for p in requested if p not in fixture_requested]
         case_kwargs_list = [dict(zip(case_params, c.values)) for c in self._cases(node_id, style)] or [{}]
 
-        # Soundness: an optimistic no-fork request is only honored when we can snapshot/restore the
-        # module's shared state. A module with opaque (un-deep-copyable) globals must still fork.
-        # A trusted-pure test skips this check: it's known pure (won't mutate), so restorability is moot
-        # and it runs bare no-fork. An untrusted no-fork request must be snapshot-restorable or it forks.
-        if force_no_fork and self.restore and not trusted_pure:
+        # Soundness gate for BOTH in-process paths. A module whose shared state we can't snapshot/restore
+        # (opaque globals — an open file, a generator, a live socket) must fork: running it in-process
+        # leaks whatever the test mutated into the next test on the same module.
+        #
+        # This applies to `--no-fork` mode too, not just an optimistic per-test request. It previously
+        # checked only `force_no_fork`, so whole-run no-fork (`--no-fork`, i.e. the SubprocessWorker /
+        # Windows path) ran opaque modules in-process regardless and silently produced wrong results —
+        # e.g. a module-level generator stayed advanced across tests. See
+        # `py-riptide/proof_windows_opaque_fork.py`.
+        #
+        # A trusted-pure test skips the check: known pure ⇒ it won't mutate, so restorability is moot.
+        must_fork = False
+        if self.restore and not trusted_pure and (force_no_fork or self.no_fork):
             try:
-                if not _restorable(importlib.import_module(_module_name(module_key))):
-                    force_no_fork = False
+                must_fork = not _restorable(importlib.import_module(_module_name(module_key)))
             except Exception:  # noqa: BLE001 — can't import/inspect ⇒ be safe, fork
+                must_fork = True
+            if must_fork:
                 force_no_fork = False
 
         uses = self._uses(node_id, style)  # @riptide.uses: set up by type, not injected (B2)
@@ -796,7 +809,7 @@ class Engine:
             for case_kwargs in case_kwargs_list:
                 oc, detail, cov, purity = self._fork_run(
                     node_id, style, fixture_requested, closure, combo, deadline_ms, case_kwargs,
-                    force_no_fork, trusted_pure)
+                    force_no_fork, trusted_pure, must_fork)
                 outcomes.append((oc, detail))
                 for path, lines in cov.items():
                     coverage.setdefault(path, set()).update(lines)
@@ -821,13 +834,26 @@ class Engine:
         return resp
 
     def _fork_run(self, node_id, style, requested, closure, combo, deadline_ms, case_kwargs=None,
-                  force_no_fork=False, trusted_pure=False) -> tuple:
+                  force_no_fork=False, trusted_pure=False, must_fork=False) -> tuple:
         """Run one (combo, case) variant; returns `(outcome, detail, coverage, purity)` where purity is a
         reason string (impure), `None` (measured pure), or `_UNKNOWN_PURITY` (not measured). `force_no_fork`
         runs it in THIS process (the pure-test fast path) without forking; `trusted_pure` additionally
-        skips the snapshot (bare no-fork)."""
+        skips the snapshot (bare no-fork). `must_fork` means the caller determined the module is not
+        snapshot-restorable, so isolation REQUIRES a fork — it overrides both in-process paths."""
         case_kwargs = case_kwargs or {}
-        if self.no_fork or force_no_fork:
+
+        # No fork on this platform (Windows) and the module needs one to be isolated. Refuse rather
+        # than run it: in-process would leak un-restorable state into the next test on this module, and
+        # a wrong green is worse than a reported error. Previously this fell through to `os.fork()` and
+        # raised an uncaught AttributeError, killing the worker.
+        if must_fork and not _FORK_AVAILABLE:
+            return ("error",
+                    f"cannot isolate {node_id}: its module has state that can't be snapshot-restored, "
+                    f"so it requires fork() — unavailable on this platform. Make the module's globals "
+                    f"deep-copyable, or mark the test pure if it doesn't mutate shared state.",
+                    {}, _UNKNOWN_PURITY)
+
+        if (self.no_fork or force_no_fork) and not must_fork:
             # No-COW fallback: run the test in THIS process (no isolation, but the same fixture
             # engine → result-identical outcomes; §8 boundary 3). Function fixtures are set up and
             # torn down per test in-process; wider scopes still live once in the parent.
