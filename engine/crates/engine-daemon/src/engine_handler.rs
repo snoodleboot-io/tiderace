@@ -521,6 +521,7 @@ fn outcome_token(outcome: Outcome) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::testing::skip_live;
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -539,7 +540,7 @@ mod tests {
     #[test]
     fn safe_set_classifies_probes_once_and_caches() {
         let Some(python) = fx_venv() else {
-            eprintln!("skipping: .riptide-fx-venv (3.14 + numpy) not present");
+            skip_live("`.riptide-fx-venv` (CPython 3.14 + numpy) not present");
             return;
         };
         let dir = temp("safeset");

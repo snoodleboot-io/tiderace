@@ -5,6 +5,7 @@
 //! Gated on the Phase-3 venv + shim being present (the same guard engine-core's live tests use), so it
 //! runs here and skips cleanly in environments without Python.
 
+use engine_core::testing::skip_live;
 use std::io::{self, Cursor, Read, Write};
 use std::path::PathBuf;
 
@@ -67,7 +68,7 @@ fn responses(bytes: &[u8]) -> Vec<RpcResponse> {
 #[test]
 fn daemon_discovers_runs_and_stays_warm_over_a_real_wellspring() {
     let Some(python) = venv_python() else {
-        eprintln!("skipping: .riptide-fx-venv not present");
+        skip_live("`.riptide-fx-venv` not present");
         return;
     };
 

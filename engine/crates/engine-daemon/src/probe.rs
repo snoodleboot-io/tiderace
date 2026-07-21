@@ -56,6 +56,7 @@ pub fn probe_modules(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::testing::skip_live;
     use std::path::PathBuf;
 
     fn repo_root() -> PathBuf {
@@ -76,7 +77,7 @@ mod tests {
     #[test]
     fn classifies_pure_safe_and_numpy_unsafe() {
         let Some(python) = venv_python() else {
-            eprintln!("skipping: .riptide-fx-venv not present");
+            skip_live("`.riptide-fx-venv` not present");
             return;
         };
         let dir = std::env::temp_dir().join(format!("riptide_probe_{}", std::process::id()));

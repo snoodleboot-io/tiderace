@@ -4,6 +4,7 @@
 //! — the §8 boundary-3 invariant that makes the tier safe. Needs CPython 3.14 (`concurrent.interpreters`),
 //! so it gates on the fx venv (which is 3.14); self-skips otherwise.
 
+use engine_core::testing::skip_live;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -102,7 +103,7 @@ fn outcome_map(rs: &[engine_core::domain::TestResult]) -> Vec<(String, Outcome)>
 #[test]
 fn subinterp_pool_runs_safe_tests_correctly() {
     let Some(python) = subinterp_python() else {
-        eprintln!("SKIP: no CPython 3.14 (concurrent.interpreters) available");
+        skip_live("no CPython 3.14 (`concurrent.interpreters`) available");
         return;
     };
     let dir = write_corpus();
@@ -135,7 +136,7 @@ fn subinterp_is_result_identical_to_fork() {
     use engine_core::exec::ForkWorker;
 
     let Some(python) = venv_python() else {
-        eprintln!("SKIP: .riptide-fx-venv (CPython 3.14) not present");
+        skip_live("`.riptide-fx-venv` (CPython 3.14) not present");
         return;
     };
     let dir = write_corpus();

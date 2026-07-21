@@ -39,16 +39,29 @@ jobs:
       - name: Clippy (warnings as errors)
         run: cargo clippy --all-targets -- -D warnings
 
-      # The fork-based live integration tests self-skip without the fx venv (numpy/sqlite), which is
-      # deliberately not provisioned here — so this covers unit/lib + daemon + the self-skipping
-      # acceptance suite. The Python shim proofs are exercised separately (py-riptide/proof_*.py).
       - name: Set up Python
-        # Enables the no-fork SubprocessWorker acceptance (nofork_acceptance.rs) — stdlib-only, so it
-        # runs against a bare interpreter (the fork-based suites still self-skip without the fx venv).
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - name: Unit + lib + daemon tests
+
+      - name: Provision the fx venv (numpy + pytest) at the repo root
+        # Previously skipped here, which meant this job ran the *entire* live suite as no-ops: the
+        # fork/no-fork/sub-interpreter acceptances resolve <repo>/.riptide-fx-venv by path and, absent
+        # it, early-returned — which the Rust harness reports as `ok`. The job was green on the
+        # engine's load-bearing invariants (no-fork ≡ fork, sub-interp ≡ fork) without executing one
+        # of them. Provisioning costs ~15s and makes the green mean something.
+        working-directory: .
+        run: |
+          python -m venv .riptide-fx-venv
+          .riptide-fx-venv/bin/pip install --upgrade pip
+          .riptide-fx-venv/bin/pip install numpy pytest
+
+      - name: Unit + lib + daemon + live acceptance tests
+        # RIPTIDE_REQUIRE_LIVE=1 turns a live-scenario skip into a failure (engine_core::testing).
+        # This job provisions the interpreter above, so a skip here means the environment broke — and
+        # that must fail loudly rather than pass as a silent no-op.
+        env:
+          RIPTIDE_REQUIRE_LIVE: "1"
         run: cargo test --all
 
       - name: Release build
@@ -123,4 +136,9 @@ jobs:
         # the analogue of the previous watcher.rs exclusion). Everything else — including the exec/fork +
         # daemon live paths, covered because the venv is provisioned above — is measured. Local baseline
         # ~91% lines; the gate sits at 88 for headroom.
+        # RIPTIDE_REQUIRE_LIVE=1: the venv is provisioned above, so a silent live-skip here would
+        # quietly drop the exec/fork + daemon paths out of the measured set and shrink the gate to the
+        # pure-logic core. Fail instead.
+        env:
+          RIPTIDE_REQUIRE_LIVE: "1"
         run: cargo llvm-cov --workspace --ignore-filename-regex '(main|socket)\.rs' --fail-under-lines 88
