@@ -148,11 +148,20 @@ impl ShimTransport for InProcessTransport {
                 .and_then(|d| d.extract().ok())
                 .unwrap_or_default();
             let coverage = extract_coverage(&res)?;
+            // TID-1's purity verdict. This transport doesn't drive the purity guard (it forks from the
+            // embedded interpreter and measures nothing), so the verdict is genuinely unknown — `None`,
+            // not `Some(false)`, which would wrongly assert "measured impure" and bar the test from the
+            // cache forever.
+            let pure = res
+                .get_item("pure")
+                .ok()
+                .and_then(|p| p.extract::<bool>().ok());
             Ok(ExecResponse {
                 node_id,
                 outcome,
                 detail,
                 coverage,
+                pure,
             })
         })
         .map_err(|e| EngineError::Exec(format!("in-process exchange failed: {e}")))
