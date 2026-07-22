@@ -3,13 +3,18 @@ use std::path::Path;
 use std::thread;
 
 use engine_core::domain::{TestItem, TestResult};
-use engine_core::exec::{ForkWorker, Worker};
+#[cfg(unix)]
+use engine_core::exec::ForkWorker;
+#[cfg(not(unix))]
+use engine_core::exec::SubprocessWorker;
+use engine_core::exec::Worker;
 use engine_core::scheduler::{LocalityScheduler, ScheduleInput, ScheduledTest, Scheduler};
 
-/// Run `items` across a **pool of `workers` wellsprings in parallel** (the fix for sequential
-/// execution — design 06 / ADR-E010). The [`LocalityScheduler`] groups tests by module (scope
-/// locality) and LPT-balances the groups across workers; each worker is its own warm wellspring on its
-/// own thread, forking per test (ADR-E003 isolation preserved). Coverage rides along if the wellsprings
+/// Run `items` across a **pool of `workers` in parallel** (the fix for sequential execution —
+/// design 06 / ADR-E010). The [`LocalityScheduler`] groups tests by module (scope locality) and
+/// LPT-balances the groups across workers; each worker runs its batch on its own thread. The
+/// per-batch isolation backend is platform-specific (see [`run_batch`]): fork-per-test on Unix, the
+/// no-fork SubprocessWorker (snapshot/restore) on Windows. Coverage rides along if the wellsprings
 /// inherit `RIPTIDE_COVERAGE` (the caller's env), so impact footprints are still captured.
 #[allow(clippy::too_many_arguments)]
 pub fn run_parallel(
@@ -57,14 +62,15 @@ pub fn run_parallel(
             .map(|it| it.node_id.to_string())
             .collect();
         handles.push(thread::spawn(move || -> Result<Vec<TestResult>, String> {
-            let mut worker = ForkWorker::launch(&py, &sh, &rt)
-                .map_err(|e| format!("failed to launch wellspring: {e}"))?
-                .with_deadline_ms(deadline_ms)
-                .with_optimistic_no_fork(optimistic_no_fork)
-                .with_trusted_pure(batch_trusted);
-            worker
-                .run(&batch_items)
-                .map_err(|e| format!("execution failed: {e}"))
+            run_batch(
+                &py,
+                &sh,
+                &rt,
+                &batch_items,
+                deadline_ms,
+                optimistic_no_fork,
+                batch_trusted,
+            )
         }));
     }
 
@@ -77,6 +83,55 @@ pub fn run_parallel(
         );
     }
     Ok(all)
+}
+
+/// Run one scheduler batch on this thread, using the platform's isolation backend. This is the one
+/// place the pool is platform-aware; everything above (scheduling, batching, threading, join) is
+/// shared.
+///
+/// * **Unix** — [`ForkWorker`]: one warm wellspring, fork-per-test (COW isolation, ADR-E003). The
+///   optimistic-no-fork ladder + trusted-pure fast path apply here.
+/// * **Non-Unix (Windows)** — no `fork()`, so [`SubprocessWorker`] (`--no-fork`) runs the batch
+///   in-process with snapshot/restore between tests and refuses opaque modules (sound as of the
+///   no-fork isolation fix). One process per batch; parallelism still comes from N batches on N
+///   threads, exactly as the fork pool. This is what lets `run --all` / the sub-interpreter tier's
+///   fork partition actually run on Windows instead of crashing on `os.fork()`.
+#[cfg(unix)]
+fn run_batch(
+    py: &str,
+    sh: &Path,
+    rt: &Path,
+    batch_items: &[TestItem],
+    deadline_ms: u64,
+    optimistic_no_fork: bool,
+    batch_trusted: std::collections::HashSet<String>,
+) -> Result<Vec<TestResult>, String> {
+    let mut worker = ForkWorker::launch(py, sh, rt)
+        .map_err(|e| format!("failed to launch wellspring: {e}"))?
+        .with_deadline_ms(deadline_ms)
+        .with_optimistic_no_fork(optimistic_no_fork)
+        .with_trusted_pure(batch_trusted);
+    worker
+        .run(batch_items)
+        .map_err(|e| format!("execution failed: {e}"))
+}
+
+#[cfg(not(unix))]
+fn run_batch(
+    py: &str,
+    sh: &Path,
+    rt: &Path,
+    batch_items: &[TestItem],
+    deadline_ms: u64,
+    _optimistic_no_fork: bool,
+    _batch_trusted: std::collections::HashSet<String>,
+) -> Result<Vec<TestResult>, String> {
+    // The no-fork path always snapshots/restores (its only isolation without COW); the fork-only knobs
+    // (optimistic ladder, trusted-pure bare no-fork) don't apply. One process per batch, pool_size 1.
+    let mut worker = SubprocessWorker::new(deadline_ms, 1).with_target(py, sh, rt);
+    worker
+        .run(batch_items)
+        .map_err(|e| format!("execution failed: {e}"))
 }
 
 /// A test's locality key for scheduling — its module (the file part of the node id), so a module's
@@ -111,6 +166,22 @@ mod tests {
     fn venv_python() -> Option<PathBuf> {
         let p = repo_root().join(".riptide-fx-venv/bin/python");
         p.exists().then_some(p)
+    }
+    /// Any interpreter — the fx venv, else a bare `python3`/`python` on `PATH`. Lets the pool's
+    /// platform backend be exercised on **Windows CI** (a bare `setup-python` interpreter, no venv),
+    /// which is where the no-fork batch backend actually matters. `None` ⇒ skip.
+    fn any_python() -> Option<String> {
+        if let Some(v) = venv_python() {
+            return Some(v.to_string_lossy().into_owned());
+        }
+        ["python3", "python"].into_iter().find_map(|cand| {
+            std::process::Command::new(cand)
+                .arg("--version")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|_| cand.to_string())
+        })
     }
     fn shim() -> PathBuf {
         repo_root().join("engine/py-shim/shim.py")
@@ -207,6 +278,57 @@ mod tests {
             "only test_b2 fails"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The pool must **isolate module state between tests on whichever backend the platform uses** —
+    /// fork on Unix, no-fork SubprocessWorker on Windows. A module-level list mutated by the first
+    /// test must not be seen by the second. This is the property that broke silently on the no-fork
+    /// path, so run it against a bare interpreter (stdlib corpus, no venv) so **Windows CI** exercises
+    /// its own backend here, not just Unix's.
+    #[test]
+    fn pool_isolates_module_state_between_tests_on_this_platform() {
+        let Some(python) = any_python() else {
+            skip_live("no Python interpreter available");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("riptide_pool_iso_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A restorable module that mutates a global: test_b fails iff test_a's append leaked.
+        std::fs::write(
+            dir.join("test_mut.py"),
+            "_SEEN = []\n\
+             \n\
+             def test_a():\n    _SEEN.append(1)\n    assert _SEEN == [1]\n\
+             \n\
+             def test_b():\n    _SEEN.append(2)\n    assert _SEEN == [2], f\"LEAK: {_SEEN}\"\n",
+        )
+        .unwrap();
+
+        let items = vec![item("test_mut.py::test_a"), item("test_mut.py::test_b")];
+        let results = run_parallel(
+            &python,
+            &shim(),
+            &dir,
+            items,
+            1,
+            5000,
+            false,
+            &HashSet::new(),
+        )
+        .expect("pool run succeeds");
+
+        assert_eq!(results.len(), 2);
+        let failures: Vec<&str> = results
+            .iter()
+            .filter(|r| r.outcome.is_failure())
+            .map(|r| r.node_id.as_str())
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "pool must restore module state between tests on this platform's backend; leaked in {failures:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
