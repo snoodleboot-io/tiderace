@@ -19,6 +19,9 @@ pub mod hooks;
 pub mod impact;
 pub mod reporter;
 pub mod scheduler;
+pub mod shim_locate;
 pub mod testing;
+
+pub use shim_locate::default_shim;
 
 pub use error::EngineError;
