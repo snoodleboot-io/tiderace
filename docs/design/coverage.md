@@ -32,11 +32,11 @@ flowchart LR
 Each test's touched files become a `CoverageReport` (`engine-core/src/coverage/coverage_report.rs`,
 keyed by `file_lines`), which the engine folds into a `DepGraph` (`dep_graph.rs`): a mapping of test
 node id ↔ source files. That graph is the input to impact analysis and is persisted with content
-hashes in [`.riptide-state.json`](database.md).
+hashes in [`.tiderace-state.json`](database.md).
 
 ## Enabling it
 
-The daemon turns coverage on by itself for impact-aware runs — it sets `RIPTIDE_COVERAGE=1` so
+The daemon turns coverage on by itself for impact-aware runs — it sets `TIDERACE_COVERAGE=1` so
 footprints are recorded as a side effect of running. (The shim also accepts a `--coverage` argv flag.)
 There is no separate coverage command and no coverage data file: the footprint lives in the engine's
 state, not in an `.coverage` database.

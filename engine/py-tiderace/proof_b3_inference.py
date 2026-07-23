@@ -1,6 +1,6 @@
 """B3 proof — migration type-inference for untyped fixtures. Asserts both recall (the confident shapes
 are inferred) and **precision** (ambiguous shapes are NEVER given a wrong annotation — they stay
-flagged for the human). Pure `riptide.migrate`, no pytest.
+flagged for the human). Pure `tiderace.migrate`, no pytest.
 
 Run:  python3 proof_b3_inference.py
 """
@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from riptide.migrate import migrate_source  # noqa: E402
+from tiderace.migrate import migrate_source  # noqa: E402
 
 
 def _inferred(body: str) -> str | None:

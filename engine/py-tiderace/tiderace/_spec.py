@@ -1,4 +1,4 @@
-"""Pure-data shapes the decorators stamp onto user functions — the riptide-owned attribute protocol
+"""Pure-data shapes the decorators stamp onto user functions — the tiderace-owned attribute protocol
 the shim/collector reads (the native analogue of pytest's `_fixture_function_marker`)."""
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ SCOPES = ("function", "class", "module", "package", "session")
 
 @dataclass(frozen=True)
 class ProviderSpec:
-    """Stamped on a provider as `__riptide_provider__`. `provides` is the *type* injected by; `name`
+    """Stamped on a provider as `__tiderace_provider__`. `provides` is the *type* injected by; `name`
     is the provider's stable identity (the key the Rust name-keyed graph consumes)."""
 
     provides: type
@@ -33,7 +33,7 @@ class Case:
 
 @dataclass(frozen=True)
 class Mark:
-    """One native mark stamped (appended) onto a test as `__riptide_marks__`. `kind` is the discriminator
+    """One native mark stamped (appended) onto a test as `__tiderace_marks__`. `kind` is the discriminator
     the shim acts on: `skip`/`skip_if` short-circuit before setup; `xfail` inverts the outcome; `tag` is
     selection metadata only (the Rust collector filters on it later — no execution effect)."""
 

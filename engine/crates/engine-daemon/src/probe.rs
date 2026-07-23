@@ -67,7 +67,7 @@ mod tests {
     }
     // Needs the fx venv (CPython 3.14 + numpy) for the unsafe case; self-skips otherwise.
     fn venv_python() -> Option<String> {
-        let p = repo_root().join(".riptide-fx-venv/bin/python");
+        let p = repo_root().join(".tiderace-fx-venv/bin/python");
         p.exists().then(|| p.to_string_lossy().into_owned())
     }
     fn shim() -> PathBuf {
@@ -77,10 +77,10 @@ mod tests {
     #[test]
     fn classifies_pure_safe_and_numpy_unsafe() {
         let Some(python) = venv_python() else {
-            skip_live("`.riptide-fx-venv` not present");
+            skip_live("`.tiderace-fx-venv` not present");
             return;
         };
-        let dir = std::env::temp_dir().join(format!("riptide_probe_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tiderace_probe_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(

@@ -23,7 +23,7 @@ shim boundary), one type per file per [ADR-E005](adr/ADR-E005-workspace-trait-se
 
 ### 1.1 Source & precedence
 
-Config is loaded from `pyproject.toml` `[tool.riptide]`, **evolving** the existing
+Config is loaded from `pyproject.toml` `[tool.tiderace]`, **evolving** the existing
 [`tiderace/config.rs`](#) loader (`TideraceConfig::load`, `#[serde(deny_unknown_fields)]` so typos
 are hard errors). The precedence chain is strict and is resolved once by the `ConfigResolver`
 into an effective, immutable `Config` the orchestrator threads everywhere:
@@ -31,8 +31,8 @@ into an effective, immutable `Config` the orchestrator threads everywhere:
 ```mermaid
 graph LR
     D["Built-in defaults<br/>(DEFAULT_PATTERN, timeout=300s,<br/>cap=256KB, …)"] --> F
-    F["File: [tool.riptide] in pyproject.toml<br/>(deny_unknown_fields)"] --> E
-    E["Env: RIPTIDE_* (UPPER_SNAKE_CASE)"] --> C
+    F["File: [tool.tiderace] in pyproject.toml<br/>(deny_unknown_fields)"] --> E
+    E["Env: TIDERACE_* (UPPER_SNAKE_CASE)"] --> C
     C["CLI flags (highest)"] --> EFF["effective Config (immutable)"]
 ```
 
@@ -472,7 +472,7 @@ erDiagram
 ## 7. Open questions
 
 - **CC1** — Config file location precedence when both `pyproject.toml` and a dedicated
-  `riptide.toml` exist: merge or `pyproject` only? (lean: `pyproject` canonical, `riptide.toml` opt-in)
+  `tiderace.toml` exist: merge or `pyproject` only? (lean: `pyproject` canonical, `tiderace.toml` opt-in)
 - **CC2** — `sys.audit`-hook coverage: do audit events capture *every* fs/net access on all supported
   CPython versions, or do we need targeted C-ext wrappers for the gaps? (→ de-risking spike)
 - **CC3** — Remote-cache trust model: signed cache entries vs trusted-CI-only writes — how do we stop

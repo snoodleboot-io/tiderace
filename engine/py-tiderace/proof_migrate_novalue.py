@@ -1,5 +1,5 @@
 """Migrate conformance (TID-8): a pytest fixture that yields/returns NO value is a pure setup/teardown
-fixture — it provides `None`, so `riptide migrate` annotates it `-> None` (mapped) instead of flagging
+fixture — it provides `None`, so `tiderace migrate` annotates it `-> None` (mapped) instead of flagging
 it "untyped". A fixture that DOES return a value it can't type is still flagged (precision preserved).
 
 Run:  python3 proof_migrate_novalue.py
@@ -11,7 +11,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from riptide.migrate import migrate_source  # noqa: E402
+from tiderace.migrate import migrate_source  # noqa: E402
 
 SRC = '''import pytest
 

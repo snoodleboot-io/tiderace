@@ -13,7 +13,7 @@ const SKIP_DIRS: &[&str] = &[
     ".git",
     ".venv",
     "venv",
-    ".riptide-spike-venv",
+    ".tiderace-spike-venv",
     ".tiderace-bench-venv",
     ".pytest_cache",
     "node_modules",

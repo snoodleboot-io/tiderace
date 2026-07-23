@@ -235,7 +235,7 @@ sequenceDiagram
 
 ## 7. Comparison vs pytest's import-time rewrite (perf trade-off)
 
-| Dimension | pytest (import-time AST rewrite) | Riptide (lazy introspection, [ADR-E009](adr/ADR-E009-lazy-assertion-introspection.md)) |
+| Dimension | pytest (import-time AST rewrite) | Tiderace (lazy introspection, [ADR-E009](adr/ADR-E009-lazy-assertion-introspection.md)) |
 |---|---|---|
 | **When cost is paid** | every `assert`, on every run, pass or fail | only on a **failing** assert |
 | **Import path** | rewrites + writes a modified `.pyc` for each module | untouched — cleaner for the wellspring import ([ADR-E003](adr/ADR-E003-fork-snapshot-isolation.md)) |

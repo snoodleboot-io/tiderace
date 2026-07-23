@@ -50,7 +50,7 @@ it. The engine then classifies each test and runs it the cheapest **sound** way 
 This is **sound by construction**: no-fork + restore *contains* mutation rather than predicting it,
 and any module it can't snapshot falls back to fork. A wrong purity verdict can only change speed,
 never correctness — which is why it is the **default**, with no user flag and no learning pass.
-`RIPTIDE_FORCE_FORK=1` reverts to fork-per-test as a debug/benchmark baseline only.
+`TIDERACE_FORCE_FORK=1` reverts to fork-per-test as a debug/benchmark baseline only.
 
 ## Pillar 3 — Only run what changed
 
@@ -61,7 +61,7 @@ tiderace captures each test's executed-source footprint via CPython's `sys.monit
 ([coverage](coverage.md), ADR-E006) — **not** coverage.py — and folds it into a dependency graph.
 Two complementary layers exploit it:
 
-- **Impact-skip** (the active path, `engine-daemon/persist.rs`): `.riptide-state.json` stores each
+- **Impact-skip** (the active path, `engine-daemon/persist.rs`): `.tiderace-state.json` stores each
   test's dependency files plus the content hash of every touched file. On re-run, only tests whose
   dependencies changed execute. With **no** changes, nothing runs — the wellspring isn't even
   launched. See [impact analysis](impact-analysis.md) and [state & cache](database.md).
@@ -70,7 +70,7 @@ Two complementary layers exploit it:
   a result CI computed is reusable on any machine with the same inputs — a *build system for tests*.
   A `purity` gate keeps nondeterministic outcomes out of the cache. The shareable remote tier is a
   `DirCache` (a directory / CI cache path / shared mount); the daemon consults it in `run` when
-  `RIPTIDE_CACHE_DIR` is set (**cache hit → impact-skip → run**).
+  `TIDERACE_CACHE_DIR` is set (**cache hit → impact-skip → run**).
 
 ---
 

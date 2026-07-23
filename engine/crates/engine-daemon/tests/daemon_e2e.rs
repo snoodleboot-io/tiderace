@@ -21,7 +21,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn venv_python() -> Option<PathBuf> {
-    let p = repo_root().join(".riptide-fx-venv/bin/python");
+    let p = repo_root().join(".tiderace-fx-venv/bin/python");
     p.exists().then_some(p)
 }
 
@@ -68,12 +68,12 @@ fn responses(bytes: &[u8]) -> Vec<RpcResponse> {
 #[test]
 fn daemon_discovers_runs_and_stays_warm_over_a_real_wellspring() {
     let Some(python) = venv_python() else {
-        skip_live("`.riptide-fx-venv` not present");
+        skip_live("`.tiderace-fx-venv` not present");
         return;
     };
 
     // A temp corpus: one passing, one failing test (plain pytest-style — no imports needed).
-    let dir = std::env::temp_dir().join(format!("riptide_daemon_e2e_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("tiderace_daemon_e2e_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(

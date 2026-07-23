@@ -288,7 +288,7 @@ threshold-gated trade, exactly the [ADR-E010](adr/ADR-E010-locality-scheduler.md
 
 ## 7. Config knobs
 
-Exposed in `pyproject.toml` `[tool.riptide.scheduler]` ([13-cross-cutting](13-cross-cutting.md)),
+Exposed in `pyproject.toml` `[tool.tiderace.scheduler]` ([13-cross-cutting](13-cross-cutting.md)),
 all benchmark-validated ([ADR-E010](adr/ADR-E010-locality-scheduler.md) consequence: *"the
 split-vs-keep heuristic needs tuning; exposed as a config knob"*):
 

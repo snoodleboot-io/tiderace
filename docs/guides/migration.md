@@ -2,7 +2,7 @@
 
 tiderace is **its own framework**, not a pytest wrapper ([ADR-E001](../design/decisions.md) /
 [E012](../design/decisions.md)) — it does not run pytest at runtime. Migration is a **one-time source
-codemod**: `riptide migrate` rewrites a pytest test file into tiderace's native model, and after that
+codemod**: `tiderace migrate` rewrites a pytest test file into tiderace's native model, and after that
 pytest is never in the loop.
 
 You don't *have* to migrate — tiderace already runs ordinary pytest-style function, method, and
@@ -15,10 +15,10 @@ The codemod only `ast.parse`s your source, so **pytest need not be installed** t
 
 ```bash
 # Report only — writes nothing. Inspect what would change first.
-python -m riptide.migrate tests/test_foo.py
+python -m tiderace.migrate tests/test_foo.py
 
-# Apply — writes tests/test_foo.riptide.py alongside the original.
-python -m riptide.migrate tests/test_foo.py --write
+# Apply — writes tests/test_foo.tiderace.py alongside the original.
+python -m tiderace.migrate tests/test_foo.py --write
 ```
 
 The exit code is **non-zero while anything remains in the can't-map list**, so you can wire the report
@@ -36,14 +36,14 @@ to. The codemod translates the mechanical parts of pytest to that model:
 
 | pytest | → tiderace | notes |
 |---|---|---|
-| `import pytest` | `import riptide` | |
-| `@pytest.fixture` | `@riptide.provides` | `scope=` / `autouse=` / `name=` carried over |
-| fixture with `-> T` return type | `@riptide.provides` + inject-by `T` | the type is what tests wire to |
+| `import pytest` | `import tiderace` | |
+| `@pytest.fixture` | `@tiderace.provides` | `scope=` / `autouse=` / `name=` carried over |
+| fixture with `-> T` return type | `@tiderace.provides` + inject-by `T` | the type is what tests wire to |
 | `def test(db)` where `db` is a typed fixture | `def test(db: Db)` | **type inferred** from the provider's return type |
-| `@pytest.mark.parametrize("a,b", [...])` | `@riptide.cases([...])` | `ids=` preserved |
-| `@pytest.mark.skipif(c, reason=r)` | `@riptide.skip_if(c, reason=r)` | |
-| `@pytest.mark.skip` / `xfail` | `@riptide.skip` / `@riptide.xfail` | |
-| `@pytest.mark.<name>` (other) | `@riptide.tag("<name>")` | selection metadata |
+| `@pytest.mark.parametrize("a,b", [...])` | `@tiderace.cases([...])` | `ids=` preserved |
+| `@pytest.mark.skipif(c, reason=r)` | `@tiderace.skip_if(c, reason=r)` | |
+| `@pytest.mark.skip` / `xfail` | `@tiderace.skip` / `@tiderace.xfail` | |
+| `@pytest.mark.<name>` (other) | `@tiderace.tag("<name>")` | selection metadata |
 
 ## What needs a human (the report names each one)
 
@@ -54,7 +54,7 @@ rather than guessed:
    `-> <Type>`. *(This is the single biggest migration cost of type-DI — owned openly.)*
 2. **Test param off an untyped fixture** — can't annotate `param: ?`; flagged for manual annotation.
 3. **Parametrized fixture** (`@pytest.fixture(params=[...])`) — provider-level params aren't in
-   tiderace yet; convert to `@riptide.cases` on the tests, or split the resource.
+   tiderace yet; convert to `@tiderace.cases` on the tests, or split the resource.
 4. **`request`** (incl. `request.getfixturevalue` / `request.addfinalizer`) — dynamic; port to typed
    deps + `yield` teardown.
 5. **`@pytest.mark.usefixtures("x")`** — a string name carries no type; request it as a typed param, or

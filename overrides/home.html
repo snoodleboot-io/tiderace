@@ -200,7 +200,7 @@
         <span><b>509</b> fixture tests · numpy / sqlite</span>
         <span><b>Windows</b> parallel, no fork()</span>
       </div>
-      <p class="disclaimer">Ships as <span class="mono rust">riptide</span> / <span class="mono rust">riptide-daemon</span> · the engine is tiderace</p>
+      <p class="disclaimer">Ships as <span class="mono rust">tiderace</span> (one-shot) &amp; <span class="mono rust">tiderace-daemon</span> (warm server)</p>
     </div>
   </section>
 
@@ -234,7 +234,7 @@
           </div>
           <p class="readout" id="readout" aria-live="polite">Nothing changed. Nothing runs &mdash; the interpreter isn't even launched.</p>
           <div class="terminalmini" aria-hidden="true"><span class="m"># edited README.md</span>
-<span class="c">$ riptide-daemon run tests/</span>
+<span class="c">$ tiderace-daemon run tests/</span>
 <span class="g">0 ran, 509 cached, 509 total, 0 failing &middot; 9.4ms</span></div>
         </div>
       </div>
@@ -340,7 +340,7 @@
         <div class="feat wide reveal">
           <div>
             <h3>Migrate off pytest with one command</h3>
-            <p>The <span class="mono">riptide migrate</span> codemod auto-maps the vast majority of real suites &mdash; so you're not rewriting tests by hand to try it. <a class="rust" href="guides/migration/">Read the migration guide &rarr;</a></p>
+            <p>The <span class="mono">tiderace migrate</span> codemod auto-maps the vast majority of real suites &mdash; so you're not rewriting tests by hand to try it. <a class="rust" href="guides/migration/">Read the migration guide &rarr;</a></p>
             <div class="migrate-nums">
               <div><b>91%</b>auto-mapped, avg</div>
               <div><b>95%</b>click</div>
@@ -348,15 +348,15 @@
               <div><b>83%</b>flask</div>
             </div>
           </div>
-          <div class="terminal" role="img" aria-label="Terminal: running riptide migrate then riptide-daemon on a suite">
+          <div class="terminal" role="img" aria-label="Terminal: running tiderace migrate then tiderace-daemon on a suite">
             <div class="term-bar"><i style="background:#E07A58"></i><i style="background:#3a3a3a"></i><i style="background:#3a3a3a"></i><span class="t">zsh &mdash; your-project</span></div>
-            <div class="term-body"><span class="p">$</span> <span class="w">python -m riptide.migrate tests/ --write</span>
+            <div class="term-body"><span class="p">$</span> <span class="w">python -m tiderace.migrate tests/ --write</span>
 <span class="g">mapped 463 / 509</span> <span class="m">(91%) &middot; 46 flagged for review</span>
 
-<span class="p">$</span> <span class="w">riptide-daemon run tests/ --all</span>
+<span class="p">$</span> <span class="w">tiderace-daemon run tests/ --all</span>
 <span class="g">509 tests, 0 failing</span> <span class="m">&middot; 0.66s (pytest 0.94s)</span>
 
-<span class="p">$</span> <span class="w">riptide-daemon run tests/</span> <span class="m"># nothing changed</span>
+<span class="p">$</span> <span class="w">tiderace-daemon run tests/</span> <span class="m"># nothing changed</span>
 <span class="g">0 ran, 509 cached, 509 total, 0 failing</span> <span class="m">&middot; 9.4ms</span></div>
           </div>
         </div>

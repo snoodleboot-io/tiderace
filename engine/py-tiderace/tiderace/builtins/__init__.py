@@ -1,12 +1,12 @@
-"""riptide.builtins — native equivalents of pytest's always-available fixtures. **No pytest.**
+"""tiderace.builtins — native equivalents of pytest's always-available fixtures. **No pytest.**
 
 The data-backed #1 adoption gap (ROADMAP-v2 B1): pytest builtins are 77% of click's can't-map list.
-These are ordinary riptide providers (`@provides`, function-scoped, yield-teardown) injected **by
+These are ordinary tiderace providers (`@provides`, function-scoped, yield-teardown) injected **by
 type**, so a migrated test writes `mp: MonkeyPatch` / `p: TmpPath` / `cap: Capsys` instead of pytest's
 name-based `monkeypatch` / `tmp_path` / `capsys`. The shim auto-registers `providers()` globally, so
 they are available to every test without an import in the test's own conftest.
 
-    from riptide.builtins import MonkeyPatch, TmpPath, Capsys
+    from tiderace.builtins import MonkeyPatch, TmpPath, Capsys
 
     def test_env(mp: MonkeyPatch):
         mp.setenv("API", "x")          # undone automatically at teardown
@@ -20,7 +20,7 @@ import shutil
 import tempfile
 from typing import Iterator
 
-import riptide
+import tiderace
 
 from ._capture import Capfd, Capsys, CaptureResult
 from ._monkeypatch import MonkeyPatch
@@ -40,7 +40,7 @@ __all__ = [
 ]
 
 
-@riptide.provides
+@tiderace.provides
 def monkeypatch() -> Iterator[MonkeyPatch]:
     """Function-scoped record-and-undo patcher; all mutations reversed at teardown."""
     mp = MonkeyPatch()
@@ -48,16 +48,16 @@ def monkeypatch() -> Iterator[MonkeyPatch]:
     mp.undo()
 
 
-@riptide.provides
+@tiderace.provides
 def tmp_path() -> Iterator[TmpPath]:
     """Function-scoped fresh temp directory; the whole tree is removed at teardown."""
-    raw = tempfile.mkdtemp(prefix="riptide-")
+    raw = tempfile.mkdtemp(prefix="tiderace-")
     path = TmpPath(raw)
     yield path
     shutil.rmtree(raw, ignore_errors=True)
 
 
-@riptide.provides
+@tiderace.provides
 def capsys() -> Iterator[Capsys]:
     """Function-scoped sys-level stdout/stderr capture; real streams restored at teardown."""
     cap = Capsys()
@@ -66,7 +66,7 @@ def capsys() -> Iterator[Capsys]:
     cap._stop()
 
 
-@riptide.provides
+@tiderace.provides
 def capfd() -> Iterator[Capfd]:
     """Function-scoped fd-level stdout/stderr capture (catches C-ext writes); restored at teardown."""
     cap = Capfd()

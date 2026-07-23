@@ -1,14 +1,14 @@
-"""riptide migrate — a **one-time** pytest → riptide source codemod. No pytest at runtime, ever.
+"""tiderace migrate — a **one-time** pytest → tiderace source codemod. No pytest at runtime, ever.
 
 Produces two things (ADR-E012, step N4):
   1. a best-effort **migrated source**, and
   2. a **report**: the MAPPING (what was rewritten) + the CAN'T-MAP list (what you must finish by
-     hand, with the reason). Because riptide wires by **type** and pytest fixtures rarely carry types,
+     hand, with the reason). Because tiderace wires by **type** and pytest fixtures rarely carry types,
      the can't-map list is the point — it names every gap instead of guessing.
 
 Limitation (stated openly): the rewrite uses stdlib `ast` + `ast.unparse`, which **normalizes
 formatting and drops comments**. A production migrator would use libcst to preserve them; the *report*
-is exact regardless. Run report-only first (`python -m riptide.migrate <path>`), inspect, then `--write`.
+is exact regardless. Run report-only first (`python -m tiderace.migrate <path>`), inspect, then `--write`.
 """
 from __future__ import annotations
 
@@ -17,9 +17,9 @@ import ast
 import sys
 from dataclasses import dataclass, field
 
-# pytest builtins riptide now provides natively (ROADMAP-v2 B1): name -> riptide.builtins type. A
+# pytest builtins tiderace now provides natively (ROADMAP-v2 B1): name -> tiderace.builtins type. A
 # request for one is rewritten to a typed param (`monkeypatch` -> `monkeypatch: MonkeyPatch`) wired by
-# type, and the matching `from riptide.builtins import ...` is injected. `tmpdir` maps to `TmpPath`
+# type, and the matching `from tiderace.builtins import ...` is injected. `tmpdir` maps to `TmpPath`
 # (pathlib) — its legacy py.path methods (`.join`, `.strpath`, …) still need a manual port, so it's
 # mapped *with a caveat*, not silently.
 BUILTIN_PROVIDERS = {
@@ -30,7 +30,7 @@ BUILTIN_PROVIDERS = {
     "capfd": "Capfd",
 }
 
-# pytest builtins riptide has no native equivalent for (yet) — requesting one can't auto-map.
+# pytest builtins tiderace has no native equivalent for (yet) — requesting one can't auto-map.
 BUILTIN_FIXTURES = {
     "request", "tmp_path_factory", "tmpdir_factory",
     "caplog", "recwarn", "pytestconfig", "cache", "doctest_namespace",
@@ -216,14 +216,14 @@ class _Migrator(ast.NodeTransformer):
     def __init__(self, fixture_types: dict, report: Report):
         self.fixture_types = fixture_types
         self.report = report
-        self.used_builtins: set = set()  # riptide.builtins type names that need importing
+        self.used_builtins: set = set()  # tiderace.builtins type names that need importing
 
     def visit_Import(self, node: ast.Import):
         names = []
         for alias in node.names:
             if alias.name == "pytest":
-                self.report.mapped(node.lineno, "`import pytest` → `import riptide`")
-                names.append(ast.alias(name="riptide", asname=None))
+                self.report.mapped(node.lineno, "`import pytest` → `import tiderace`")
+                names.append(ast.alias(name="tiderace", asname=None))
             else:
                 names.append(alias)
         node.names = names
@@ -232,14 +232,14 @@ class _Migrator(ast.NodeTransformer):
     def visit_ImportFrom(self, node: ast.ImportFrom):
         if node.module == "pytest":
             self.report.cant(node.lineno, f"`from pytest import {', '.join(a.name for a in node.names)}`"
-                             " — rewrite imports to riptide equivalents manually")
+                             " — rewrite imports to tiderace equivalents manually")
         return node
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         self.generic_visit(node)
         is_fixture = any(_dotted(d) in ("pytest.fixture", "fixture") for d in node.decorator_list)
         if node.name.startswith("pytest_"):
-            self.report.cant(node.lineno, f"hook `{node.name}` — riptide gets its own hook host later; port manually")
+            self.report.cant(node.lineno, f"hook `{node.name}` — tiderace gets its own hook host later; port manually")
             return node
         if is_fixture:
             return self._fixture(node)
@@ -267,8 +267,8 @@ class _Migrator(ast.NodeTransformer):
                     parametrized = True
                     self.report.mapped(node.lineno, f"provider `{node.name}` params= carried over (B5)")
                 new_decos.append(ast.copy_location(
-                    ast.Call(func=_attr("riptide", "provides"), args=[], keywords=keep), deco))
-                self.report.mapped(node.lineno, f"@pytest.fixture → @riptide.provides ({node.name})")
+                    ast.Call(func=_attr("tiderace", "provides"), args=[], keywords=keep), deco))
+                self.report.mapped(node.lineno, f"@pytest.fixture → @tiderace.provides ({node.name})")
                 if node.returns is None:
                     inferred = _infer_type_src(node)  # B3: infer the type from the body
                     if inferred is not None:
@@ -282,7 +282,7 @@ class _Migrator(ast.NodeTransformer):
                         self.report.mapped(node.lineno, f"provider `{node.name}` yields no value "
                                            f"(setup/teardown) → `-> None`")
                     else:
-                        self.report.cant(node.lineno, f"provider `{node.name}` has no return type — riptide wires by "
+                        self.report.cant(node.lineno, f"provider `{node.name}` has no return type — tiderace wires by "
                                          f"type; add `-> <Type>` (e.g. `def {node.name}() -> Db:`)")
             else:
                 new_decos.append(deco)
@@ -318,8 +318,8 @@ class _Migrator(ast.NodeTransformer):
                 ids = _kwarg(deco, "ids")
                 kws = [ast.keyword(arg="ids", value=ids)] if ids is not None else []
                 new_decos.append(ast.copy_location(
-                    ast.Call(func=_attr("riptide", "cases"), args=[argvals], keywords=kws), deco))
-                self.report.mapped(node.lineno, f"@pytest.mark.parametrize → @riptide.cases ({node.name})")
+                    ast.Call(func=_attr("tiderace", "cases"), args=[argvals], keywords=kws), deco))
+                self.report.mapped(node.lineno, f"@pytest.mark.parametrize → @tiderace.cases ({node.name})")
                 for an in _parametrize_argnames(deco):
                     param_names.discard(an)  # parametrize args are NOT fixtures — don't type-annotate
             elif dotted in ("pytest.mark.skipif", "mark.skipif"):
@@ -328,24 +328,24 @@ class _Migrator(ast.NodeTransformer):
                 if (r := _kwarg(deco, "reason")) is not None:
                     kws.append(ast.keyword(arg="reason", value=r))
                 new_decos.append(ast.copy_location(
-                    ast.Call(func=_attr("riptide", "skip_if"), args=[cond], keywords=kws), deco))
-                self.report.mapped(node.lineno, f"@pytest.mark.skipif → @riptide.skip_if ({node.name})")
+                    ast.Call(func=_attr("tiderace", "skip_if"), args=[cond], keywords=kws), deco))
+                self.report.mapped(node.lineno, f"@pytest.mark.skipif → @tiderace.skip_if ({node.name})")
             elif dotted in ("pytest.mark.skip", "mark.skip"):
-                new_decos.append(ast.copy_location(_call("riptide", "skip", _kwarg(deco, "reason")), deco))
-                self.report.mapped(node.lineno, f"@pytest.mark.skip → @riptide.skip ({node.name})")
+                new_decos.append(ast.copy_location(_call("tiderace", "skip", _kwarg(deco, "reason")), deco))
+                self.report.mapped(node.lineno, f"@pytest.mark.skip → @tiderace.skip ({node.name})")
             elif dotted in ("pytest.mark.xfail", "mark.xfail"):
-                new_decos.append(ast.copy_location(_call("riptide", "xfail", _kwarg(deco, "reason")), deco))
-                self.report.mapped(node.lineno, f"@pytest.mark.xfail → @riptide.xfail ({node.name})")
+                new_decos.append(ast.copy_location(_call("tiderace", "xfail", _kwarg(deco, "reason")), deco))
+                self.report.mapped(node.lineno, f"@pytest.mark.xfail → @tiderace.xfail ({node.name})")
             elif dotted in ("pytest.mark.usefixtures", "mark.usefixtures"):
                 names = [a.value for a in deco.args if isinstance(a, ast.Constant)]
                 types = [self.fixture_types.get(n) for n in names]
                 if names and all(t is not None for t in types):
-                    # @pytest.mark.usefixtures("a","b") → @riptide.uses(A, B), wired by type (B2)
+                    # @pytest.mark.usefixtures("a","b") → @tiderace.uses(A, B), wired by type (B2)
                     args = [ast.parse(t, mode="eval").body for t in types]
                     new_decos.append(ast.copy_location(
-                        ast.Call(func=_attr("riptide", "uses"), args=args, keywords=[]), deco))
+                        ast.Call(func=_attr("tiderace", "uses"), args=args, keywords=[]), deco))
                     self.report.mapped(node.lineno, f"@pytest.mark.usefixtures({names}) → "
-                                       f"@riptide.uses({', '.join(types)}) ({node.name})")
+                                       f"@tiderace.uses({', '.join(types)}) ({node.name})")
                 else:
                     unknown = [n for n, t in zip(names, types) if t is None]
                     self.report.cant(node.lineno, f"`usefixtures({unknown})` in `{node.name}` — those "
@@ -354,8 +354,8 @@ class _Migrator(ast.NodeTransformer):
             elif dotted.startswith("pytest.mark.") or dotted.startswith("mark."):
                 tagname = dotted.rsplit(".", 1)[-1]
                 new_decos.append(ast.copy_location(
-                    ast.Call(func=_attr("riptide", "tag"), args=[ast.Constant(value=tagname)], keywords=[]), deco))
-                self.report.mapped(node.lineno, f"@pytest.mark.{tagname} → @riptide.tag({tagname!r}) ({node.name})")
+                    ast.Call(func=_attr("tiderace", "tag"), args=[ast.Constant(value=tagname)], keywords=[]), deco))
+                self.report.mapped(node.lineno, f"@pytest.mark.{tagname} → @tiderace.tag({tagname!r}) ({node.name})")
             else:
                 new_decos.append(deco)
         node.decorator_list = new_decos
@@ -370,11 +370,11 @@ class _Migrator(ast.NodeTransformer):
                 self.used_builtins.add(tname)
                 caveat = " — port py.path calls (.join/.strpath) to pathlib" if arg.arg == "tmpdir" else ""
                 self.report.mapped(node.lineno, f"builtin `{arg.arg}` → `{arg.arg}: {tname}` "
-                                   f"(riptide.builtins, type-DI) in {node.name}{caveat}")
+                                   f"(tiderace.builtins, type-DI) in {node.name}{caveat}")
                 continue
             if arg.arg in BUILTIN_FIXTURES:
                 self.report.cant(node.lineno, f"test `{node.name}` requests pytest builtin `{arg.arg}` — "
-                                 "no riptide equivalent yet; provide your own resource")
+                                 "no tiderace equivalent yet; provide your own resource")
                 continue
             if arg.arg in self.fixture_types:
                 tsrc = self.fixture_types[arg.arg]
@@ -410,12 +410,12 @@ def migrate_source(src: str) -> tuple[str, Report]:
 
 
 def _inject_builtins_import(tree: ast.Module, used: set) -> None:
-    """Add `from riptide.builtins import <types>` after the module docstring + any `__future__`
+    """Add `from tiderace.builtins import <types>` after the module docstring + any `__future__`
     imports (which must stay first), so migrated builtin params resolve by type."""
     if not used:
         return
     node = ast.ImportFrom(
-        module="riptide.builtins",
+        module="tiderace.builtins",
         names=[ast.alias(name=n, asname=None) for n in sorted(used)],
         level=0,
     )
@@ -444,9 +444,9 @@ def format_report(report: Report, path: str = "<source>") -> str:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="riptide migrate", description="pytest → riptide source codemod")
+    ap = argparse.ArgumentParser(prog="tiderace migrate", description="pytest → tiderace source codemod")
     ap.add_argument("path", help="a .py file to migrate")
-    ap.add_argument("--write", action="store_true", help="write <path>.riptide.py (default: report only)")
+    ap.add_argument("--write", action="store_true", help="write <path>.tiderace.py (default: report only)")
     args = ap.parse_args(argv)
 
     with open(args.path) as fh:
@@ -454,7 +454,7 @@ def main(argv=None) -> int:
     migrated, report = migrate_source(src)
     print(format_report(report, args.path))
     if args.write:
-        out = args.path[:-3] + ".riptide.py" if args.path.endswith(".py") else args.path + ".riptide"
+        out = args.path[:-3] + ".tiderace.py" if args.path.endswith(".py") else args.path + ".tiderace"
         with open(out, "w") as fh:
             fh.write(migrated)
         print(f"\nwrote {out}")

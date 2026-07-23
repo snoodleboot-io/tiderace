@@ -1,4 +1,4 @@
-"""A deliberately mixed pytest suite — input for `riptide migrate` (proof of N4). Some constructs map
+"""A deliberately mixed pytest suite — input for `tiderace migrate` (proof of N4). Some constructs map
 cleanly to type-DI; others can't and must be reported. NOT executed by the migrator (pure ast)."""
 import pytest
 
@@ -8,7 +8,7 @@ class Db:
 
 
 @pytest.fixture(scope="module")
-def db() -> Db:            # typed yield fixture → maps cleanly to @riptide.provides
+def db() -> Db:            # typed yield fixture → maps cleanly to @tiderace.provides
     yield Db()
 
 
@@ -17,7 +17,7 @@ def cache():               # UNTYPED → type can't be inferred (the #1 type-DI 
     return {}
 
 
-@pytest.fixture(params=[1, 2])   # parametrized fixture → provider-level params not in riptide yet
+@pytest.fixture(params=[1, 2])   # parametrized fixture → provider-level params not in tiderace yet
 def variant(request):
     return request.param
 
@@ -41,10 +41,10 @@ def test_uses():           # string fixture name, no type → flagged
     pass
 
 
-def test_tmp(tmp_path):    # pytest builtin → no riptide equivalent yet → flagged
+def test_tmp(tmp_path):    # pytest builtin → no tiderace equivalent yet → flagged
     assert tmp_path
 
 
 @pytest.mark.slow
-def test_tagged():         # arbitrary mark → @riptide.tag("slow")
+def test_tagged():         # arbitrary mark → @tiderace.tag("slow")
     pass

@@ -1,4 +1,4 @@
-"""N5 proof — riptide's native builtin resources (ROADMAP-v2 B1) driven through the REAL engine shim
+"""N5 proof — tiderace's native builtin resources (ROADMAP-v2 B1) driven through the REAL engine shim
 (`engine/py-shim/shim.py`). **No pytest.** Proves, decisively:
 
   • type-DI for builtins: a param `mp: MonkeyPatch` / `p: TmpPath` / `cap: Capsys` wires to the
@@ -19,7 +19,7 @@ import tempfile
 import textwrap
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)  # the `riptide` package (so the shim can `import riptide.builtins`)
+sys.path.insert(0, _HERE)  # the `tiderace` package (so the shim can `import tiderace.builtins`)
 sys.path.insert(0, os.path.join(_HERE, os.pardir, "py-shim"))  # `shim`
 
 import shim  # noqa: E402
@@ -30,18 +30,18 @@ CORPUS = textwrap.dedent(
     import pathlib
     import sys
 
-    from riptide.builtins import Capfd, Capsys, MonkeyPatch, TmpPath
+    from tiderace.builtins import Capfd, Capsys, MonkeyPatch, TmpPath
 
     MARKER = "original"          # module attr a test patches, to prove setattr undo
     LEAK = {}                    # carries the tmp dir path to the next test, to prove cleanup
 
     def test_mp_mutates(mp: MonkeyPatch):          # `mp` ≠ provider name "monkeypatch" → BY TYPE
-        mp.setenv("RIPTIDE_B1", "yes")
+        mp.setenv("TIDERACE_B1", "yes")
         mp.setattr(sys.modules[__name__], "MARKER", "patched")
-        assert os.environ["RIPTIDE_B1"] == "yes" and MARKER == "patched"
+        assert os.environ["TIDERACE_B1"] == "yes" and MARKER == "patched"
 
     def test_mp_restored():                        # teardown of the prior test must have undone both
-        assert "RIPTIDE_B1" not in os.environ
+        assert "TIDERACE_B1" not in os.environ
         assert MARKER == "original"
 
     def test_tmp_path_create(p: TmpPath):          # `p` ≠ "tmp_path" → BY TYPE; and it IS a real Path

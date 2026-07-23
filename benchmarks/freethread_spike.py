@@ -7,7 +7,7 @@ the sub-interpreter tier (TID-2) which solves the same "parallel no-fork" proble
 Run under BOTH interpreters and compare:
 
     # GIL-enabled 3.14 (the ordinary build)
-    .riptide-fx-venv/bin/python benchmarks/freethread_spike.py
+    .tiderace-fx-venv/bin/python benchmarks/freethread_spike.py
 
     # free-threaded 3.14t
     $(uv python find cpython-3.14.4+freethreaded)  benchmarks/freethread_spike.py

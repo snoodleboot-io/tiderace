@@ -7,11 +7,11 @@ their module directories; for the authoritative code map see
 
 ```mermaid
 flowchart TB
-    RIP["riptide<br/>(engine-cli)"] --> CORE
-    DAE["riptide-daemon<br/>(engine-daemon)"] --> CORE
+    RIP["tiderace<br/>(engine-cli)"] --> CORE
+    DAE["tiderace-daemon<br/>(engine-daemon)"] --> CORE
     PROBE["inproc-probe<br/>(engine-inproc) ②"] --> CORE
     CORE["engine-core (the engine library)"] -->|frames| SHIM["py-shim/shim.py"]
-    AUTH["py-riptide/riptide<br/>(authoring)"] -.imported by.-> SHIM
+    AUTH["py-tiderace/tiderace<br/>(authoring)"] -.imported by.-> SHIM
 ```
 
 ## `engine-core` — the engine library
@@ -50,19 +50,19 @@ All collection, graph, schedule, exec, coverage, impact, and cache logic. Module
 
 ## `engine-daemon` — the warm server
 
-Keeps CPython warm and adds impact-aware, parallel, file-watching execution. The `riptide-daemon`
+Keeps CPython warm and adds impact-aware, parallel, file-watching execution. The `tiderace-daemon`
 binary (`main.rs`). Module files (`engine-daemon/src/`):
 
 - **`engine_handler.rs`** — orchestrates a run: collect → graph → schedule → execute; chooses no-fork
-  + restore by default (`optimistic_no_fork()` unless `RIPTIDE_FORCE_FORK=1`) and drives impact-aware
-  re-runs (`run_impacted`). Under `RIPTIDE_SUBINTERP=1` it also partitions modules by sub-interpreter
+  + restore by default (`optimistic_no_fork()` unless `TIDERACE_FORCE_FORK=1`) and drives impact-aware
+  re-runs (`run_impacted`). Under `TIDERACE_SUBINTERP=1` it also partitions modules by sub-interpreter
   safety (`safe_set`, cached in `PersistedState`) and routes the safe subset to the `SubInterpWorker`.
 - **`probe.rs`** — `probe` mode: classifies each module `safe` / `unsafe` / `unknown` for the
   sub-interpreter tier (imports it in an isolated sub-interpreter), feeding the routing above.
 - **`pool.rs`** — the parallel pool, fed `WorkerBatch`es from the `LocalityScheduler`. Each batch runs
   on the platform's backend: a warm `ForkWorker` per core on Unix, a no-fork `SubprocessWorker` per
   batch on Windows (no `fork()` there).
-- **`persist.rs`** — `.riptide-state.json` (`PersistedState`, `changed_files()`, `plan()`); the active
+- **`persist.rs`** — `.tiderace-state.json` (`PersistedState`, `changed_files()`, `plan()`); the active
   impact-skip layer (see [state & cache](database.md)).
 - **`watch.rs` / `fs_watcher.rs` / `invalidator.rs`** — `watch` mode: debounced filesystem events feed
   the invalidator, which uses the dep graph to re-run only impacted tests on each save.
@@ -72,8 +72,8 @@ binary (`main.rs`). Module files (`engine-daemon/src/`):
 
 ## `engine-cli` — the one-shot CLI
 
-The `riptide` binary (`main.rs`): one-shot `collect` and `run`. Reads `RIPTIDE_SHIM` (path to
-`py-shim/shim.py`, required) and `RIPTIDE_PYTHON` (default `python3`).
+The `tiderace` binary (`main.rs`): one-shot `collect` and `run`. Reads `TIDERACE_SHIM` (path to
+`py-shim/shim.py`, required) and `TIDERACE_PYTHON` (default `python3`).
 
 ## `engine-inproc` — the in-process backend (②, experimental)
 
@@ -87,10 +87,10 @@ The only logic that runs inside CPython. Imports user code, invokes test bodies,
 **isolation ladder**: `static_impurity` (AST pre-filter), `_restorable` (can this module be snapshot
 + restored?), `_restore_shared` (snapshot/undo of module globals + `os.environ`), and `Engine.run`
 (picks bare no-fork / no-fork + restore / `os.fork()`). It also captures coverage via `sys.monitoring`
-and records purity verdicts. Reads `RIPTIDE_COVERAGE`, `RIPTIDE_RESTORE`, `RIPTIDE_FORCE_FORK`.
+and records purity verdicts. Reads `TIDERACE_COVERAGE`, `TIDERACE_RESTORE`, `TIDERACE_FORCE_FORK`.
 
-## `py-riptide/riptide` — native authoring & migration
+## `py-tiderace/tiderace` — native authoring & migration
 
 The optional native authoring package (ADR-E012): `@provides` / `@cases` / `@uses` type-DI decorators
-(`builtins`, `_resolve.py`, `_spec.py`), and `migrate.py` — the `riptide migrate` AST codemod that
+(`builtins`, `_resolve.py`, `_spec.py`), and `migrate.py` — the `tiderace migrate` AST codemod that
 rewrites a pytest suite to the native model. Lets a suite drop the pytest dependency entirely.

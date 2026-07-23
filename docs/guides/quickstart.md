@@ -3,11 +3,6 @@
 This walks you from a fresh build to the warm inner loop in a few minutes. tiderace is a
 **pure-Rust test engine** — it runs your Python tests directly, with **no pytest at runtime**.
 
-!!! info "Naming"
-    The product is **tiderace**. The engine binaries currently build as `riptide` and
-    `riptide-daemon` (a retired codename being consolidated under tiderace) — read them as
-    tiderace. The legacy `tiderace` binary that orchestrated pytest is the previous generation.
-
 ## 1. Build the engine
 
 tiderace builds from source from the `engine/` Cargo workspace. You need a Rust toolchain and a
@@ -21,8 +16,8 @@ cargo build --release
 
 This produces two binaries under `engine/target/release/`:
 
-- `riptide` — one-shot CLI (`collect`, `run`).
-- `riptide-daemon` — the warm server (`run`, `run --all`, `serve`, `watch`, `bench`, `probe`).
+- `tiderace` — one-shot CLI (`collect`, `run`).
+- `tiderace-daemon` — the warm server (`run`, `run --all`, `serve`, `watch`, `bench`, `probe`).
 
 !!! info "Platforms"
     Linux, macOS, and **Windows** are all supported. Windows has no `fork()`, so isolation there is
@@ -36,13 +31,13 @@ The engine is **env-driven**. Two variables matter to start:
 
 ```bash
 # Required: the Python shim the engine runs inside CPython (it imports your code & invokes bodies).
-export RIPTIDE_SHIM="$PWD/py-shim/shim.py"
+export TIDERACE_SHIM="$PWD/py-shim/shim.py"
 
 # Optional: the interpreter (defaults to python3). Use your project's venv if it has deps.
-export RIPTIDE_PYTHON="$(which python3)"
+export TIDERACE_PYTHON="$(which python3)"
 ```
 
-`RIPTIDE_SHIM` is mandatory — without it the binaries exit with an error. See
+`TIDERACE_SHIM` is mandatory — without it the binaries exit with an error. See
 [Configuration](configuration.md) for the full set of variables.
 
 ## 3. First run — everything executes
@@ -51,7 +46,7 @@ Point the daemon at your tests. The impact-aware `run` does a full pass the firs
 prior state to compare against), recording each test's coverage footprint:
 
 ```bash
-./target/release/riptide-daemon run /path/to/tests
+./target/release/tiderace-daemon run /path/to/tests
 ```
 
 ```
@@ -65,7 +60,7 @@ Behind that line, tiderace:
 3. Launched a warm wellspring per core and ran every test through the
    [isolation ladder](../design/architecture.md#the-isolation-ladder) — pure tests in-process, the
    rest snapshot/restored, only opaque modules forked.
-4. Captured per-test coverage via `sys.monitoring` and persisted it to **`.riptide-state.json`**
+4. Captured per-test coverage via `sys.monitoring` and persisted it to **`.tiderace-state.json`**
    (per-test deps + file content hashes).
 
 ## 4. Second run — nothing changes, nothing runs
@@ -73,7 +68,7 @@ Behind that line, tiderace:
 Run the exact same command again without touching any files:
 
 ```bash
-./target/release/riptide-daemon run /path/to/tests
+./target/release/tiderace-daemon run /path/to/tests
 ```
 
 ```
@@ -89,7 +84,7 @@ Edit a test file or a source file it depends on, then run again:
 
 ```bash
 # edit src/auth.py, then:
-./target/release/riptide-daemon run /path/to/tests
+./target/release/tiderace-daemon run /path/to/tests
 ```
 
 ```
@@ -106,7 +101,7 @@ When you want every test to execute regardless of state — a clean baseline, or
 `run --all`:
 
 ```bash
-./target/release/riptide-daemon run /path/to/tests --all
+./target/release/tiderace-daemon run /path/to/tests --all
 ```
 
 This runs the whole suite across the parallel pool. (`--all` opts out of the impact-skip and its
@@ -117,7 +112,7 @@ coverage recording; use plain `run` to keep the dependency graph fresh.)
 For an editor loop, keep the interpreter warm and re-run only what each save impacts:
 
 ```bash
-./target/release/riptide-daemon watch /path/to/tests
+./target/release/tiderace-daemon watch /path/to/tests
 ```
 
 ```
@@ -136,6 +131,6 @@ long-lived warm process, so it's a **local-dev** tool; CI should use fresh `run`
 
 - [Configuration](configuration.md) — every environment variable and the `--all` flag
 - [Watch Mode](watch.md) — the warm inner loop in detail
-- [CI](ci.md) — safe vs fast modes, caching `.riptide-state.json`
+- [CI](ci.md) — safe vs fast modes, caching `.tiderace-state.json`
 - [How impact analysis works](../design/impact-analysis.md)
 - [Benchmarks](benchmarks.md) — run the comparison yourself

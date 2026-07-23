@@ -1,7 +1,7 @@
 """Output capture builtins — `Capsys` (sys-level) and `Capfd` (fd-level), each injected by type.
 
 Two distinct types so type-DI can request either independently (pytest disambiguates `capsys`/`capfd`
-by name; riptide does it by type). Both expose `.readouterr() -> CaptureResult`, draining what was
+by name; tiderace does it by type). Both expose `.readouterr() -> CaptureResult`, draining what was
 written since the last read. The builtin providers start capture before the test body and restore the
 real streams on teardown."""
 from __future__ import annotations

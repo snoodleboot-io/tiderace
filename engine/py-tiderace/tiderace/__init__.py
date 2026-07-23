@@ -1,13 +1,13 @@
-"""riptide — native, type-driven test authoring. **No pytest.**
+"""tiderace — native, type-driven test authoring. **No pytest.**
 
 The user-facing surface of the pure-Rust engine (ADR-E001/E012). Resources are wired by **type**, not
-by name; the engine (collection, scopes, fork) stays in Rust. Each decorator stamps a riptide-owned
-attribute (`__riptide_provider__` / `__riptide_cases__`) that the shim reads — the native replacement
+by name; the engine (collection, scopes, fork) stays in Rust. Each decorator stamps a tiderace-owned
+attribute (`__tiderace_provider__` / `__tiderace_cases__`) that the shim reads — the native replacement
 for duck-typing on pytest's decorator.
 
-    import riptide
+    import tiderace
 
-    @riptide.provides(scope="module")
+    @tiderace.provides(scope="module")
     def db() -> Db:
         conn = Db.connect(":memory:")
         yield conn                      # yield ⇒ teardown at scope exit
@@ -17,7 +17,7 @@ for duck-typing on pytest's decorator.
         db.add("ada")
         assert db.count() == 1
 
-    @riptide.cases([(2, 3, 5), (0, 0, 0)])
+    @tiderace.cases([(2, 3, 5), (0, 0, 0)])
     def test_add(a, b, exp):
         assert add(a, b) == exp
 """
@@ -26,7 +26,7 @@ from __future__ import annotations
 import inspect
 import itertools
 
-from ._errors import RiptideDefinitionError, RiptideError, RiptideResolutionError
+from ._errors import TideraceDefinitionError, TideraceError, TideraceResolutionError
 from ._resolve import build_type_index, provided_type, resolve_params
 from ._spec import SCOPES, Case, Mark, ProviderSpec
 
@@ -41,9 +41,9 @@ __all__ = [
     "ProviderSpec",
     "Case",
     "Mark",
-    "RiptideError",
-    "RiptideDefinitionError",
-    "RiptideResolutionError",
+    "TideraceError",
+    "TideraceDefinitionError",
+    "TideraceResolutionError",
     "build_type_index",
     "resolve_params",
     "provided_type",
@@ -51,7 +51,7 @@ __all__ = [
 
 
 def provides(_fn=None, *, scope: str = "function", autouse: bool = False, name=None, type=None, params=None):
-    """Declare a resource (riptide's fixture). The provided type is `type=` or the function's return
+    """Declare a resource (tiderace's fixture). The provided type is `type=` or the function's return
     annotation (unwrapping `Iterator[T]`/`Generator[T, ...]` for yield-style teardown).
 
     `params=[...]` fans the provider out (B5 — the native form of `@pytest.fixture(params=...)`): the
@@ -60,15 +60,15 @@ def provides(_fn=None, *, scope: str = "function", autouse: bool = False, name=N
     def deco(fn):
         ptype = type or provided_type(fn)
         if ptype is None:
-            raise RiptideDefinitionError(
+            raise TideraceDefinitionError(
                 f"@provides {fn.__name__}: cannot determine the provided type — annotate the return "
                 f"(`def {fn.__name__}() -> T:`) or pass `type=T`"
             )
         if scope not in SCOPES:
-            raise RiptideDefinitionError(
+            raise TideraceDefinitionError(
                 f"@provides {fn.__name__}: unknown scope {scope!r}; one of {SCOPES}"
             )
-        fn.__riptide_provider__ = ProviderSpec(
+        fn.__tiderace_provider__ = ProviderSpec(
             provides=ptype,
             scope=scope,
             autouse=autouse,
@@ -83,10 +83,10 @@ def provides(_fn=None, *, scope: str = "function", autouse: bool = False, name=N
 
 def cases(arg=None, *, ids=None, **kwargs):
     """Parametrize a test. Positional rows — `cases([(2, 3, 5), (0, 0, 0)])` — or single-param
-    shorthand — `cases(x=[1, 2, 3])` (cartesian across multiple kwargs). Stamps `__riptide_cases__`."""
+    shorthand — `cases(x=[1, 2, 3])` (cartesian across multiple kwargs). Stamps `__tiderace_cases__`."""
 
     def deco(fn):
-        fn.__riptide_cases__ = _normalize_cases(arg, kwargs, ids)
+        fn.__tiderace_cases__ = _normalize_cases(arg, kwargs, ids)
         return fn
 
     return deco
@@ -95,38 +95,38 @@ def cases(arg=None, *, ids=None, **kwargs):
 def uses(*types: type):
     """Depend on provider(s) **by type** for their side effects, without binding them as parameters —
     the native analogue of `@pytest.mark.usefixtures`. Each type is set up (and torn down) around the
-    test like any provider, but no value is passed in. Stamps `__riptide_uses__` (a list of types) that
+    test like any provider, but no value is passed in. Stamps `__tiderace_uses__` (a list of types) that
     the shim resolves to provider names and folds into the test's closure.
 
-        @riptide.uses(SeededDb)           # SeededDb's provider runs; nothing injected
+        @tiderace.uses(SeededDb)           # SeededDb's provider runs; nothing injected
         def test_reads_seeded_rows():
             ...
     """
 
     def deco(fn):
-        fn.__dict__.setdefault("__riptide_uses__", []).extend(types)
+        fn.__dict__.setdefault("__tiderace_uses__", []).extend(types)
         return fn
 
     return deco
 
 
 def _add_mark(fn, mark: Mark):
-    """Append `mark` to `fn.__riptide_marks__` (creating it), or — when `fn` is None (the decorator was
+    """Append `mark` to `fn.__tiderace_marks__` (creating it), or — when `fn` is None (the decorator was
     called with arguments) — return a decorator that will."""
     if fn is None:
         return lambda f: _add_mark(f, mark)
-    marks = fn.__dict__.setdefault("__riptide_marks__", [])
+    marks = fn.__dict__.setdefault("__tiderace_marks__", [])
     marks.append(mark)
     return fn
 
 
 def skip(_fn=None, *, reason: str = ""):
-    """Always skip this test — `@riptide.skip` or `@riptide.skip(reason=...)`."""
+    """Always skip this test — `@tiderace.skip` or `@tiderace.skip(reason=...)`."""
     return _add_mark(_fn, Mark(kind="skip", reason=reason))
 
 
 def skip_if(condition, *, reason: str = ""):
-    """Skip when `condition` is truthy — `@riptide.skip_if(sys.platform == 'win32', reason=...)`."""
+    """Skip when `condition` is truthy — `@tiderace.skip_if(sys.platform == 'win32', reason=...)`."""
     return _add_mark(None, Mark(kind="skip_if", condition=bool(condition), reason=reason))
 
 
@@ -136,7 +136,7 @@ def xfail(_fn=None, *, reason: str = "", strict: bool = False):
 
 
 def tag(*names: str):
-    """Attach selection tag(s) — `@riptide.tag("slow", "db")`. Metadata only; no execution effect."""
+    """Attach selection tag(s) — `@tiderace.tag("slow", "db")`. Metadata only; no execution effect."""
 
     def deco(fn):
         for n in names:

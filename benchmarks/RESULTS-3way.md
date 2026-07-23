@@ -10,14 +10,14 @@
 >
 > - **pytest** — `python -m pytest` (single process, no per-test isolation).
 > - **old** — the retired `tiderace` orchestrator (historical baseline; engine since removed).
-> - **native (fork)** — `riptide-daemon run --all`: own Rust engine, **fork-per-test** isolation
+> - **native (fork)** — `tiderace-daemon run --all`: own Rust engine, **fork-per-test** isolation
 >   (ADR-E003), parallel pool of warm wellsprings.
 > - **native --fast** — optimistic **no-fork + snapshot/restore** (impure tests run in-process and have
 >   their mutation undone; opaque modules auto-fork for soundness).
 >
 > **Note (as of 2026-06):** no-fork+restore is now the **default** execution path — the `--fast` flag was
 > removed (the engine decides per test). These rows labelled "--fast" are the default behaviour today;
-> `RIPTIDE_FORCE_FORK=1` is the inverse (the "native (fork)" baseline). Numbers unchanged.
+> `TIDERACE_FORCE_FORK=1` is the inverse (the "native (fork)" baseline). Numbers unchanged.
 
 ## Summary — warm + cold at a glance
 
@@ -55,12 +55,12 @@ embedded interpreter) — or a `SubInterpWorker` — would remove next.
 
 | tool | mean time | vs pytest |
 |---|---:|---:|
-| **native (riptide, impact-skip)** | **9.4 ms** | **89× faster** |
+| **native (tiderace, impact-skip)** | **9.4 ms** | **89× faster** |
 | old (tiderace, impact-skip) | 37.7 ms | 22× faster |
 | pytest (no warm mode) | 0.84 s | 1.0× |
 
-`riptide-daemon run` is now **impact-aware** (`engine-daemon/src/persist.rs` + `run_impacted`): it
-persists each test's coverage footprint + per-file content hashes (`.riptide-state.json`) and on re-run
+`tiderace-daemon run` is now **impact-aware** (`engine-daemon/src/persist.rs` + `run_impacted`): it
+persists each test's coverage footprint + per-file content hashes (`.tiderace-state.json`) and on re-run
 executes only tests whose deps changed — and when nothing changed, it **doesn't even launch the
 wellspring** (just collect + hash + serve cached). That's why native (4.9 ms) now **beats the old
 engine (33.8 ms) by ~7×** — the old engine still does pytest-worker + SQLite setup. A source edit
@@ -70,7 +70,7 @@ re-runs only that file's dependents (verified: edit one module → 1 of 2 tests 
 
 | tool | time | vs pytest |
 |---|---:|---:|
-| **native (riptide), warm** | **~4–6 ms** | ~50–70× faster |
+| **native (tiderace), warm** | **~4–6 ms** | ~50–70× faster |
 | pytest | ~270 ms | 1.0× |
 
 ## Takeaways (honest)

@@ -1,13 +1,13 @@
 # State & Cache
 
 tiderace keeps no SQLite database. Persisted state lives in two places: a local **warm-state JSON
-file** (`.riptide-state.json`) that drives impact-aware re-runs, and a **content-addressed result
+file** (`.tiderace-state.json`) that drives impact-aware re-runs, and a **content-addressed result
 cache** that turns the suite into a build system. Neither is coverage.py and neither is a relational DB.
 
-## `.riptide-state.json` — the warm impact state
+## `.tiderace-state.json` — the warm impact state
 
 The active impact-skip layer (`engine-daemon/src/persist.rs`) writes a single JSON file at
-`<root>/.riptide-state.json`. It is the native analogue of the old engine's `.tiderace.db`, but it is
+`<root>/.tiderace-state.json`. It is the native analogue of the old engine's `.tiderace.db`, but it is
 just two maps:
 
 ```rust
@@ -34,7 +34,7 @@ The lifecycle is small:
 
 ```mermaid
 flowchart LR
-    LOAD["load .riptide-state.json<br/>(missing → empty = cold start)"] --> HASH["hash current files"]
+    LOAD["load .tiderace-state.json<br/>(missing → empty = cold start)"] --> HASH["hash current files"]
     HASH --> CHG["changed_files():<br/>files whose hash differs"]
     CHG --> PLAN["plan(): partition tests<br/>into to_run / cached"]
     PLAN --> RUN["run to_run<br/>(isolation ladder)"]
@@ -65,14 +65,14 @@ stored behind the `Cache` trait. Production wires a `TieredCache(Local, Remote)`
 The shareable **remote tier is `DirCache`** — a directory of content-hashed JSON entries (`<hex>.json`),
 so pointing it at a CI cache path / shared mount / artifact makes a result computed on one machine a free
 hit on any other. An HTTP/object-store client is a drop-in behind the same `Cache` trait. The daemon
-consults the cache in `run` (**cache hit → impact-skip → run**) when `RIPTIDE_CACHE_DIR` is set; only
+consults the cache in `run` (**cache hit → impact-skip → run**) when `TIDERACE_CACHE_DIR` is set; only
 *pure* outcomes are cached (the purity gate keeps hits sound).
 
 ## Two layers, one idea
 
 Both layers answer "has this work already been done?", at different granularities:
 
-| | `.riptide-state.json` (impact-skip) | content-addressed cache |
+| | `.tiderace-state.json` (impact-skip) | content-addressed cache |
 |---|---|---|
 | Scope | per project, local | cross-machine |
 | Keyed on | per-test deps + file content hashes | full input closure (`CacheKey`) |

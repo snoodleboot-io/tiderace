@@ -13,7 +13,7 @@ impls — the per-item run loop (`build ExecRequest → write/read frame → ass
 copies of one loop, two copies of one pipe dance, all soldered to a real OS process.
 
 The cost was **testability**, not just duplication. Every execution-path test had to `fork`/`exec` a
-real interpreter against a live `.riptide-fx-venv`; the acceptance scenarios early-return `SKIP` when
+real interpreter against a live `.tiderace-fx-venv`; the acceptance scenarios early-return `SKIP` when
 that venv is absent (`fixtures_acceptance.rs`). So in CI-without-Python the entire
 `Worker → frames → TestResult` path — scheduling, batching, result mapping, mid-run-failure handling —
 was **unverified**. "We're building our own framework but can only prove the executor works by shelling
@@ -58,7 +58,7 @@ Code style per project conventions: `transport.rs` holds the seam; typed `Engine
 
 `ShimTransport` is the seam a future **`InProcessTransport`** plugs behind with **no `Worker` change**:
 ship the kernel as a compiled extension (PyO3/maturin, abi3) loaded **into one** Python interpreter and
-drive **riptide's own executor** (calling user test/fixture bodies — never pytest, per ADR-E001) by
+drive **tiderace's own executor** (calling user test/fixture bodies — never pytest, per ADR-E001) by
 **function call** instead of pipe frame — the JSON-framing-over-pipes control plane
 disappears, `fork()` is retained only where it earns isolation. This is the genuinely "rust-native"
 execution path. It is **flagged for human ratification** and should land as its own follow-up once the
@@ -66,7 +66,7 @@ seam (above) has proven out.
 
 **Feasibility: proven (GO).** A throwaway PyO3 0.23 spike (`spike-inproc/`, not in engine-core; since
 disposed — evidence in the [in-process backend ticket](../../../../backlog/in-process-ffi-backend/DESIGN.md)
-+ git history) embeds one CPython 3.11.15 and, by FFI, drives **riptide's own executor — no pytest**:
++ git history) embeds one CPython 3.11.15 and, by FFI, drives **tiderace's own executor — no pytest**:
 it imports the user module, calls the bare `test_*` bodies, catches `AssertionError` (exactly as
 `engine/py-shim/shim.py` does), and drives stdlib `unittest.TestCase.run()` — per-test verdicts extracted
 as Rust values, the exact `exchange` shape. Critically it imports and hammers **`_decimal`**, the precise
@@ -94,7 +94,7 @@ rejection of *many* interpreters per process is not a rejection of *one*.
 - ➕ Net **deduplication**: one transport, one run loop (was 2 + 3 copies).
 - ➕ ② becomes "add a third `ShimTransport` impl," not "rewrite the executor."
 - ➖ One more abstraction between `Worker` and the pipe (a trait + a `run_batch` indirection).
-- ⚠️ The in-process fakes test *riptide's logic*, **not** Python semantics — the live tier still owns
+- ⚠️ The in-process fakes test *tiderace's logic*, **not** Python semantics — the live tier still owns
   "does pytest actually behave." Do not let the fast offline tier lull us into dropping the live one.
 
 ## Alternatives considered

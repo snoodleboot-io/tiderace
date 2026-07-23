@@ -383,7 +383,7 @@ return precomputed results — both must be reachable **only** by the user who o
 | Control | Mechanism |
 |---|---|
 | **Transport** | A **local socket only** — Unix domain socket on Linux/macOS (named pipe on the future Windows fallback). **No TCP, no network listener**, ever. There is no remote attack surface. |
-| **Per-user** | Socket lives under the user's runtime dir (`$XDG_RUNTIME_DIR/riptide/` or equivalent), created `0700`/socket `0600`, owned by the invoking uid. The server verifies peer credentials (`SO_PEERCRED`/`LOCAL_PEERCRED`) and refuses any uid ≠ owner. |
+| **Per-user** | Socket lives under the user's runtime dir (`$XDG_RUNTIME_DIR/tiderace/` or equivalent), created `0700`/socket `0600`, owned by the invoking uid. The server verifies peer credentials (`SO_PEERCRED`/`LOCAL_PEERCRED`) and refuses any uid ≠ owner. |
 | **Per-project** | One `Session` per project root, keyed by a canonicalized `ProjectKey` (resolved real path + interpreter fingerprint). The socket path is derived from a hash of that key, so two projects (or two virtualenvs of one project) never share warm state — and a client cannot address another project's session. |
 | **Stale-socket guard** | A leftover socket from a crashed daemon is detected (connect fails / `health` times out) and **replaced**, never silently trusted. The PID + start-time is recorded in a lock file so a client can distinguish "alive," "crashed," and "different daemon." |
 | **No privilege escalation** | The daemon runs as the invoking user with no setuid/setgid; it inherits the user's environment and venv. It is not a system service and registers no global listener. |
@@ -499,7 +499,7 @@ queries and runs, and **server-pushed notifications** for streamed results.
 | `discover` | `{ roots?, force_rescan? }` | `{ items: TestItem[], collection_revision }` | Returns the warm [collection](03-collection.md). Cheap on a hot session (served from `CollectionState`); triggers a rescan only if stale or `force_rescan`. The IDE's test tree. |
 | `run` | `{ selection: NodeId[] \| Query, options }` | `RunReport` (also streamed) | Full run of an explicit selection or [selection query](13-cross-cutting.md). Honors **cache → impact-skip → run**. |
 | `runImpacted` | `{ since?: ChangeSet, options }` | `RunReport` (also streamed) | Runs only tests impacted by changes since the given point (defaults to "since last run" using the warm impact graph). The edit→result fast path of [§3](#3-the-editresult-loop-sequence). |
-| `subscribeResults` | `{ filter?: NodeId[] }` | `{ subscription: SubId }` | Opens a streaming subscription; the daemon pushes `riptide/result` and `riptide/runFinished` notifications (below). Unsubscribe via `unsubscribe` or socket close. |
+| `subscribeResults` | `{ filter?: NodeId[] }` | `{ subscription: SubId }` | Opens a streaming subscription; the daemon pushes `tiderace/result` and `tiderace/runFinished` notifications (below). Unsubscribe via `unsubscribe` or socket close. |
 | `health` | `{}` | `HealthStatus` | Liveness + warmth + RSS + cache-hit-rate. Used for reuse/recycle decisions and stale-daemon detection ([§6](#6-security--scoping-per-project-per-user-local-socket-only)). |
 | `shutdown` | `{ mode: "graceful" \| "now" }` | `{ ok }` | `Stopping`: graceful drains in-flight runs then exits; `now` kills fork groups immediately. |
 
@@ -509,11 +509,11 @@ Streaming is what makes the IDE feel live — results paint as each test finishe
 
 | Notification | Payload | Fires when |
 |---|---|---|
-| `riptide/runStarted` | `{ run_id, total_selected, impacted, cache_candidates }` | A run is admitted; lets the IDE show a progress denominator. |
-| `riptide/result` | `{ run_id, TestResult }` | Each test resolves — whether **served from cache** (`served_from_cache=true`) or freshly forked. Carries `Outcome`, `Duration`, and `RichDiff` on failure ([02-domain-model](02-domain-model.md)). |
-| `riptide/runFinished` | `{ run_id, RunReport }` | The run completes; the IDE finalizes counts and exit disposition. |
-| `riptide/invalidated` | `{ files, kind, recycled: bool }` | The watcher [invalidated](#5-robust-module-invalidation-the-stale-import-failure-mode) state (and whether a recycle happened) — lets the IDE mark affected tests "stale" instantly. |
-| `riptide/collectionChanged` | `{ added, removed, collection_revision }` | A rescan changed the test set; the IDE refreshes its tree. |
+| `tiderace/runStarted` | `{ run_id, total_selected, impacted, cache_candidates }` | A run is admitted; lets the IDE show a progress denominator. |
+| `tiderace/result` | `{ run_id, TestResult }` | Each test resolves — whether **served from cache** (`served_from_cache=true`) or freshly forked. Carries `Outcome`, `Duration`, and `RichDiff` on failure ([02-domain-model](02-domain-model.md)). |
+| `tiderace/runFinished` | `{ run_id, RunReport }` | The run completes; the IDE finalizes counts and exit disposition. |
+| `tiderace/invalidated` | `{ files, kind, recycled: bool }` | The watcher [invalidated](#5-robust-module-invalidation-the-stale-import-failure-mode) state (and whether a recycle happened) — lets the IDE mark affected tests "stale" instantly. |
+| `tiderace/collectionChanged` | `{ added, removed, collection_revision }` | A rescan changed the test set; the IDE refreshes its tree. |
 
 > **Mapping to the [hook host](12-plugin-host.md).** These RPC notifications are produced by a
 > daemon-side [`Reporter`](13-cross-cutting.md) subscribed to the engine's
@@ -525,7 +525,7 @@ Streaming is what makes the IDE feel live — results paint as each test finishe
 
 - A `Session` admits one logical **run at a time** per project (queued otherwise); within a run,
   fork workers execute in parallel (the `thread::scope` fan-out generalized from `pool.rs`), and
-  `riptide/result` notifications are emitted in **completion order** with a `run_id` so a client can
+  `tiderace/result` notifications are emitted in **completion order** with a `run_id` so a client can
   correlate. Multiple clients can `subscribeResults` to the same run.
 - Frame safety carries forward from `pool.rs`: all `NodeId`s and payloads travel **inside** JSON
   (serde-escaped), so a crafted filename or test id can never forge a second protocol frame — the

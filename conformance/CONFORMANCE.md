@@ -1,6 +1,6 @@
-# N5 conformance — `riptide migrate` against real pytest suites
+# N5 conformance — `tiderace migrate` against real pytest suites
 
-Measures how much **real-world** pytest authoring maps to riptide's native type-DI surface, and ranks
+Measures how much **real-world** pytest authoring maps to tiderace's native type-DI surface, and ranks
 exactly what doesn't — so the next build items are **data-driven**, not guessed.
 
 ## Method
@@ -35,7 +35,7 @@ Remaining 36: untyped value-providers/params (lowercase factory & method calls �
 correctly flagged), 6 usefixtures (untyped cross-file targets), 3 unsupported builtins, 1 from-pytest
 import.*
 
-**cachetools is a pure `unittest.TestCase` suite** — *nothing pytest-specific to migrate*. riptide
+**cachetools is a pure `unittest.TestCase` suite** — *nothing pytest-specific to migrate*. tiderace
 already drives it via stdlib `unittest.TestCase.run()` (ADR-E001), so it runs **as-is, no migration**.
 Useful confirmation that the unittest path needs no surface work.
 
@@ -59,10 +59,10 @@ largely *untyped*):
 
 ### B1 delivered — native builtin resources (2026-06-21)
 
-`riptide.builtins` (`MonkeyPatch`/`TmpPath`/`Capsys`/`Capfd`) now ships and `migrate` maps the five
-builtin requests to typed params + injects `from riptide.builtins import …` (see
-[`engine/py-riptide/riptide/builtins/`](../engine/py-riptide/riptide/builtins/), proof
-[`proof_n5_builtins.py`](../engine/py-riptide/proof_n5_builtins.py)). The shim auto-registers them
+`tiderace.builtins` (`MonkeyPatch`/`TmpPath`/`Capsys`/`Capfd`) now ships and `migrate` maps the five
+builtin requests to typed params + injects `from tiderace.builtins import …` (see
+[`engine/py-tiderace/tiderace/builtins/`](../engine/py-tiderace/tiderace/builtins/), proof
+[`proof_n5_builtins.py`](../engine/py-tiderace/proof_n5_builtins.py)). The shim auto-registers them
 globally, so they resolve by type (the migrated form) or by name (the pytest form).
 
 **Measured effect on click:** `70% → 93%` auto-map; can't-map `43 → 10`. The entire **pytest-builtin
@@ -83,7 +83,7 @@ now (`tmpdir` mapped with a py.path caveat).
 resolving one level through a local `x = ClassName()` assignment, plus literal types), emitting `-> X`
 instead of flagging — which also types the dependent test params. **Precision over recall**: lowercase
 factory calls, unresolved names, and conflicting returns are never given a wrong annotation (they stay
-flagged). Proof: [`proof_b3_inference.py`](../engine/py-riptide/proof_b3_inference.py).
+flagged). Proof: [`proof_b3_inference.py`](../engine/py-tiderace/proof_b3_inference.py).
 
 **Measured: TOTAL 79% → 85%** (can't-map 61); **Flask 66% → 79%** (untyped-provider 25→19,
 untyped-fixture-param 27→10). The remaining 21 untyped providers are the unconfident shapes correctly
@@ -92,7 +92,7 @@ left for the human.
 ### B6 delivered — run-through tier (2026-06-21)
 
 Beyond the static auto-map %, [`runthrough.py`](runthrough.py) *executes* a real suite **through
-riptide's engine** and diffs every test's outcome against an oracle → an **execution pass-rate** (the
+tiderace's engine** and diffs every test's outcome against an oracle → an **execution pass-rate** (the
 number adoption actually turns on). First target: **cachetools** (pure `unittest`, so no migration —
 isolates the *execution* path; oracle = stock `unittest` `TestSuite`, which honors `setUpClass`).
 
@@ -117,7 +117,7 @@ for the long tail.
 
 When only click was measured, the remaining gaps ranked:
 
-1. **`usefixtures` (6, 60%)** — B2: native `@riptide.uses(Provider)` / autouse mapping.
+1. **`usefixtures` (6, 60%)** — B2: native `@tiderace.uses(Provider)` / autouse mapping.
 2. **untyped provider (3, 30%)** — B3: infer a provider's type from its body when the annotation is
    absent.
 3. request introspection (1, 10%) — B4: low-priority; decide a narrow native equivalent vs. permanent

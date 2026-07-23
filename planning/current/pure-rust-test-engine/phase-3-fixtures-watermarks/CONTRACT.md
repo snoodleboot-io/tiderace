@@ -326,7 +326,7 @@ The frozen interfaces in §1–§9 were implemented **without shape changes**. T
    override/parametrization itself, mirroring the Rust model. The Rust `FixtureGraph` / `LayeredResolver`
    / `WatermarkStack` / `FixturePlan` are the **frozen contract + the unit-/pure-acceptance-tested
    model** Phases 4–6 consume. **Open seam:** a native discovery collector that feeds the Rust resolver
-   into the live path (replacing the shim's marker read with `@riptide.fixture`, ADR-E001) — a clean
+   into the live path (replacing the shim's marker read with `@tiderace.fixture`, ADR-E001) — a clean
    later-phase addition, not a reshape.
 
 3. `closure_hash` uses a self-contained FNV-1a-based mix over the length-prefixed transitive closure

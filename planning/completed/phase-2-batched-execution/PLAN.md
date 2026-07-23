@@ -1,8 +1,8 @@
 # Phase 2 — Faster execution: batch → persistent workers → subinterpreters
 
-> **Status:** Stage A in progress on `feat/riptide-batched-execution`. B and C planned.
+> **Status:** Stage A in progress on `feat/tiderace-batched-execution`. B and C planned.
 > **Driver:** ADR-009. **Goal:** kill the per-test interpreter-startup tax that makes
-> riptide's cold full run ~Nx slower than in-process pytest, while keeping 100% pytest
+> tiderace's cold full run ~Nx slower than in-process pytest, while keeping 100% pytest
 > compatibility (fixtures, plugins, assertion rewriting all stay — real pytest runs).
 
 ## Why
@@ -38,7 +38,7 @@ summary lines (each contains the exact node id). Keep the isolated per-test path
 ## Stage B — Persistent warm workers (next)
 Long-lived CPython workers with pytest pre-imported, fed node ids over IPC (execnet-style,
 as `pytest-xdist` does). Startup paid once per worker per daemon/watch session. Unlocks a
-`riptide watch` mode with tens-of-ms edit→result loops. Larger effort; needs an IPC
+`tiderace watch` mode with tens-of-ms edit→result loops. Larger effort; needs an IPC
 protocol and a worker lifecycle. Separate branch + ADR addendum.
 
 ## Stage C — Embedded CPython subinterpreters (longer-term)

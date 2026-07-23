@@ -4,9 +4,9 @@ tiderace has **no database** (no SQLite, no `.tiderace.db`). Warm state is a sin
 Rust↔Python seam is a length-prefixed JSON frame. Both are documented here, derived directly from the
 code.
 
-## `.riptide-state.json` — impact-skip state
+## `.tiderace-state.json` — impact-skip state
 
-Written at `<root>/.riptide-state.json` by impact-aware `riptide-daemon run` (`engine-daemon/src/persist.rs`).
+Written at `<root>/.tiderace-state.json` by impact-aware `tiderace-daemon run` (`engine-daemon/src/persist.rs`).
 It records each test's last outcome and dependency footprint plus the content hash of every touched
 file, so a later run re-executes only the tests whose dependencies changed. A missing or unparseable
 file is treated as a cold start (empty state).

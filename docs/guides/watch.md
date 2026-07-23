@@ -1,16 +1,12 @@
 # Watch Mode
 
-`riptide-daemon watch` keeps a **warm** CPython interpreter — your project imported **once** — and
+`tiderace-daemon watch` keeps a **warm** CPython interpreter — your project imported **once** — and
 re-runs only the tests impacted by each file you save. Because the interpreter stays alive between
 runs, every cycle after the first pays **no interpreter startup**: you get millisecond feedback as
 you edit.
 
-!!! info "Naming"
-    The binaries currently build as `riptide` / `riptide-daemon` — a retired codename being
-    consolidated under tiderace. Read them as tiderace.
-
 ```bash
-riptide-daemon watch tests/
+tiderace-daemon watch tests/
 ```
 
 ```
@@ -48,7 +44,7 @@ quiet window, and does the **minimum** work per change:
 The dependency graph is empty until coverage from real runs populates it. So the **first** edits in
 a fresh `watch` session conservatively re-run the full candidate set (correct, just not yet precise);
 as runs accrue coverage footprints, selection narrows to exactly the impacted tests. The impact-aware
-daemon `run` already records this footprint to `.riptide-state.json`, so a project you've `run`
+daemon `run` already records this footprint to `.tiderace-state.json`, so a project you've `run`
 recently starts `watch` with a warmer graph.
 
 ## When *not* to use it
@@ -58,8 +54,8 @@ deliberate convenience for **trusted local development** — it's not an isolati
 whole session. **Do not use the warm process as your CI gate.** For CI, run a fresh one-shot:
 
 ```bash
-riptide-daemon run tests/          # impact-aware fresh run
-riptide-daemon run tests/ --all    # full fresh run
+tiderace-daemon run tests/          # impact-aware fresh run
+tiderace-daemon run tests/ --all    # full fresh run
 ```
 
 Each of those launches a clean wellspring and applies the [isolation ladder](../design/architecture.md#the-isolation-ladder)

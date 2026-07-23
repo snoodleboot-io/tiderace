@@ -1,6 +1,6 @@
 # Planning
 
-Development planning docs for riptide. This is **internal, feature-oriented planning** — not user documentation.
+Development planning docs for tiderace. This is **internal, feature-oriented planning** — not user documentation.
 
 - **User documentation** and **whole-system design** (architecture, module design, the cross-cutting ADR log, "how it works") live in [`../docs/`](../docs/).
 - **Per-feature** planning — the PRD, ADR(s), and design doc *specific to one feature* — lives here, inside that feature's folder.

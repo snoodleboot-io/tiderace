@@ -37,7 +37,7 @@ inherited by every forked child via COW; function fixtures run per test. The sco
 | Runner | Mean | Notes |
 |--------|------|-------|
 | pytest (in-process) | 0.85 s ± 0.01 | optimized single-process loop |
-| riptide fork path | 2.86 s ± 0.13 | 509 **sequential** `fork()`s; System 2.48 s = syscall-bound |
+| tiderace fork path | 2.86 s ± 0.13 | 509 **sequential** `fork()`s; System 2.48 s = syscall-bound |
 
 **Honest reading (not a regression):** on a corpus of *trivially cheap* fixtures + tests, per-test
 `fork()` overhead dominates and the engine is ~3.4× slower than pytest **here**. The snapshot-reuse

@@ -23,7 +23,7 @@ fn shim() -> PathBuf {
 }
 /// The fx venv is CPython 3.14 (has `concurrent.interpreters`); used by the fork-identity check (Unix).
 fn venv_python() -> Option<String> {
-    let p = repo_root().join(".riptide-fx-venv/bin/python");
+    let p = repo_root().join(".tiderace-fx-venv/bin/python");
     p.exists().then(|| p.to_string_lossy().into_owned())
 }
 
@@ -80,7 +80,7 @@ fn expected(node_id: &str) -> Outcome {
 fn write_corpus() -> PathBuf {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "riptide_subinterp_{}_{}",
+        "tiderace_subinterp_{}_{}",
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
     ));
@@ -136,7 +136,7 @@ fn subinterp_is_result_identical_to_fork() {
     use engine_core::exec::ForkWorker;
 
     let Some(python) = venv_python() else {
-        skip_live("`.riptide-fx-venv` (CPython 3.14) not present");
+        skip_live("`.tiderace-fx-venv` (CPython 3.14) not present");
         return;
     };
     let dir = write_corpus();

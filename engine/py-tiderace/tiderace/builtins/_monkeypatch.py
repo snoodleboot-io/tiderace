@@ -1,8 +1,8 @@
-"""`MonkeyPatch` — riptide's native, function-scoped patcher (the analogue of pytest's `monkeypatch`).
+"""`MonkeyPatch` — tiderace's native, function-scoped patcher (the analogue of pytest's `monkeypatch`).
 
 Wired **by type** (`mp: MonkeyPatch`), not by name. Every mutation records its inverse; `undo()` replays
 them in reverse at teardown, so a test that patches env/attrs/items is fully isolated from the next.
-No pytest import — this is a plain object the riptide builtin provider yields."""
+No pytest import — this is a plain object the tiderace builtin provider yields."""
 from __future__ import annotations
 
 import os

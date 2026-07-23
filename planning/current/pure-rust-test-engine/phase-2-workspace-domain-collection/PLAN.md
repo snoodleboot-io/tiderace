@@ -27,7 +27,7 @@
 **Goal.** Productionize the Phase-1 fork/Wellspring spike into a real, structured foundation: a
 Cargo **workspace**, the full I/O-free **domain model**, a source-scanning **`RegexCollector`**, a
 **productionized** Wellspring + `ForkWorker` + `ShimProtocol` behind the `Worker` trait seam, and a
-thin CLI (`riptide run`, `riptide collect`). The phase ends with a real end-to-end run of a
+thin CLI (`tiderace run`, `tiderace collect`). The phase ends with a real end-to-end run of a
 **fixture-free** corpus (pytest functions + `Test*` classes + `unittest.TestCase`) whose outcomes
 match pytest **differentially**.
 
@@ -40,7 +40,7 @@ match pytest **differentially**.
 | S3 | **`Collector` trait + `RegexCollector`** (default, `Precision::Regex`) in `engine-core/src/collection/`: `collector.rs`, `regex_collector.rs`, `walk.rs` (tree-walk + ignore rules), `node_id_builder.rs`, `static_mark.rs`. Ports `tiderace/collector.rs`: indentation class/func regexes, `is_test_class` (pytest `Test*` **or** `*TestCase` base), `async def`, path normalization. Emits pytest-compatible `NodeId`s for: pytest functions, `Test*` class methods, `unittest.TestCase` methods (with class prefix — the Phase-1 W4 fix), async tests | [03](../design/03-collection.md) (§2, §4, §5), [10 §1](../design/10-test-styles.md) |
 | S4 | **Productionized Wellspring + ForkWorker + ShimProtocol** in `engine-core/src/exec/` behind the **`Worker` trait** seam: `worker.rs` (trait + `WorkerCaps`), `wellspring.rs`, `fork_worker.rs`, `shim_connection.rs`, `bincode_framing.rs`, `exec_request.rs`, `exec_event.rs`, `proc_group_guard.rs` (ports `tiderace/procutil.rs` `set_process_group`/`kill_tree` verbatim). Carries forward Phase-1 spike learnings (import-once → fork-per-test → length-prefixed binary IPC → result) | [05](../design/05-execution-wellspring.md) (§2, §4.1, §5, §8), [ADR-E002](../design/adr/ADR-E002-execution-substrate.md), [ADR-E003](../design/adr/ADR-E003-fork-snapshot-isolation.md) |
 | S5 | **`shim.py`** in `py-shim/`: receives framed `ExecRequest`, invokes the body per `TestStyle` (pytest fn `func(**args)`; `Test*` method `Cls().method()`; `unittest` `Cls(method).run(OurResult())` with the `OurResult` `unittest.TestResult` subclass), streams framed `ExecEvent`s, reports **raw** pass/fail (Rust applies disposition policy) | [10 §3–§6](../design/10-test-styles.md), [05 §5](../design/05-execution-wellspring.md), [ADR-E001](../design/adr/ADR-E001-pure-rust-engine-no-pytest.md) |
-| S6 | **CLI** `engine-cli`: `riptide run` (collect → fork-run → tally `RunReport` → process exit code) and `riptide collect` (list `NodeId`s, no execution). Thin front-end over `engine-core` (DIP) | [01 §2](../design/01-architecture.md), `tiderace/main.rs` (CLI shape port-forward) |
+| S6 | **CLI** `engine-cli`: `tiderace run` (collect → fork-run → tally `RunReport` → process exit code) and `tiderace collect` (list `NodeId`s, no execution). Thin front-end over `engine-core` (DIP) | [01 §2](../design/01-architecture.md), `tiderace/main.rs` (CLI shape port-forward) |
 | S7 | **`CONTRACT.md`** phase artifact (see §0.5): frozen domain type signatures + `NodeId` format + the `ShimProtocol` wire spec (`ExecRequest`/`ExecEvent` framing) that Phases 3–7 consume | [02](../design/02-domain-model.md), [05 §5](../design/05-execution-wellspring.md) |
 | S8 | **Conformance corpus** (Lane 0 deliverable): fixture-free pytest fns + `Test*` classes + `unittest.TestCase`, incl. a state-mutation isolation pair + a crash test + a timeout test, generated deterministically by extending `benchmarks/fixtures/generate.py` | [03 §4](../design/03-collection.md), env §3 |
 | S9 | **Differential acceptance**: every corpus test's `Outcome` (and `NodeId`) matches pytest's disposition on the same corpus; fork isolation proven by the state-mutation pair; crash/timeout → `Outcome::Error` | [02 §8](../design/02-domain-model.md), [10 §6](../design/10-test-styles.md) |
@@ -189,7 +189,7 @@ flowchart TB
     C --> LA["Lane A — Workspace + Domain<br/>(code-agent + scaffold/data-model; TDD: test-agent)"]
     C --> LB["Lane B — Collection / RegexCollector<br/>(code-agent; TDD: test-agent)"]
     C --> LC["Lane C — Execution (Wellspring/ForkWorker/ShimProtocol)<br/>(code-agent; TDD: test-agent) — spawns C1/C2/C3"]
-    C --> LD["Lane D — CLI riptide run/collect<br/>(code-agent)"]
+    C --> LD["Lane D — CLI tiderace run/collect<br/>(code-agent)"]
     C --> SEC["🔐 Security lane (security-agent)<br/>IPC framing + fork boundary threat model"]
     C --> PERF["⏱️ Perf lane (performance-agent)<br/>cold-run vs pytest (hyperfine)"]
 
@@ -242,10 +242,10 @@ after) implementation ([PIPELINE §6](../PIPELINE.md)).
 | C2 codec | `code-agent` (Lane C) | — | `bincode_framing.rs`, `exec_request.rs`, `exec_event.rs`, `shim_connection.rs` | wire spec | Frame round-trips arbitrary bytes (incl. `\n\0`) in node ids/tracebacks; **C3 blocks on this** |
 | C3 wellspring+worker | `code-agent` (Lane C) | — | `wellspring.rs` (import-once), `fork_worker.rs`, `worker.rs` trait + `WorkerCaps`, `proc_group_guard.rs` | C2 codec, Phase-1 D1/D3/D4 | Import once → fork per test → run body → stream → exit; timeout/crash → `kill_tree` |
 | C-TDD | `test-agent` | `testing` | Exec unit + integration tests (Python boundary **not mocked**) | C impl | Real `python`+real shim fork/exec tests; framing round-trip; crash/timeout→`Error` |
-| **D** CLI | `code-agent` | `code` | `engine-cli`: `riptide run`, `riptide collect` (S6) | `engine-core` API | `run` returns correct exit code from `RunReport::exit_code()`; `collect` lists ids |
+| **D** CLI | `code-agent` | `code` | `engine-cli`: `tiderace run`, `tiderace collect` (S6) | `engine-core` API | `run` returns correct exit code from `RunReport::exit_code()`; `collect` lists ids |
 | **ATDD** | `test-agent` | `testing` | Failing differential acceptance scenarios (the spec) **before** code | corpus + pytest oracle | Scenarios assert per-test `Outcome` == pytest disposition; isolation pair; crash/timeout→`Error` |
 | **Security** | `security-agent` | `threat-model`, `vulnerability-assessment-specialist`, `security-architecture-reviewer` | Threat model of IPC framing + fork boundary | wire spec, exec design | No frame-injection via node id/traceback; fd/env inheritance reviewed; child cannot corrupt Wellspring |
-| **Perf** | `performance-agent` | `benchmarking`, `bottleneck-analysis` | Cold-run `riptide run` vs `pytest` on corpus (hyperfine) | corpus, built CLI | Measured + recorded; backs the [05 §11](../design/05-execution-wellspring.md) budget claims (honest floor noted) |
+| **Perf** | `performance-agent` | `benchmarking`, `bottleneck-analysis` | Cold-run `tiderace run` vs `pytest` on corpus (hyperfine) | corpus, built CLI | Measured + recorded; backs the [05 §11](../design/05-execution-wellspring.md) budget claims (honest floor noted) |
 
 ---
 
@@ -276,12 +276,12 @@ mocked.**
 
 - **Oracle.** The differential oracle is **pytest** run in the Lane-0 venv against the **same
   fixture-free corpus**. The ATDD lane captures pytest's per-`NodeId` disposition map first, then
-  asserts `riptide run` produces the identical `Outcome` per `NodeId` (and identical collected
+  asserts `tiderace run` produces the identical `Outcome` per `NodeId` (and identical collected
   `NodeId` set). This is the [PIPELINE §6](../PIPELINE.md) "differential vs pytest where an oracle
   exists" rule made concrete for this phase.
 - **ATDD scenarios (authored before code):** (a) collected `NodeId` set == pytest's (incl. unittest
   class-prefixed ids); (b) every passing/failing/skipped test's `Outcome` matches pytest; (c) the
-  **state-mutation isolation pair** both pass under `riptide` (proving fork isolation) where they
+  **state-mutation isolation pair** both pass under `tiderace` (proving fork isolation) where they
   would interfere under shared state; (d) the **crash** test → `Outcome::Error` (not `Failed`); (e)
   the **timeout** test → `Outcome::Error` with the carried-forward timeout note.
 - **TDD (parallel, per lane):** domain pure-logic tested directly (ordering, equality, serde

@@ -1,11 +1,11 @@
-"""Runnable proof of riptide's native type-driven authoring (ADR-E012, step N1). **No pytest.**
+"""Runnable proof of tiderace's native type-driven authoring (ADR-E012, step N1). **No pytest.**
 
 Demonstrates, with a tiny self-contained runner (the real runner is the shim's job later):
   • type-DI: a test parameter `db: Db` wires to the provider returning `Db` — by TYPE, not name;
   • provider→provider DI: a provider depends on another provider, also by type;
   • yield teardown: yield-style providers tear down in reverse at scope exit;
-  • parametrization via @riptide.cases (one passing, one failing — failure captured);
-  • the native error taxonomy: untyped / unprovided / ambiguous all raise RiptideResolutionError.
+  • parametrization via @tiderace.cases (one passing, one failing — failure captured);
+  • the native error taxonomy: untyped / unprovided / ambiguous all raise TideraceResolutionError.
 
 Run:  python3 proof_type_di.py
 """
@@ -14,10 +14,10 @@ from __future__ import annotations
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # find the local `riptide` package
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # find the local `tiderace` package
 
-import riptide
-from riptide import ProviderSpec  # for the ambiguity demo
+import tiderace
+from tiderace import ProviderSpec  # for the ambiguity demo
 
 _LOG: list[str] = []  # records provider lifecycle so we can assert ordering
 
@@ -50,14 +50,14 @@ class User:
         self.name = name
 
 
-@riptide.provides(scope="module")
+@tiderace.provides(scope="module")
 def db() -> Db:                       # plain `-> Db` on a yield provider (the migrated form)
     conn = Db.connect()
     yield conn
     conn.close()
 
 
-@riptide.provides
+@tiderace.provides
 def user(db: Db) -> User:             # a provider that itself depends on `Db` BY TYPE
     _LOG.append("user.build")
     return User(db, "ada")
@@ -73,7 +73,7 @@ def test_user_is_wired_to_db(user: User):
     assert user.name == "ada"
 
 
-@riptide.cases([(2, 3, 5), (2, 2, 5)])   # the second row is wrong on purpose
+@tiderace.cases([(2, 3, 5), (2, 2, 5)])   # the second row is wrong on purpose
 def test_add(a, b, exp):
     assert a + b == exp
 
@@ -82,7 +82,7 @@ def test_add(a, b, exp):
 def _collect_providers(mod) -> dict:
     providers = {}
     for obj in vars(mod).values():
-        spec = getattr(obj, "__riptide_provider__", None)
+        spec = getattr(obj, "__tiderace_provider__", None)
         if spec is not None:
             providers[spec.name] = (obj, spec)
     return providers
@@ -90,7 +90,7 @@ def _collect_providers(mod) -> dict:
 
 def _instantiate(name, providers, index, teardown):
     fn, spec = providers[name]
-    deps = riptide.resolve_params(fn, index)  # the provider's OWN params, wired by type
+    deps = tiderace.resolve_params(fn, index)  # the provider's OWN params, wired by type
     kwargs = {p: _instantiate(pn, providers, index, teardown) for p, pn in deps.items()}
     if spec.is_yield:
         gen = fn(**kwargs)
@@ -102,19 +102,19 @@ def _instantiate(name, providers, index, teardown):
 
 def _run(mod) -> list[tuple]:
     providers = _collect_providers(mod)
-    index = riptide.build_type_index(spec for _, spec in providers.values())
+    index = tiderace.build_type_index(spec for _, spec in providers.values())
     results: list[tuple] = []
     for name, obj in list(vars(mod).items()):
         if not (name.startswith("test_") and callable(obj)):
             continue
-        for case in getattr(obj, "__riptide_cases__", None) or [None]:
+        for case in getattr(obj, "__tiderace_cases__", None) or [None]:
             teardown: list = []
             label = f"{name}[{case.id}]" if case else name
             try:
                 if case is not None:
                     obj(*case.values)
                 else:
-                    deps = riptide.resolve_params(obj, index)
+                    deps = tiderace.resolve_params(obj, index)
                     kwargs = {p: _instantiate(pn, providers, index, teardown) for p, pn in deps.items()}
                     obj(**kwargs)
                 results.append((label, "passed", ""))
@@ -132,15 +132,15 @@ def _run(mod) -> list[tuple]:
 def _expect_resolution_error(label, thunk) -> bool:
     try:
         thunk()
-    except riptide.RiptideResolutionError as exc:
-        print(f"    {label}: RiptideResolutionError ✓  — {exc}")
+    except tiderace.TideraceResolutionError as exc:
+        print(f"    {label}: TideraceResolutionError ✓  — {exc}")
         return True
     print(f"    {label}: NO ERROR (BAD)")
     return False
 
 
 def main() -> int:
-    print("=== riptide native type-driven authoring — proof (NO pytest) ===\n")
+    print("=== tiderace native type-driven authoring — proof (NO pytest) ===\n")
 
     results = _run(sys.modules[__name__])
     print("[run] tests (wired by type, executed by the tiny runner):")
@@ -152,16 +152,16 @@ def main() -> int:
     teardown_ok = _LOG.count("db.connect") == _LOG.count("db.close") and "db.close" in _LOG
 
     print("\n[errors] native taxonomy (type-DI failures are hard errors, never silent):")
-    index = riptide.build_type_index(
+    index = tiderace.build_type_index(
         [ProviderSpec(provides=Db, scope="module", autouse=False, name=n, is_yield=True)
          for n in ("primary", "secondary")]
     )
     def _untyped(x):  # noqa: ANN001
         return x
     errs = [
-        _expect_resolution_error("untyped param", lambda: riptide.resolve_params(_untyped, {})),
-        _expect_resolution_error("no provider for type", lambda: riptide.resolve_params(test_user_is_wired_to_db, {})),
-        _expect_resolution_error("ambiguous type", lambda: riptide.resolve_params(test_insert, index)),
+        _expect_resolution_error("untyped param", lambda: tiderace.resolve_params(_untyped, {})),
+        _expect_resolution_error("no provider for type", lambda: tiderace.resolve_params(test_user_is_wired_to_db, {})),
+        _expect_resolution_error("ambiguous type", lambda: tiderace.resolve_params(test_insert, index)),
     ]
 
     by_label = {r[0]: r[1] for r in results}

@@ -1,6 +1,6 @@
 """`TmpPath` — a fresh, per-test temporary directory, injected **by type** (`p: TmpPath`).
 
-Why a subclass of `pathlib.Path` rather than plain `Path`? riptide wires by type, and a bare
+Why a subclass of `pathlib.Path` rather than plain `Path`? tiderace wires by type, and a bare
 `Path` parameter would (a) collide with any user provider that also returns `Path` and (b) wrongly
 capture *every* `Path`-annotated param. `TmpPath` is a distinct type for unambiguous type-DI while
 still being a real `Path` (`isinstance(p, pathlib.Path)` holds), so existing path code just works.
@@ -15,6 +15,6 @@ _Base = type(pathlib.Path())
 
 
 class TmpPath(_Base):  # type: ignore[misc,valid-type]
-    """A `pathlib.Path` to a fresh temp directory. Distinct type ⇒ unambiguous riptide type-DI."""
+    """A `pathlib.Path` to a fresh temp directory. Distinct type ⇒ unambiguous tiderace type-DI."""
 
     __slots__ = ()

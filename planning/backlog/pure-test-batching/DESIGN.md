@@ -16,7 +16,7 @@ tests into batches and leaves impure tests solo.
 - **Purity guard (prerequisite, new):** a runtime detector that flags a test as impure if it mutates
   module/session/global or native state, or does I/O/clock/RNG. Feeds `cache::{Purity, SandboxHooks}`
   (the policy seam already exists, ADR-E004). Likely a shim-side observer (snapshot module dict / watch
-  fs/clock/net) producing a per-test verdict, persisted alongside coverage in `.riptide-state.json`.
+  fs/clock/net) producing a per-test verdict, persisted alongside coverage in `.tiderace-state.json`.
 - `engine/py-shim/shim.py` — a `_batch_exec(node_ids)` that, in one forked child, runs each test's
   function-scope setup + body + teardown in sequence and returns per-node outcomes. (Wider-scope
   fixtures are already inherited from the warm parent; only function scope repeats per test.)
@@ -27,7 +27,7 @@ tests into batches and leaves impure tests solo.
 
 ## Data / schema changes
 
-`.riptide-state.json` (persist.rs) gains a per-test **purity verdict** (pure | impure+reason), so the
+`.tiderace-state.json` (persist.rs) gains a per-test **purity verdict** (pure | impure+reason), so the
 scheduler can batch without re-deriving it every run. Additive.
 
 ## Implementation plan
@@ -53,12 +53,12 @@ scheduler can batch without re-deriving it every run. Additive.
 
 - ✅ **Purity guard built + proven** (`engine/py-shim/shim.py`, `proof_purity_guard.py`): per-test
   deep-copy snapshot of module globals + `os.environ`; in-place mutations caught; verdict surfaced as
-  `pure: bool` (+ `impurity` reason). Gated by `RIPTIDE_PURITY`/`--purity`, default off.
+  `pure: bool` (+ `impurity` reason). Gated by `TIDERACE_PURITY`/`--purity`, default off.
 - ✅ **Batching mechanism built + proven** (`run(force_no_fork=True)`, `proof_pure_batching.py`): pure
   tests run in-process — **200 pure tests 993 ms → 70 ms (14×)**, identical outcomes; an impure test run
   no-fork is still flagged (defense in depth).
 - ⏭ **Daemon integration** (the product win): persist the purity verdict per test in
-  `.riptide-state.json` (next to coverage deps); `run_impacted` routes proven-pure tests through
+  `.tiderace-state.json` (next to coverage deps); `run_impacted` routes proven-pure tests through
   `force_no_fork` and forks only impure ones.
 
 ## Future enhancements (ideas this unlocked)

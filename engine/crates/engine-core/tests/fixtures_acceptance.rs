@@ -111,7 +111,7 @@ fn setup_order_is_topo_and_teardown_is_strict_reverse() {
 #[test]
 fn module_fixture_body_runs_once_function_per_test() {
     let Some(python) = fx_venv_python() else {
-        skip_live("`.riptide-fx-venv` not found — run the Phase-3 Lane-0 env gate first");
+        skip_live("`.tiderace-fx-venv` not found — run the Phase-3 Lane-0 env gate first");
         return;
     };
     let _live = fx_support::live_guard(); // serialize corpus-launching scenarios (env isolation)
@@ -363,7 +363,7 @@ fn session_depending_on_function_is_scope_widen_error() {
 #[test]
 fn forked_child_gets_fresh_sqlite_connection() {
     let Some(python) = fx_venv_python() else {
-        skip_live("`.riptide-fx-venv` not found — run the Phase-3 Lane-0 env gate first");
+        skip_live("`.tiderace-fx-venv` not found — run the Phase-3 Lane-0 env gate first");
         return;
     };
     let _live = fx_support::live_guard(); // serialize corpus-launching scenarios (env isolation)
@@ -414,7 +414,7 @@ fn forked_child_gets_fresh_sqlite_connection() {
 #[test]
 fn subprocess_worker_outcomes_and_teardown_match_fork() {
     let Some(python) = fx_venv_python() else {
-        skip_live("`.riptide-fx-venv` not found — run the Phase-3 Lane-0 env gate first");
+        skip_live("`.tiderace-fx-venv` not found — run the Phase-3 Lane-0 env gate first");
         return;
     };
     let _live = fx_support::live_guard(); // serialize corpus-launching scenarios (env isolation)
