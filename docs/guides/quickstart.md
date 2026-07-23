@@ -22,7 +22,13 @@ cargo build --release
 This produces two binaries under `engine/target/release/`:
 
 - `riptide` — one-shot CLI (`collect`, `run`).
-- `riptide-daemon` — the warm server (`run`, `run --all`, `serve`, `watch`, `bench`).
+- `riptide-daemon` — the warm server (`run`, `run --all`, `serve`, `watch`, `bench`, `probe`).
+
+!!! info "Platforms"
+    Linux, macOS, and **Windows** are all supported. Windows has no `fork()`, so isolation there is
+    no-fork + snapshot/restore, and the opt-in [sub-interpreter tier](configuration.md#windows-parallelism-the-sub-interpreter-tier-opt-in)
+    (CPython 3.14+) adds parallel no-fork execution. `run` / `run --all` / `watch` work everywhere; only
+    the `serve` RPC socket is Unix-only.
 
 ## 2. Point the engine at Python
 

@@ -109,16 +109,23 @@ machines.
 The engine keeps CPython warm so your project is imported **once**, not per test or per run:
 
 - **`run`** — impact-aware: execute only changed tests across a parallel pool of wellsprings.
-- **`run --all`** — full run across the pool.
+- **`run --all`** — full run across the pool. With `RIPTIDE_SUBINTERP=1`, routes sub-interpreter-safe
+  modules to a parallel sub-interpreter pool (no fork) — the **sub-interpreter tier** (ADR-E015), which
+  is how the engine parallelizes on **Windows** where there is no `fork()`.
 - **`watch`** — re-run impacted tests on each file save (millisecond loops).
+- **`probe`** — classify each module `safe` / `unsafe` for the sub-interpreter tier (read-only).
 - **`serve`** — a persistent warm session over a Unix socket (RPC: discover / run / health / recycle).
+  *Unix-only*; use `run` / `watch` on Windows.
+
+The parallel pool is platform-aware: fork-per-test on Unix, no-fork `SubprocessWorker` on Windows.
 
 ## Authoring
 
 tiderace runs ordinary pytest-style tests as-is. It also offers **native type-driven authoring** —
 `@riptide.provides` / `@riptide.cases` / `@riptide.uses`, where fixtures resolve by *type* through the
 Rust fixture graph — so a suite can drop the pytest dependency entirely. `riptide migrate` is an AST
-codemod that converts an existing pytest suite to the native model.
+codemod that converts an existing pytest suite to the native model (**91%** auto-mapped across the
+pinned click / flask / anyio suites; see [Migrating from pytest](../guides/migration.md)).
 
 ## Learn more
 

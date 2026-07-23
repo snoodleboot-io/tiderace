@@ -37,7 +37,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"          # 3.12+ required (sys.monitoring coverage)
+          python-version: "3.12"          # 3.12+ required (sys.monitoring coverage); 3.14+ for the sub-interpreter tier
 
       - uses: dtolnay/rust-toolchain@stable
 

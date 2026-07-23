@@ -36,7 +36,8 @@ All collection, graph, schedule, exec, coverage, impact, and cache logic. Module
   `Cache` trait, `TieredCache` (local + optional remote), `LocalCache`, `NullCache`, `CachedOutcome`,
   and `purity` (`Purity::is_cacheable` — the soundness gate that excludes impure outcomes).
 - **`exec`** — execution: `Wellspring` (`wellspring.rs`) imports the project once and forks per test;
-  `ForkWorker`, `SubprocessWorker`, the `Worker` trait and `WorkerCaps`; `WatermarkStack`
+  `ForkWorker`, `SubprocessWorker` (the no-fork path), `SubInterpWorker` (`subinterp_worker.rs` — the
+  parallel sub-interpreter pool, ADR-E015), the `Worker` trait and `WorkerCaps`; `WatermarkStack`
   (`watermark_stack.rs`) tracks fixture setup/teardown across scopes so finalizers fire in order;
   the `ShimTransport` seam (`transport.rs` — `PipeTransport`, `ReadyInfo`) and the wire types
   (`shim_protocol.rs` — `ExecRequest`/`ExecResponse`, `read_frame`/`write_frame`); plus
@@ -54,9 +55,13 @@ binary (`main.rs`). Module files (`engine-daemon/src/`):
 
 - **`engine_handler.rs`** — orchestrates a run: collect → graph → schedule → execute; chooses no-fork
   + restore by default (`optimistic_no_fork()` unless `RIPTIDE_FORCE_FORK=1`) and drives impact-aware
-  re-runs (`run_impacted`).
-- **`pool.rs`** — the parallel pool: one warm `Wellspring` per core, fed `WorkerBatch`es from the
-  `LocalityScheduler`.
+  re-runs (`run_impacted`). Under `RIPTIDE_SUBINTERP=1` it also partitions modules by sub-interpreter
+  safety (`safe_set`, cached in `PersistedState`) and routes the safe subset to the `SubInterpWorker`.
+- **`probe.rs`** — `probe` mode: classifies each module `safe` / `unsafe` / `unknown` for the
+  sub-interpreter tier (imports it in an isolated sub-interpreter), feeding the routing above.
+- **`pool.rs`** — the parallel pool, fed `WorkerBatch`es from the `LocalityScheduler`. Each batch runs
+  on the platform's backend: a warm `ForkWorker` per core on Unix, a no-fork `SubprocessWorker` per
+  batch on Windows (no `fork()` there).
 - **`persist.rs`** — `.riptide-state.json` (`PersistedState`, `changed_files()`, `plan()`); the active
   impact-skip layer (see [state & cache](database.md)).
 - **`watch.rs` / `fs_watcher.rs` / `invalidator.rs`** — `watch` mode: debounced filesystem events feed
