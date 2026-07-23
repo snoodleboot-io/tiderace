@@ -12,9 +12,18 @@ The pure-Rust engine builds from source from the `engine/` Cargo workspace. Preb
 - **Rust toolchain** (stable) — install via [rustup](https://rustup.rs).
 - **Python 3.12+** — the engine captures coverage with CPython's `sys.monitoring` (PEP 669), which
   requires 3.12 or newer.
+- **CPython 3.14+** — *only* if you want the [sub-interpreter tier](configuration.md#windows-parallelism-the-sub-interpreter-tier-opt-in)
+  (`concurrent.interpreters`, for Windows parallelism). Everything else runs on 3.12+.
 
 That's it. There is no pytest or coverage.py to install — tiderace is its own runner, and the only
 Python it runs is a small shim shipped in the repo.
+
+## Platforms
+
+| Platform | Status | Notes |
+|---|---|---|
+| **Linux / macOS** | ✅ full | Fork-from-warm-wellspring isolation; the parallel pool forks per test. |
+| **Windows** | ✅ supported | No `fork()`, so isolation is no-fork + snapshot/restore. `run`, `run --all`, and `watch` all work; the opt-in **sub-interpreter tier** (CPython 3.14+) adds parallel no-fork execution. The only Unix-only mode is the `serve` RPC socket — use `run` / `watch` on Windows. |
 
 ## Build from source
 
@@ -29,7 +38,7 @@ The two binaries land in `engine/target/release/`:
 | Binary | Crate | What it does |
 |---|---|---|
 | `riptide` | `engine-cli` | one-shot `collect` / `run` |
-| `riptide-daemon` | `engine-daemon` | warm server: impact-aware `run`, `run --all`, `serve` (RPC), `watch`, `bench` |
+| `riptide-daemon` | `engine-daemon` | warm server: impact-aware `run`, `run --all`, `serve` (RPC, Unix), `watch`, `bench`, `probe` |
 
 Optionally copy them onto your `PATH`:
 

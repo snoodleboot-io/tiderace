@@ -18,7 +18,10 @@ child). There is exactly one command-line flag — `--all` — on the daemon's `
 | `RIPTIDE_RESTORE` | set by daemon | Enables the no-fork + snapshot/restore isolation path. The daemon sets `RIPTIDE_RESTORE=1` on every mode — it's the **default** execution model, not an opt-in. Nothing to choose. |
 | `RIPTIDE_FORCE_FORK` | off | **Debug / benchmark only.** Reverts to `fork()`-per-test isolation, bypassing the no-fork ladder. Use it to A/B the ladder or chase an isolation bug — not in normal use. |
 | `RIPTIDE_CACHE_DIR` | off | Directory for the **content-addressed result cache** (ADR-E004). Point it at a CI cache path / shared mount / artifact dir and a *pure* test's outcome computed on one machine is served without re-running on any other with the same inputs — even when local impact state is stale. Off ⇒ impact-skip only. |
+| `RIPTIDE_SUBINTERP` | off | Opt into the **sub-interpreter tier** (ADR-E015) on `run --all`: sub-interpreter-*safe* modules run through a parallel sub-interpreter pool (no fork), the rest through the ordinary pool. Its purpose is **Windows** parallelism (no `fork()` there); on Linux the fork pool already parallelizes, so it measures at parity. Requires CPython 3.14+. |
+| `RIPTIDE_SUBINTERP_WORKERS` | CPU count | Size of the sub-interpreter pool when `RIPTIDE_SUBINTERP=1`. |
 | `RIPTIDE_SOCKET` | `<tmp>/riptide-daemon.sock` | `serve` mode: the Unix socket path the RPC server binds. |
+| `RIPTIDE_REQUIRE_LIVE` | off | Testing/CI: make the engine's own *live* test scenarios **fail** instead of self-skipping when their interpreter/venv is absent. Set in the CI jobs that provision Python, so a broken test environment can't pass as a silent no-op. Not needed to *use* tiderace. |
 
 ```bash
 # A typical setup
@@ -35,6 +38,23 @@ wrong guess can only change speed, never correctness.
 
 `RIPTIDE_FORCE_FORK=1` is the escape hatch back to fork-per-test, kept purely as a debug and
 benchmark baseline. See the [isolation ladder](../design/architecture.md#the-isolation-ladder).
+
+## Windows parallelism: the sub-interpreter tier (opt-in)
+
+On Windows there's no `fork()`, so the pool runs no-fork and **sequentially** within each process. The
+**sub-interpreter tier** (ADR-E015) recovers parallelism there: with `RIPTIDE_SUBINTERP=1` on
+`run --all`, tiderace probes which modules are safe to import into an isolated sub-interpreter and runs
+that safe subset across a parallel sub-interpreter pool (per-interpreter GIL, PEP 684 — genuine
+parallelism, no fork); numpy-style modules that can't load isolated take the ordinary pool.
+
+```bash
+RIPTIDE_SUBINTERP=1 riptide-daemon run <tests> --all      # sizes the pool to CPU count
+RIPTIDE_SUBINTERP=1 RIPTIDE_SUBINTERP_WORKERS=4 riptide-daemon run <tests> --all
+```
+
+It's **opt-in** because the win is Windows-specific — on Linux the fork pool already parallelizes, so
+the tier measures at parity and buys nothing. Needs CPython 3.14+ (`concurrent.interpreters`). Details:
+[Execution Model](../design/parallel-execution.md#the-sub-interpreter-tier-windows-parallelism).
 
 ## The one flag: `--all`
 

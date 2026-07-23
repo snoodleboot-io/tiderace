@@ -6,8 +6,9 @@ It is deliberately separate from the old `ADR-001..011` series, which belonged t
 orchestrate-pytest design (Rust driving `pytest` + SQLite + coverage.py). Those are retired.
 
 Each record follows **Context → Decision → Consequences → Alternatives considered**, plus a
-**Revisit trigger**. `ADR-E014` is implemented and measured; E001–E013 are accepted for the design
-phase and several are now built as well.
+**Revisit trigger**. `ADR-E014` (the default execution path) and `ADR-E015` (the sub-interpreter tier)
+are implemented and measured; E001–E013 are accepted for the design phase and several are now built as
+well.
 
 | ADR | Decision | One-line summary |
 |---|---|---|
@@ -25,6 +26,7 @@ phase and several are now built as well.
 | [E012](https://github.com/snoodleboot-io/tiderace/blob/main/planning/current/pure-rust-test-engine/design/adr/ADR-E012-native-type-driven-authoring.md) | Native type-driven authoring | `@provides`/`@cases`/`@uses` resolve fixtures by type, so a suite can drop pytest entirely. |
 | [E013](https://github.com/snoodleboot-io/tiderace/blob/main/planning/current/pure-rust-test-engine/design/adr/ADR-E013-inprocess-isolation.md) | In-process / FFI isolation (②) | Embedded CPython + fork-from-embedded over the transport seam — a research path. |
 | [**E014**](https://github.com/snoodleboot-io/tiderace/blob/main/planning/current/pure-rust-test-engine/design/adr/ADR-E014-no-fork-restore-ladder.md) | **No-fork + restore isolation ladder** *(implemented + measured)* | The default execution path: bare no-fork (pure) / no-fork + restore (mutating) / fork (opaque), sound by construction. |
+| [**E015**](https://github.com/snoodleboot-io/tiderace/blob/main/planning/current/pure-rust-test-engine/design/adr/ADR-E015-subinterp-tier.md) | **Conditional sub-interpreter tier** *(implemented + measured)* | Detect which modules are sub-interpreter-safe, then run the safe subset across a parallel sub-interpreter pool (per-interpreter GIL, PEP 684) — no fork. The one parallel path **Windows** has. Opt-in. |
 
 ## The four that matter most
 

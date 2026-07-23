@@ -46,6 +46,14 @@ flowchart LR
 
 A `RoundRobinScheduler` exists as a simpler baseline.
 
+Each batch runs on the platform's isolation backend, chosen once in `pool.rs`:
+
+- **Unix** — a `ForkWorker`: one warm wellspring, fork-per-test (the model above).
+- **Windows** — no `fork()`, so a `SubprocessWorker` runs the batch **no-fork** (in-process, with
+  snapshot/restore between tests; opaque modules are refused rather than run without isolation).
+  Parallelism still comes from N batches on N threads — one process per batch. This is what lets the
+  parallel pool, and `run --all`, work on Windows at all.
+
 ## The isolation ladder
 
 We isolate tests from each other so one can't corrupt another's view of process-global state. The
@@ -89,6 +97,46 @@ Key properties:
 The daemon enables this by default: it sets `RIPTIDE_RESTORE=1` and requests no-fork on every test;
 the shim downgrades to fork only where unsound. `RIPTIDE_FORCE_FORK=1` reverts to fork-per-test as a
 debug / benchmark baseline only — it is **not** a user-facing tuning flag.
+
+## The sub-interpreter tier (Windows parallelism)
+
+The ladder above removes the *fork tax*, but on **Windows there is no `fork()` at all** — so the pool
+falls back to the no-fork `SubprocessWorker`, which is **sequential** within each process. A pure-Python
+suite that flies in parallel on Linux runs one-test-at-a-time on Windows. The sub-interpreter tier
+(ADR-E015) is how tiderace gets **parallel no-fork execution** there.
+
+Since CPython 3.14, `concurrent.interpreters` (PEP 734) exposes multiple interpreters in one process,
+each with its **own GIL** (PEP 684) — so they run Python genuinely in parallel across cores, no fork.
+The catch is that not every module can be imported into an isolated sub-interpreter: numpy's C core, for
+one, refuses to load in a sub-interpreter (which rules out pandas/scipy/torch with it). So the tier is
+**conditional** — detect first, route accordingly:
+
+```mermaid
+flowchart TD
+    START["run --all<br/>RIPTIDE_SUBINTERP=1"] --> PROBE["probe each module<br/>(import in an isolated<br/>sub-interpreter — safe?)"]
+    PROBE --> PART{"module<br/>sub-interpreter-safe?"}
+    PART -->|"yes (pure-Python /<br/>stdlib / sub-interp-friendly)"| SI["SubInterpWorker<br/>parallel pool, per-interpreter GIL<br/>no fork"]
+    PART -->|"no (numpy &c.)"| REST["fork pool (Unix) /<br/>no-fork SubprocessWorker (Windows)"]
+    SI --> OUT["outcomes"]
+    REST --> OUT
+```
+
+- **Detect** — `riptide-daemon probe` imports each module in a throwaway isolated sub-interpreter and
+  records `safe` / `unsafe`. The verdict is **content-addressed and cached** (`.riptide-state.json`),
+  so a module is re-probed only when its content changes — the same pattern as purity verdicts.
+- **Route** — safe modules go to the `SubInterpWorker` pool (parallel, no fork); everything else takes
+  the ordinary fork/no-fork pool. A mixed suite gets *partial* parallelism: its pure-Python modules run
+  in parallel, its numpy modules run the ordinary way.
+- **Sound by the same rule as the ladder** — a sub-interpreter has its own module dict *and* its own
+  `os.environ`, so tests in the pool can't leak state into one another; anything undeterminable is
+  treated as unsafe and routed away. The tier is verified **result-identical to the fork pool** on the
+  safe subset.
+
+It is **opt-in** (`RIPTIDE_SUBINTERP=1` on `run --all`; `RIPTIDE_SUBINTERP_WORKERS` sizes the pool)
+because its payoff is Windows-specific: on Linux the fork pool already parallelizes, so the tier
+measures at parity there and buys nothing. Requires CPython 3.14+ (`concurrent.interpreters`); on older
+interpreters `probe` reports `unknown` and callers fall back to fork. See the
+[CLI reference](../api/cli.md) for the `probe` mode and the `RIPTIDE_SUBINTERP*` env vars.
 
 ## The transport seam
 
