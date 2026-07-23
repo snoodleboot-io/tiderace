@@ -43,7 +43,10 @@ under Linear team `tidewire` (issues `TID-*`). What landed since, and what it ch
   sub-interpreter safety and caches the verdict; TID-10 adds `SubInterpWorker` (PEP 684 per-interpreter
   GIL); TID-11 routes the safe subset to that pool and the rest to fork. Purpose is **Windows**
   parallelism — Linux measures at parity (1.45 s vs 1.49 s) because the fork pool already parallelizes.
-  The Windows payoff is *proven correct but unmeasured* — **TID-12**.
+  **Windows soundness + routing then landed** (TID-12, PRs #11 + #14): the no-fork path leaked module
+  state / crashed on opaque modules (fixed — `--restore`, opaque refused), and the parallel pool
+  launched a `ForkWorker` per batch even on Windows (fixed — platform-aware `run_batch`: `ForkWorker`
+  on Unix, `SubprocessWorker` on Windows). The Windows *speedup number* is the only remainder — TID-13.
 - **Cache** — remote/`DirCache` backend (TID-6) + live-loop wiring (TID-7), i.e. the two boxes checked
   above.
 - **Migrate conformance** — **89% → 91%** (click 95%, flask 83%, anyio 99%; 352 mapped / 36 can't-map).
@@ -53,9 +56,14 @@ under Linear team `tidewire` (issues `TID-*`). What landed since, and what it ch
   so it had been running the whole live suite as no-ops. `RIPTIDE_REQUIRE_LIVE=1` now turns a
   live-scenario skip into a failure in both venv-provisioning CI jobs. Treat any pre-#9 "suite green"
   claim in this document with that caveat.
+- **Free-threading evaluated** (TID-3, PR #13) — PEP 703 / CPython 3.14t as a parallel no-fork tier.
+  Conditional GO, deferred: real ~4× parallelism and numpy loads (the sub-interp tier's blocker), but
+  only *strictly-pure* tests are thread-safe (the restore rung races on the shared module dict once the
+  GIL is off), and a non-FT-ready extension silently re-enables the GIL. Complementary to — not a
+  replacement for — the sub-interp tier; they cover disjoint cases. `benchmarks/RESULTS-freethread.md`.
 
-**Still open:** TID-3 (free-threading — blocked, needs a `python3.14t` build), TID-4 (② parallel
-fork-out, below), TID-12 (Windows fallback + benchmark).
+**Still open:** TID-4 (② parallel fork-out, below — Backlog, Low, marginal by its own analysis),
+TID-13 (the Windows sub-interp benchmark — blocked on a low-noise Windows perf runner, not on code).
 
 ---
 
@@ -108,7 +116,8 @@ one-line ADR/doc note if a decision was made.
 | **provider-params (B5)** | ✅ done (anyio→99%); async providers remain |
 | **Migrate conformance** | **91% across 4 repos** (anyio 99%, click 95%, flask 83%) — TID-8 |
 | ② in-process/FFI backend | 🟡 isolation ADR ratified (E013); `engine-inproc` built, benchmark refuted the transport premise; parallel fork-out = TID-4 (Backlog) |
-| **Sub-interpreter tier (E015)** | ✅ **done** — detect (TID-9) → `SubInterpWorker` (TID-10) → route (TID-11); Windows benchmark = TID-12 |
+| **Sub-interpreter tier (E015)** | ✅ **done** — detect (TID-9) → `SubInterpWorker` (TID-10) → route (TID-11); Windows soundness + pool routing (TID-12); Windows benchmark = TID-13 |
+| **Free-threading (PEP 703)** | ✅ evaluated (TID-3) — conditional GO, deferred; disjoint from E015 |
 
 ---
 
