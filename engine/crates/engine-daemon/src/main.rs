@@ -1,4 +1,4 @@
-//! `riptide-daemon` — the warm test server's runnable front-end (design 08, ADR-E007). Thin glue that
+//! `tiderace-daemon` — the warm test server's runnable front-end (design 08, ADR-E007). Thin glue that
 //! composes the (unit-tested + e2e-proven) library pieces; the binary itself adds no logic.
 //!
 //! Modes:
@@ -6,8 +6,8 @@
 //!   - `serve <root>` — bind the per-project Unix socket and serve RPC clients until Shutdown (unix).
 //!   - `watch <root>` — block, and on each save re-run only the impacted tests (the inner loop).
 //!
-//! Env: `RIPTIDE_SHIM` (path to `py-shim/shim.py`, required); `RIPTIDE_PYTHON` (default `python3`);
-//! `RIPTIDE_SOCKET` (serve mode socket path; default `<tmp>/riptide-daemon.sock`).
+//! Env: `TIDERACE_SHIM` (path to `py-shim/shim.py`, required); `TIDERACE_PYTHON` (default `python3`);
+//! `TIDERACE_SOCKET` (serve mode socket path; default `<tmp>/tiderace-daemon.sock`).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -21,17 +21,17 @@ use engine_daemon::{EngineHandler, RpcHandler, RpcRequest, RpcResponse, Session}
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: riptide-daemon <run|serve|watch> <root>");
+        eprintln!("usage: tiderace-daemon <run|serve|watch> <root>");
         return ExitCode::from(64);
     }
     let mode = args[1].as_str();
     let root = PathBuf::from(&args[2]);
 
-    let python = std::env::var("RIPTIDE_PYTHON").unwrap_or_else(|_| "python3".to_string());
-    let shim = match std::env::var("RIPTIDE_SHIM") {
+    let python = std::env::var("TIDERACE_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let shim = match std::env::var("TIDERACE_SHIM") {
         Ok(s) => PathBuf::from(s),
         Err(_) => {
-            eprintln!("error: set RIPTIDE_SHIM to the path of py-shim/shim.py");
+            eprintln!("error: set TIDERACE_SHIM to the path of py-shim/shim.py");
             return ExitCode::FAILURE;
         }
     };
@@ -41,12 +41,12 @@ fn main() -> ExitCode {
     // Coverage on for both `run` (impact-skip) and `run --all` (so purity verdicts + dep footprints are
     // persisted, letting the next full run route recorded-pure unchanged tests to bare no-fork — TID-1).
     if mode == "run" {
-        std::env::set_var("RIPTIDE_COVERAGE", "1");
+        std::env::set_var("TIDERACE_COVERAGE", "1");
     }
     // No-fork + snapshot/restore is the DEFAULT execution path (not an opt-in flag): the engine runs
     // tests in-process and undoes their mutation, and the shim forks any non-restorable (opaque) module
     // for soundness. Wellsprings inherit this env. Nothing for the user to choose.
-    std::env::set_var("RIPTIDE_RESTORE", "1");
+    std::env::set_var("TIDERACE_RESTORE", "1");
 
     // `probe` classifies each module for the sub-interpreter tier (ADR-E015, TID-9) — read-only, no
     // wellspring/handler needed. Handle it before `python`/`shim` are moved into the handler.
@@ -252,9 +252,9 @@ fn cmd_watch(root: &Path, handler: &mut EngineHandler) -> ExitCode {
 
 #[cfg(unix)]
 fn cmd_serve(handler: &mut EngineHandler) -> ExitCode {
-    let path = std::env::var("RIPTIDE_SOCKET")
+    let path = std::env::var("TIDERACE_SOCKET")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir().join("riptide-daemon.sock"));
+        .unwrap_or_else(|_| std::env::temp_dir().join("tiderace-daemon.sock"));
     eprintln!("serving on {} …", path.display());
     match engine_daemon::serve_unix_socket(&path, handler) {
         Ok(()) => ExitCode::SUCCESS,

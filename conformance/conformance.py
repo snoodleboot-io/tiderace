@@ -1,6 +1,6 @@
-"""N5 conformance — run `riptide migrate` over real, pinned pytest repos and report (a) the auto-map
+"""N5 conformance — run `tiderace migrate` over real, pinned pytest repos and report (a) the auto-map
 rate and (b) the can't-map distribution, ranked. Pure `ast` (no install, no execution): it measures how
-much real-world pytest authoring maps to riptide's type-DI surface, and exactly what doesn't — which
+much real-world pytest authoring maps to tiderace's type-DI surface, and exactly what doesn't — which
 data-drives what to build next (builtins, request handling, …).
 
 Usage:  python conformance.py vendor/<repo> [vendor/<repo> ...]
@@ -12,9 +12,9 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, os.pardir, "engine", "py-riptide"))
+sys.path.insert(0, os.path.join(_HERE, os.pardir, "engine", "py-tiderace"))
 
-from riptide.migrate import migrate_source  # noqa: E402
+from tiderace.migrate import migrate_source  # noqa: E402
 
 # can't-map message -> bucket. First match wins, so order specific → general.
 CATEGORIES = [
@@ -74,7 +74,7 @@ def main(argv: list) -> int:
         print("usage: python conformance.py vendor/<repo> [...]", file=sys.stderr)
         return 2
 
-    print("=== N5 conformance: `riptide migrate` over real pytest repos (pure ast) ===\n")
+    print("=== N5 conformance: `tiderace migrate` over real pytest repos (pure ast) ===\n")
     tot_files = tot_mapped = tot_cant = tot_err = 0
     agg: collections.Counter = collections.Counter()
 

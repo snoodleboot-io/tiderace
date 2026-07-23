@@ -9,7 +9,7 @@ The pipeline provisioned everything below — no manual human setup was required
 |---|------|---------|------------------------------|--------------|--------|
 | E1 | Rust toolchain | cargo/rustc 1.95.0, clippy 0.1.95, rustfmt 1.9.0 | pre-installed | `cargo --version && cargo clippy --version && rustfmt --version` | ✅ |
 | E2 | cargo-llvm-cov | 0.8.7 | pre-installed | `cargo llvm-cov --version` | ✅ |
-| E3 | Isolated venv | CPython **3.14.4** | `uv venv .riptide-spike-venv` | `./.riptide-spike-venv/bin/python -V` | ✅ |
+| E3 | Isolated venv | CPython **3.14.4** | `uv venv .tiderace-spike-venv` | `./.tiderace-spike-venv/bin/python -V` | ✅ |
 | E4 | pytest (differential baseline only — never under the engine) | pytest 9.1.0 (+ pluggy 1.6.0) | `uv pip install pytest` | `python -c "import pytest"` | ✅ |
 | E5 | numpy (C-extension — fork-from-warm target) | numpy 2.4.6 | `uv pip install numpy` | `python -c "import numpy"` | ✅ |
 | E6 | hyperfine | 1.20.0 | pre-installed | `hyperfine --version` | ✅ |
@@ -22,10 +22,10 @@ The pipeline provisioned everything below — no manual human setup was required
 ## How to verify the whole environment (one shot)
 
 ```bash
-cd /home/snoodleboot/Documents/software/riptide
+cd /home/snoodleboot/Documents/software/tiderace
 cargo --version && cargo clippy --version && rustfmt --version && cargo llvm-cov --version
 hyperfine --version
-./.riptide-spike-venv/bin/python -c "import pytest, numpy; print('py ok', pytest.__version__, numpy.__version__)"
+./.tiderace-spike-venv/bin/python -c "import pytest, numpy; print('py ok', pytest.__version__, numpy.__version__)"
 (cd spike && cargo test --quiet && ./run_spike.sh)
 ```
 
@@ -33,12 +33,12 @@ hyperfine --version
 
 ```bash
 # venv + build artifacts are gitignored and safe to delete
-rm -rf .riptide-spike-venv spike/target
+rm -rf .tiderace-spike-venv spike/target
 ```
 
 ## Notes / deviations
 
-- All Python deps live in the isolated `.riptide-spike-venv`; system Python untouched.
+- All Python deps live in the isolated `.tiderace-spike-venv`; system Python untouched.
 - **numpy + fork() fork-safety:** native BLAS/OMP thread pools created pre-fork are a known
   fork hazard. The Wellspring is launched with `OPENBLAS_NUM_THREADS=1`, `OMP_NUM_THREADS=1`,
   `MKL_NUM_THREADS=1` — the documented mitigation. 50 sequential forks with numpy warm ran clean.

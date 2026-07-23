@@ -1,4 +1,4 @@
-"""B5 (async providers) proof — `async def @riptide.provides` through the REAL shim. **No pytest.**
+"""B5 (async providers) proof — `async def @tiderace.provides` through the REAL shim. **No pytest.**
 An async provider (coroutine or async-generator with teardown) is set up and torn down on the SAME
 event loop as the (async or sync) test body, wired by TYPE.
 
@@ -20,7 +20,7 @@ import shim  # noqa: E402
 CORPUS = textwrap.dedent(
     '''
     import asyncio
-    import riptide
+    import tiderace
 
     LOG = []
 
@@ -28,7 +28,7 @@ CORPUS = textwrap.dedent(
         def __init__(self):
             self.open = True
 
-    @riptide.provides
+    @tiderace.provides
     async def conn() -> Conn:                 # async-generator provider with async teardown
         await asyncio.sleep(0)
         c = Conn()
@@ -38,7 +38,7 @@ CORPUS = textwrap.dedent(
         c.open = False
         LOG.append("teardown")
 
-    @riptide.provides
+    @tiderace.provides
     async def token() -> str:                 # plain coroutine provider (no teardown)
         await asyncio.sleep(0)
         return "tok"

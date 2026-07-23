@@ -14,7 +14,7 @@ imports your tests and invokes their bodies. **There is no pytest at runtime.**
 ```mermaid
 flowchart LR
     subgraph rust["Rust — the engine (owns all logic & state)"]
-        CLI["riptide-daemon<br/>(CLI &amp; warm daemon)"]
+        CLI["tiderace-daemon<br/>(CLI &amp; warm daemon)"]
         CORE["engine-core<br/>collection · fixtures · scheduler<br/>coverage · impact · cache · exec"]
         CLI --> CORE
     end
@@ -109,7 +109,7 @@ machines.
 The engine keeps CPython warm so your project is imported **once**, not per test or per run:
 
 - **`run`** — impact-aware: execute only changed tests across a parallel pool of wellsprings.
-- **`run --all`** — full run across the pool. With `RIPTIDE_SUBINTERP=1`, routes sub-interpreter-safe
+- **`run --all`** — full run across the pool. With `TIDERACE_SUBINTERP=1`, routes sub-interpreter-safe
   modules to a parallel sub-interpreter pool (no fork) — the **sub-interpreter tier** (ADR-E015), which
   is how the engine parallelizes on **Windows** where there is no `fork()`.
 - **`watch`** — re-run impacted tests on each file save (millisecond loops).
@@ -122,8 +122,8 @@ The parallel pool is platform-aware: fork-per-test on Unix, no-fork `SubprocessW
 ## Authoring
 
 tiderace runs ordinary pytest-style tests as-is. It also offers **native type-driven authoring** —
-`@riptide.provides` / `@riptide.cases` / `@riptide.uses`, where fixtures resolve by *type* through the
-Rust fixture graph — so a suite can drop the pytest dependency entirely. `riptide migrate` is an AST
+`@tiderace.provides` / `@tiderace.cases` / `@tiderace.uses`, where fixtures resolve by *type* through the
+Rust fixture graph — so a suite can drop the pytest dependency entirely. `tiderace migrate` is an AST
 codemod that converts an existing pytest suite to the native model (**91%** auto-mapped across the
 pinned click / flask / anyio suites; see [Migrating from pytest](../guides/migration.md)).
 

@@ -78,7 +78,7 @@ impl SubInterpWorker {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped());
         if let Some(n) = pool_size {
-            cmd.env("RIPTIDE_SUBINTERP_WORKERS", n.to_string());
+            cmd.env("TIDERACE_SUBINTERP_WORKERS", n.to_string());
         }
         let mut child = cmd
             .spawn()

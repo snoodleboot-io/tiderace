@@ -2,10 +2,6 @@
 
 tiderace's engine lives in the `engine/` Cargo workspace. This is where you build, test, and lint.
 
-!!! info "Naming"
-    The binaries currently build as `riptide` / `riptide-daemon` — a retired codename being
-    consolidated under tiderace. Read them as tiderace.
-
 ## Prerequisites
 
 - **Rust toolchain** (stable) — `rustup install stable`.
@@ -22,7 +18,7 @@ cargo build
 ```
 
 Debug binaries land in `engine/target/release/` (or `engine/target/debug/` for `cargo build`):
-`riptide` (the CLI) and `riptide-daemon` (the warm server).
+`tiderace` (the CLI) and `tiderace-daemon` (the warm server).
 
 ## Run the tests
 
@@ -55,7 +51,7 @@ CI enforces both — PRs that fail `clippy` or `fmt` are blocked.
 
 The acceptance suites that assert the engine's load-bearing invariants — no-fork ≡ fork,
 sub-interpreter ≡ fork, purity/safety detection, the daemon end-to-end — need a real interpreter, and
-resolve `.riptide-fx-venv` at the repo root **by path**. Without it they self-skip.
+resolve `.tiderace-fx-venv` at the repo root **by path**. Without it they self-skip.
 
 A skip is not visibly different from a pass. libtest has no "skipped" state, so an early `return`
 reports as `ok`, and the harness swallows the skip marker unless you pass `--nocapture`. A green
@@ -66,7 +62,7 @@ garbage-collected, and the workspace stayed green with 10 live tests skipping.)
 Provision it once, at the repo root:
 
 ```bash
-python -m venv .riptide-fx-venv && .riptide-fx-venv/bin/pip install numpy pytest
+python -m venv .tiderace-fx-venv && .tiderace-fx-venv/bin/pip install numpy pytest
 ```
 
 !!! warning "Point at a stable interpreter"
@@ -77,10 +73,10 @@ Then, to prove the live paths actually executed:
 
 ```bash
 cd engine
-RIPTIDE_REQUIRE_LIVE=1 cargo test --workspace   # a skip becomes a failure
+TIDERACE_REQUIRE_LIVE=1 cargo test --workspace   # a skip becomes a failure
 ```
 
-`RIPTIDE_REQUIRE_LIVE=1` turns every live-scenario skip into a panic (`engine_core::testing`). Both
+`TIDERACE_REQUIRE_LIVE=1` turns every live-scenario skip into a panic (`engine_core::testing`). Both
 CI jobs that provision the venv set it, so a broken environment fails the build instead of passing as
 a no-op. Leave it unset if you're working without a venv — the suites will skip as before.
 
@@ -91,7 +87,7 @@ the fx venv above — without it the exec paths look uncovered and the gate only
 
 ```bash
 cd engine
-RIPTIDE_REQUIRE_LIVE=1 cargo llvm-cov --workspace --ignore-filename-regex '(main|socket)\.rs' --fail-under-lines 88
+TIDERACE_REQUIRE_LIVE=1 cargo llvm-cov --workspace --ignore-filename-regex '(main|socket)\.rs' --fail-under-lines 88
 ```
 
 `main.rs` (CLI entry) and `socket.rs` (the socket serve loop) are excluded — binary glue with no logic
@@ -104,7 +100,7 @@ specific behaviours (isolation tiers, purity, coverage, type-DI). They run direc
 (3.12+) — no Rust, no test framework:
 
 ```bash
-cd engine/py-riptide
+cd engine/py-tiderace
 
 python3 proof_static_purity.py      # static AST impurity pre-filter
 python3 proof_snapshot_restore.py   # no-fork + restore isolation
@@ -124,11 +120,11 @@ tiderace/
 │   ├── Cargo.toml          # workspace manifest
 │   ├── crates/
 │   │   ├── engine-core/    # collection · fixtures · scheduler · exec · coverage · impact · cache
-│   │   ├── engine-cli/     # → riptide (collect, run)
-│   │   ├── engine-daemon/  # → riptide-daemon (run, serve, watch, bench)
+│   │   ├── engine-cli/     # → tiderace (collect, run)
+│   │   ├── engine-daemon/  # → tiderace-daemon (run, serve, watch, bench)
 │   │   └── engine-inproc/  # → inproc-probe (experimental embedded-CPython / FFI backend)
 │   ├── py-shim/            # shim.py — the execution substrate (import, invoke, isolate, coverage)
-│   └── py-riptide/         # native authoring pkg (riptide/) + proof_*.py + migrate
+│   └── py-tiderace/         # native authoring pkg (tiderace/) + proof_*.py + migrate
 ├── benchmarks/             # bench_3way.sh, real_world.sh, RESULTS-*.md, fixtures/
 ├── docs/                   # MkDocs source — user guides + whole-system design
 ├── planning/               # per-feature planning (PRD / ADR / design)

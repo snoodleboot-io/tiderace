@@ -145,7 +145,7 @@ the format of the [Phase 1 manifest](../../completed/phase-1-hardening-benchmark
 |---|---|---|---|---|
 | E1 | Rust toolchain (cargo, rustc, clippy, rustfmt) | Build, lint, format, test the workspace | verify present | `cargo --version && cargo clippy --version && rustfmt --version` |
 | E2 | `cargo-llvm-cov` | Coverage vs ≥80 line / ≥70 branch (G-C2) | verify / `cargo install` | `cargo llvm-cov --version` |
-| E3 | Isolated venv, CPython **3.12+** | Reproducible Python substrate, no system pollution | `uv venv` (per Phase 1 deviation — `ensurepip` may be absent) | `./.riptide-fx-venv/bin/python -V` → 3.12+ |
+| E3 | Isolated venv, CPython **3.12+** | Reproducible Python substrate, no system pollution | `uv venv` (per Phase 1 deviation — `ensurepip` may be absent) | `./.tiderace-fx-venv/bin/python -V` → 3.12+ |
 | E4 | **pytest baseline** (in venv) | Differential oracle for outcomes + teardown order | `uv pip install pytest` | `python -c "import pytest"` |
 | E5 | **Real C-extension (numpy)** — fork-from-warm native stack | Exercise fork-from-warm against a real native extension (E-2 hazard) | `uv pip install numpy` | `python -c "import numpy; print(numpy.__version__)"` |
 | E6 | **In-memory sqlite connection fixture** (non-fork-safe resource) | The `reinit_after_fork` integration boundary (boundary 2, §8) — verify child gets a **fresh** connection | stdlib `sqlite3` (no install) + corpus fixture acquires `sqlite3.connect(":memory:")` | `python -c "import sqlite3; sqlite3.connect(':memory:')"` |
@@ -159,7 +159,7 @@ a genuinely non-fork-safe resource — together they exercise the two riskiest A
 (C-ext during fixture setup; a resource that silently survives fork and corrupts) on a real boundary.
 **The Python/resource boundary is never mocked** ([PIPELINE §6](../PIPELINE.md#6-test-strategy-doctrine)).
 
-**Stop/cleanup:** `rm -rf ./.riptide-fx-venv .riptide.db .riptide-coverage` (all gitignored);
+**Stop/cleanup:** `rm -rf ./.tiderace-fx-venv .tiderace.db .tiderace-coverage` (all gitignored);
 regenerate corpus deterministically anytime. Documented fully in the generated `env-manifest.md`.
 
 **Network dependency risk:** E4–E5, E8 require downloads. Network-restricted sandbox ⇒ **hard

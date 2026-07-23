@@ -20,7 +20,7 @@ graph TD
     ci["🤖 CI runner"]
     ide["🧩 IDE / Test Explorer<br/>(VS Code, PyCharm)"]
 
-    engine["⛵ Riptide Test Engine<br/>(Rust binary + daemon)"]
+    engine["⛵ Tiderace Test Engine<br/>(Rust binary + daemon)"]
 
     cpython["🐍 CPython substrate<br/>(user code, fixtures, tests)"]
     remote["☁️ Remote result cache<br/>(shared, content-addressed)"]

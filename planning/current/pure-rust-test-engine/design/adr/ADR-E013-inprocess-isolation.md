@@ -12,7 +12,7 @@ the watermark/COW model), [ADR-E004](ADR-E004-content-addressed-cache.md) (cache
 
 [ADR-E011](ADR-E011-shim-transport-seam.md) introduced the `ShimTransport` seam and proposed an
 `InProcessTransport` ② that embeds **one** CPython interpreter in the Rust process (via PyO3) and
-drives riptide's own executor by FFI — deleting the subprocess + JSON-over-pipe control plane. The
+drives tiderace's own executor by FFI — deleting the subprocess + JSON-over-pipe control plane. The
 the `spike-inproc/` spike proved embedding is feasible (GO; spike since disposed — evidence in the
 [in-process backend ticket](../../../../backlog/in-process-ffi-backend/DESIGN.md) + git history). E011
 explicitly left **one** question open:

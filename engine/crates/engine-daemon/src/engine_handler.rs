@@ -28,7 +28,7 @@ pub struct EngineHandler {
     shim: PathBuf,
     root: PathBuf,
     worker: Option<ForkWorker>, // warm wellspring, kept alive across Run requests
-    /// Content-addressed result cache (ADR-E004, TID-7). Enabled by `RIPTIDE_CACHE_DIR` pointing at a
+    /// Content-addressed result cache (ADR-E004, TID-7). Enabled by `TIDERACE_CACHE_DIR` pointing at a
     /// directory (a CI cache path / shared mount), which makes a result computed on one machine a free
     /// hit on any other with the same inputs. `None` ⇒ cache off (impact-skip only).
     cache: Option<DirCache>,
@@ -40,7 +40,7 @@ impl EngineHandler {
         shim: impl Into<PathBuf>,
         root: impl Into<PathBuf>,
     ) -> Self {
-        let cache = std::env::var("RIPTIDE_CACHE_DIR")
+        let cache = std::env::var("TIDERACE_CACHE_DIR")
             .ok()
             .filter(|s| !s.is_empty())
             .map(DirCache::new);
@@ -116,7 +116,7 @@ impl EngineHandler {
             items,
             crate::pool::default_workers(),
             5000,
-            optimistic_no_fork(), // no-fork + restore by default (RIPTIDE_FORCE_FORK=1 to disable)
+            optimistic_no_fork(), // no-fork + restore by default (TIDERACE_FORCE_FORK=1 to disable)
             trusted,
         )
     }
@@ -126,7 +126,7 @@ impl EngineHandler {
     /// snapshot), re-verifies the rest under restore, and persists the updated verdicts + footprints.
     /// So the second `run --all` on an unchanged tree runs the pure suite at the bare-no-fork tier.
     pub fn run_full_parallel(&self) -> Result<Vec<RpcResult>, String> {
-        let state_path = self.root.join(".riptide-state.json");
+        let state_path = self.root.join(".tiderace-state.json");
         let mut state = PersistedState::load(&state_path);
 
         // Trusted = recorded pure AND none of its recorded deps changed since it was last verified.
@@ -141,7 +141,7 @@ impl EngineHandler {
             .map(|(node, _)| node.clone())
             .collect();
 
-        // ADR-E015 / TID-11: with the sub-interpreter tier on (`RIPTIDE_SUBINTERP=1`), route the
+        // ADR-E015 / TID-11: with the sub-interpreter tier on (`TIDERACE_SUBINTERP=1`), route the
         // sub-interp-**safe** modules through a parallel sub-interpreter pool (no fork; sound because
         // both module globals and os.environ are per-interpreter) and everything else through the fork
         // pool. Sub-interpreters are the only parallelism Windows (no fork) has. Off ⇒ fork pool only.
@@ -251,14 +251,14 @@ impl EngineHandler {
     /// **Impact-aware run** (the warm-mode gap): load persisted state, re-run only the tests whose
     /// dependencies changed since last run (or have never run), serve the rest from cache, and persist
     /// the updated footprint. With no changes, nothing executes — not even a wellspring launch. Needs
-    /// coverage capture on (the daemon sets `RIPTIDE_COVERAGE=1`) so footprints are recorded.
+    /// coverage capture on (the daemon sets `TIDERACE_COVERAGE=1`) so footprints are recorded.
     pub fn run_impacted(&mut self) -> Result<ImpactSummary, String> {
         let candidates: Vec<String> = self
             .collect()?
             .iter()
             .map(|i| i.node_id.to_string())
             .collect();
-        let state_path = self.root.join(".riptide-state.json");
+        let state_path = self.root.join(".tiderace-state.json");
         let mut state = PersistedState::load(&state_path);
 
         let current = self.hash_known_files(&state);
@@ -282,7 +282,7 @@ impl EngineHandler {
         // Preference order (ADR-E004): **cache hit → impact-skip → run**. impact-skip handled the
         // locally-unchanged set above; for the impacted set, consult the content-addressed cache before
         // executing — a test whose exact inputs were already computed elsewhere (e.g. CI populated the
-        // shared `RIPTIDE_CACHE_DIR`) is served without running, even though this machine's local state
+        // shared `TIDERACE_CACHE_DIR`) is served without running, even though this machine's local state
         // was stale.
         let mut executed = 0usize;
         let mut cache_served = 0usize;
@@ -440,16 +440,16 @@ impl EngineHandler {
     }
 }
 
-/// No-fork + restore is the default. `RIPTIDE_FORCE_FORK=1` reverts to fork-per-test — a debug/benchmark
+/// No-fork + restore is the default. `TIDERACE_FORCE_FORK=1` reverts to fork-per-test — a debug/benchmark
 /// escape only (not a user-facing flag), so the fork baseline stays measurable for regression checks.
 fn optimistic_no_fork() -> bool {
-    std::env::var("RIPTIDE_FORCE_FORK").as_deref() != Ok("1")
+    std::env::var("TIDERACE_FORCE_FORK").as_deref() != Ok("1")
 }
 
-/// Whether the sub-interpreter tier is enabled (ADR-E015 / TID-11). `RIPTIDE_SUBINTERP=1` opts in —
+/// Whether the sub-interpreter tier is enabled (ADR-E015 / TID-11). `TIDERACE_SUBINTERP=1` opts in —
 /// safe modules then run through the parallel sub-interpreter pool. Its purpose is Windows parallelism.
 fn subinterp_enabled() -> bool {
-    std::env::var("RIPTIDE_SUBINTERP").as_deref() == Ok("1")
+    std::env::var("TIDERACE_SUBINTERP").as_deref() == Ok("1")
 }
 
 /// The module rel-path of a node id (`pkg/test_x.py::C::t` -> `pkg/test_x.py`).
@@ -533,14 +533,14 @@ mod tests {
     /// Sub-interp safety needs CPython 3.14 (`concurrent.interpreters`) + numpy for the unsafe case —
     /// gate the `safe_set` test on the fx venv.
     fn fx_venv() -> Option<String> {
-        let p = repo_root().join(".riptide-fx-venv/bin/python");
+        let p = repo_root().join(".tiderace-fx-venv/bin/python");
         p.exists().then(|| p.to_string_lossy().into_owned())
     }
 
     #[test]
     fn safe_set_classifies_probes_once_and_caches() {
         let Some(python) = fx_venv() else {
-            skip_live("`.riptide-fx-venv` (CPython 3.14 + numpy) not present");
+            skip_live("`.tiderace-fx-venv` (CPython 3.14 + numpy) not present");
             return;
         };
         let dir = temp("safeset");
@@ -600,7 +600,7 @@ mod tests {
     }
 
     fn temp(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("riptide_ck_{tag}_{}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("tiderace_ck_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p

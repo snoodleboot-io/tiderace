@@ -46,7 +46,7 @@
 
 ## 4. Layout / invariants
 
-- Workspace at `engine/` (`engine-core` lib + `engine-cli` bin `riptide`); isolated from the legacy
+- Workspace at `engine/` (`engine-core` lib + `engine-cli` bin `tiderace`); isolated from the legacy
   root `tiderace` crate until it is retired.
 - One public type per file, snake_case filename; `Result`/`?` + `thiserror`, no panics in lib code.
 - Native thread pools pinned (`OPENBLAS/OMP/MKL_NUM_THREADS=1`) when launching the Wellspring —

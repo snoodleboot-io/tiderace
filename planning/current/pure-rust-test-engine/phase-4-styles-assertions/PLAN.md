@@ -123,7 +123,7 @@ setup (no human runs a command); a service that cannot start is a **hard blocker
 | E5 | async libs — **asyncio (stdlib)**, **trio (optional)** | stdlib present; `uv pip install trio` if the trio corpus is enabled | `python -c "import asyncio; import trio"` (trio optional → don't block) |
 | E6 | `hyperfine` | `cargo install hyperfine` | `hyperfine --version` |
 | E7 | **Phase-4 corpus** (see §2.1) | generator script under `benchmarks/fixtures/` (Phase-1 `generate.py` pattern) | `pytest -q <corpus>` runs under the **pytest oracle** and produces the expected disposition set |
-| E8 | Branch + mandatory session | `git checkout -b feat/riptide-styles-assertions` + session file | `git branch --show-current` |
+| E8 | Branch + mandatory session | `git checkout -b feat/tiderace-styles-assertions` + session file | `git branch --show-current` |
 
 **Hard-blocker triggers for Lane 0:** venv < 3.12; pytest baseline uninstallable (no oracle ⇒ no
 differential); fork+async-loop crash in a smoke run (ties to the Phase-1 go/no-go fork result —
@@ -212,9 +212,9 @@ AST capture + single traced re-eval ([09 §2](../design/09-assertions.md)).
 Authors **failing acceptance scenarios first** (PIPELINE §6) from §1.1, **differential vs the pytest
 oracle**. Two oracle dimensions:
 
-1. **Outcome + disposition parity** — for every corpus item, riptide's `Outcome` (incl. `NodeId`
+1. **Outcome + disposition parity** — for every corpus item, tiderace's `Outcome` (incl. `NodeId`
    for parametrize ids, XFail/XPass, subTest aggregation) **matches pytest's** disposition.
-2. **Assertion message-QUALITY comparison** — for every failing-assert corpus item, riptide's
+2. **Assertion message-QUALITY comparison** — for every failing-assert corpus item, tiderace's
    `RichDiff` is **as informative as pytest's** failure message (same operands surfaced, same
    diff shape) — the G5 adoption gate. Edge-case parity gaps are *recorded* (§10), not papered over.
 
@@ -224,8 +224,8 @@ Proves the **central ADR-E009 claim**: a passing assert costs **nothing extra**.
 
 - `hyperfine` + `cargo llvm-cov` on an **all-green, assert-heavy** corpus: assert-path instructions
   on the pass branch must be **zero introspection** (the failure machinery is never entered).
-- Differential: riptide all-green run vs pytest all-green run (pytest pays its import-time rewrite
-  tax; riptide must not) — the "faster *and* richer" claim ([09 §7](../design/09-assertions.md)).
+- Differential: tiderace all-green run vs pytest all-green run (pytest pays its import-time rewrite
+  tax; tiderace must not) — the "faster *and* richer" claim ([09 §7](../design/09-assertions.md)).
 - Measure **PurityGuard fallback frequency** on the corpus (the ADR-E009 revisit-trigger metric).
 
 ### Lane SECURITY — re-eval safety (`security-agent`; spawns `threat-model`,
@@ -249,7 +249,7 @@ The Python boundary is **never** mocked (PIPELINE §6).
 | # | Boundary | What "verified" means |
 |---|---|---|
 | **B1** | **Shim-side AST re-evaluation of a failing assert → `RichDiff`** | Run against **real** `AssertionError`s from the corpus (equality/contains/identity/exception). The captured frame, AST node, traced subexpr values, and finalized `RichDiff` are checked against the actual failure — **never a mocked frame**. |
-| **B2** | **Differential outcome + disposition vs pytest** for marks / xfail / xpass / **parametrize ids** / subTest | Live run of riptide and the pytest oracle on the same corpus; per-item `Outcome` and `NodeId` (incl. `[param-id]`) compared. Disagreement = blocker. |
+| **B2** | **Differential outcome + disposition vs pytest** for marks / xfail / xpass / **parametrize ids** / subTest | Live run of tiderace and the pytest oracle on the same corpus; per-item `Outcome` and `NodeId` (incl. `[param-id]`) compared. Disagreement = blocker. |
 | **B3** | **Async event-loop execution under `fork()`** | `IsolatedAsyncioTestCase` (stdlib-owned loop) and pytest `async def` (shim-owned loop) both run in a forked child without loop-state corruption; an async assert failure still produces a rich diff. |
 | **B4** | **`PurityGuard` ↔ `SandboxHooks`** on a real impure assert | A side-effecting/nondeterministic corpus assert trips the guard live and yields the fallback note — proving the documented gap is handled, not faked. |
 
@@ -390,7 +390,7 @@ cached outcome — no extra cache keys (one-id-one-result, [02 §10](../design/0
 
 ### Summary (for the reviewer)
 
-**Phase 4 closes the framework's fidelity gap: it makes riptide run all three `TestStyle`s — pytest
+**Phase 4 closes the framework's fidelity gap: it makes tiderace run all three `TestStyle`s — pytest
 functions, pytest class-methods, and stdlib `unittest.TestCase` (driven via `TestCase.run()` at
 method granularity, no pytest and no unittest *runner* underneath) — with full `@parametrize`
 test-level expansion, every mark (`skip`/`skipif`/`xfail`→`XFail`/`xpass`→`XPass`), `subTest`,

@@ -467,7 +467,7 @@ one piece of `tiderace/runner.rs` + `tiderace/pool.rs` we keep:
   A test that forks its own subprocesses cannot orphan them.
 - A killed/crashed child is recorded as `Outcome::Error` ([02-domain-model](02-domain-model.md) §8:
   timeout/crash is `Error`, not `Failed`), with the partial captured output and a
-  `"[riptide] test exceeded timeout of Ns and was killed"` note appended — carrying the existing
+  `"[tiderace] test exceeded timeout of Ns and was killed"` note appended — carrying the existing
   message convention forward.
 - For `ForkWorker`, a child crash/timeout kills **only that child**; the wellspring and all sibling
   children are unaffected ([01-architecture](01-architecture.md) §6 isolation guarantee). For the

@@ -5,7 +5,7 @@
 //! once in `SubprocessWorker`'s `NoForkProc`) and the per-item run loop a third time (in both workers).
 //! Both were welded to `ChildStdin`/`ChildStdout` — i.e. to a real OS process reached over pipes, which
 //! means **no execution-path logic could be tested without `fork`/`exec`/a live venv**. The live
-//! acceptance scenarios early-return `SKIP` when `.riptide-fx-venv` is absent, so in CI-without-Python
+//! acceptance scenarios early-return `SKIP` when `.tiderace-fx-venv` is absent, so in CI-without-Python
 //! the entire `Worker → frames → TestResult` path was simply *unverified*.
 //!
 //! [`ShimTransport`] names that boundary. Production wires it to a process over pipes

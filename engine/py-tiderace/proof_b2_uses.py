@@ -1,4 +1,4 @@
-"""B2 proof — `@riptide.uses(Type)` (native `usefixtures`) through the REAL shim. **No pytest.**
+"""B2 proof — `@tiderace.uses(Type)` (native `usefixtures`) through the REAL shim. **No pytest.**
 A provider requested via `uses` is set up (and torn down) around the test for its side effects, by
 TYPE, without being passed as a parameter.
 
@@ -19,20 +19,20 @@ import shim  # noqa: E402
 
 CORPUS = textwrap.dedent(
     '''
-    import riptide
+    import tiderace
 
     LOG = []
 
     class Seeded:
         pass
 
-    @riptide.provides
+    @tiderace.provides
     def seeded() -> Seeded:
         LOG.append("setup")
         yield Seeded()
         LOG.append("teardown")
 
-    @riptide.uses(Seeded)
+    @tiderace.uses(Seeded)
     def test_provider_ran_without_injection():     # NB: no parameters at all
         assert LOG == ["setup"]                     # the provider was set up before the body
 
@@ -43,7 +43,7 @@ CORPUS = textwrap.dedent(
 
 
 def main() -> int:
-    print("=== B2 proof: @riptide.uses (native usefixtures) through the real shim (NO pytest) ===\n")
+    print("=== B2 proof: @tiderace.uses (native usefixtures) through the real shim (NO pytest) ===\n")
     with tempfile.TemporaryDirectory() as root:
         with open(os.path.join(root, "test_uses.py"), "w") as f:
             f.write(CORPUS)

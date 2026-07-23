@@ -34,7 +34,7 @@ impl ForkWorker {
 
     /// Ask the shim to run tests in-process where sound (the snapshot/restore fast path). The shim
     /// still forks any module it can't snapshot-restore, so isolation is preserved. The wellspring
-    /// must have been launched with `RIPTIDE_RESTORE=1` (the daemon sets it) for this to be safe.
+    /// must have been launched with `TIDERACE_RESTORE=1` (the daemon sets it) for this to be safe.
     pub fn with_optimistic_no_fork(mut self, on: bool) -> Self {
         self.optimistic_no_fork = on;
         self

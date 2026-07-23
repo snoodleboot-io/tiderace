@@ -40,8 +40,8 @@ CORPUS = textwrap.dedent(
         assert _LIST == [1]
 
     def test_mutates_env():           # mutates os.environ ⇒ IMPURE
-        os.environ["RIPTIDE_PURITY_PROBE"] = "x"
-        assert os.environ["RIPTIDE_PURITY_PROBE"] == "x"
+        os.environ["TIDERACE_PURITY_PROBE"] = "x"
+        assert os.environ["TIDERACE_PURITY_PROBE"] == "x"
     '''
 )
 

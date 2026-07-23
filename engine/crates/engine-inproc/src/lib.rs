@@ -26,7 +26,7 @@ use pyo3::types::PyDict;
 /// [`exchange`](ShimTransport::exchange) calls `engine.run(...)` by FFI.
 pub struct InProcessTransport {
     root: PathBuf,
-    /// Extra `sys.path` entries (the `py-shim` dir, and `py-riptide` so `import riptide.*` resolves).
+    /// Extra `sys.path` entries (the `py-shim` dir, and `py-tiderace` so `import tiderace.*` resolves).
     py_paths: Vec<PathBuf>,
     coverage: bool,
     /// `true` ⇒ run tests in-process in the parent (no fork, no isolation) — for profiling the fork cost.
@@ -39,7 +39,7 @@ pub struct InProcessTransport {
 }
 
 impl InProcessTransport {
-    /// `root` is the corpus dir (placed on `sys.path`); `py_paths` are the shim + riptide package dirs.
+    /// `root` is the corpus dir (placed on `sys.path`); `py_paths` are the shim + tiderace package dirs.
     pub fn new(root: impl Into<PathBuf>, py_paths: Vec<PathBuf>, coverage: bool) -> Self {
         Self {
             root: root.into(),
@@ -99,7 +99,7 @@ impl InProcessTransport {
         Python::attach(|py| -> PyResult<()> {
             let sys = py.import("sys")?;
             let path = sys.getattr("path")?;
-            // Corpus root first, then the engine's python dirs, so `import shim` / `riptide.*` resolve.
+            // Corpus root first, then the engine's python dirs, so `import shim` / `tiderace.*` resolve.
             for p in std::iter::once(&self.root).chain(self.py_paths.iter()) {
                 path.call_method1("insert", (0, p.to_string_lossy().as_ref()))?;
             }
@@ -176,7 +176,7 @@ fn extract_coverage(res: &Bound<'_, PyAny>) -> PyResult<BTreeMap<String, Vec<u32
     }
 }
 
-/// Convenience: the engine's `py-shim` and `py-riptide` dirs given the repo's `engine/` directory.
+/// Convenience: the engine's `py-shim` and `py-tiderace` dirs given the repo's `engine/` directory.
 pub fn engine_py_paths(engine_dir: &Path) -> Vec<PathBuf> {
-    vec![engine_dir.join("py-shim"), engine_dir.join("py-riptide")]
+    vec![engine_dir.join("py-shim"), engine_dir.join("py-tiderace")]
 }

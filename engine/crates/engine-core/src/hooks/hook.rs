@@ -1,6 +1,6 @@
 use crate::hooks::HookEvent;
 
-/// A riptide-native plugin: it observes (and may act on) typed engine [`HookEvent`]s. This is the
+/// A tiderace-native plugin: it observes (and may act on) typed engine [`HookEvent`]s. This is the
 /// engine's *own* hook interface (ADR-E001) — not pytest's, no `pluggy`. A future `PyPluginAdapter`
 /// will implement `Hook` to bridge a Python plugin in via FFI (rides ②, ADR-E011/E013); native Rust
 /// plugins implement it directly for static-dispatch cost.

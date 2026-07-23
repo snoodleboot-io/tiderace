@@ -1,4 +1,4 @@
-"""Type-driven resolution — riptide's identity. A parameter is wired to the provider whose returned
+"""Type-driven resolution — tiderace's identity. A parameter is wired to the provider whose returned
 **type** matches its annotation. This is a *discovery-layer* concern: it turns `param: T` into a
 provider **name**, producing exactly the `deps: [name]` the frozen Rust `FixtureGraph` already
 consumes — so the banner feature costs the engine nothing (ADR-E012)."""
@@ -7,7 +7,7 @@ from __future__ import annotations
 import inspect
 import typing
 
-from ._errors import RiptideResolutionError
+from ._errors import TideraceResolutionError
 
 
 def provided_type(fn) -> type | None:
@@ -35,7 +35,7 @@ def build_type_index(specs) -> dict:
 
 
 def resolve_params(fn, index: dict, *, skip: tuple = ()) -> dict:
-    """`param-name -> provider-name`, wired by type. Raises `RiptideResolutionError` for an
+    """`param-name -> provider-name`, wired by type. Raises `TideraceResolutionError` for an
     unannotated parameter, an unprovided type, or an ambiguous type (disambiguate with
     `Annotated[T, "<provider-name>"]`)."""
     hints = typing.get_type_hints(fn, include_extras=True)
@@ -45,8 +45,8 @@ def resolve_params(fn, index: dict, *, skip: tuple = ()) -> dict:
             continue
         annotation = hints.get(pname)
         if annotation is None:
-            raise RiptideResolutionError(
-                f"{fn.__name__}({pname}): parameter has no type annotation — riptide wires by type, "
+            raise TideraceResolutionError(
+                f"{fn.__name__}({pname}): parameter has no type annotation — tiderace wires by type, "
                 f"so write `{pname}: <Type>`"
             )
 
@@ -61,13 +61,13 @@ def resolve_params(fn, index: dict, *, skip: tuple = ()) -> dict:
 
         if not candidates:
             qualifier = f" named {want_name!r}" if want_name else ""
-            raise RiptideResolutionError(
+            raise TideraceResolutionError(
                 f"{fn.__name__}({pname}: {_type_name(key)}): no provider{qualifier} returns "
                 f"{_type_name(key)}"
             )
         if len(candidates) > 1:
             names = ", ".join(sorted(c.name for c in candidates))
-            raise RiptideResolutionError(
+            raise TideraceResolutionError(
                 f"{fn.__name__}({pname}: {_type_name(key)}): ambiguous — {len(candidates)} providers "
                 f"({names}); disambiguate with Annotated[{_type_name(key)}, \"<provider-name>\"]"
             )

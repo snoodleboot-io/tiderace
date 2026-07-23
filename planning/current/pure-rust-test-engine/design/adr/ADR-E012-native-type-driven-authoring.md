@@ -4,7 +4,7 @@
 
 **Relates to:** [ADR-E001](ADR-E001-pure-rust-engine-no-pytest.md) (pure-Rust engine, no pytest),
 [ADR-E011](ADR-E011-shim-transport-seam.md) (transport seam). **Completes ADR-E001's open seam**: the
-"future native `@riptide.fixture`" mentioned in `engine/py-shim/shim.py` and CONTRACT §11.2.
+"future native `@tiderace.fixture`" mentioned in `engine/py-shim/shim.py` and CONTRACT §11.2.
 
 ## Context
 
@@ -13,21 +13,21 @@ But the *authoring surface* was never ours: today the shim discovers fixtures by
 attributes **pytest's** `@pytest.fixture` stamps (`_fixture_function_marker`, `.scope`, `.params`,
 `.autouse`, `_fixture_function` — verified against pytest 9.1). The shim never *imports* or *runs*
 pytest, but it is coupled to pytest's decorator **shape**, and users still author against pytest. So
-riptide is a pure-Rust brain wearing pytest's face.
+tiderace is a pure-Rust brain wearing pytest's face.
 
 The human's directive: **build our own thing, not a copy.** The single most-disliked pytest trait is
 **implicit name-matching DI** (`def test(db)` — where does `db` come from?). How we answer that *is*
-riptide's identity. Decision (chosen from a 4-way design fork): **wire by type, not by name.**
+tiderace's identity. Decision (chosen from a 4-way design fork): **wire by type, not by name.**
 
 ## Decision
 
-A native `riptide` Python package — the user-facing authoring surface — built on **type-driven
+A native `tiderace` Python package — the user-facing authoring surface — built on **type-driven
 dependency injection**. Resources are resolved by a parameter's **type annotation**, never its name.
 
 ```python
-import riptide
+import tiderace
 
-@riptide.provides(scope="module")          # a resource (fixture)
+@tiderace.provides(scope="module")          # a resource (fixture)
 def db() -> Db:                            # provided type = the return annotation
     conn = Db.connect(":memory:")
     yield conn                             # yield ⇒ teardown after the scope
@@ -37,20 +37,20 @@ def test_insert(db: Db):                   # injected BY TYPE (Db), not by the n
     db.add("ada")
     assert db.count() == 1
 
-@riptide.cases([(2, 3, 5), (0, 0, 0)])     # parametrization, explicit
+@tiderace.cases([(2, 3, 5), (0, 0, 0)])     # parametrization, explicit
 def test_add(a, b, exp):
     assert add(a, b) == exp
 ```
 
 ### The native marker set (ours, explicit — no `.mark.*` namespace)
 
-| Concern | riptide | replaces pytest |
+| Concern | tiderace | replaces pytest |
 |---|---|---|
-| Resource / DI | `@riptide.provides(scope=, autouse=, name=, type=)` | `@pytest.fixture` |
-| Parametrization | `@riptide.cases([...], ids=)` | `@pytest.mark.parametrize` |
-| Skip | `@riptide.skip(reason=)` / `@riptide.skip_if(cond, reason=)` | `@pytest.mark.skip(if)` |
-| Expected failure | `@riptide.xfail(reason=, strict=)` | `@pytest.mark.xfail` |
-| Tag / select | `@riptide.tag("slow")` | `@pytest.mark.<name>` / keywords |
+| Resource / DI | `@tiderace.provides(scope=, autouse=, name=, type=)` | `@pytest.fixture` |
+| Parametrization | `@tiderace.cases([...], ids=)` | `@pytest.mark.parametrize` |
+| Skip | `@tiderace.skip(reason=)` / `@tiderace.skip_if(cond, reason=)` | `@pytest.mark.skip(if)` |
+| Expected failure | `@tiderace.xfail(reason=, strict=)` | `@pytest.mark.xfail` |
+| Tag / select | `@tiderace.tag("slow")` | `@pytest.mark.<name>` / keywords |
 
 Scopes are the **5 the Rust engine already owns** (`function|class|module|package|session`) — that's
 engine mechanics we keep, not a pytest import. Plain `assert` stays the assertion surface (the shim
@@ -58,15 +58,15 @@ already catches `AssertionError`; rich-diff introspection is Phase 4).
 
 ### The attribute protocol (ours, not pytest's)
 
-Each decorator stamps a **riptide-owned** attribute the shim/collector reads:
+Each decorator stamps a **tiderace-owned** attribute the shim/collector reads:
 
 | Attribute | On | Carries |
 |---|---|---|
-| `__riptide_provider__` | a provider fn | `ProviderSpec{provides: type, scope, autouse, name, is_yield}` |
-| `__riptide_cases__` | a test fn | normalized parameter sets (→ Rust `ParamValue{id, index}`) |
-| `__riptide_marks__` | a test fn | `[Mark]` (skip / skip_if / xfail / tag) |
+| `__tiderace_provider__` | a provider fn | `ProviderSpec{provides: type, scope, autouse, name, is_yield}` |
+| `__tiderace_cases__` | a test fn | normalized parameter sets (→ Rust `ParamValue{id, index}`) |
+| `__tiderace_marks__` | a test fn | `[Mark]` (skip / skip_if / xfail / tag) |
 
-The shim's `_is_fixture` gains a **native-first** branch: `hasattr(obj, "__riptide_provider__")` wins;
+The shim's `_is_fixture` gains a **native-first** branch: `hasattr(obj, "__tiderace_provider__")` wins;
 the pytest-attr path becomes **compat-only** and is deletable once migration (below) is the norm.
 
 ### The architectural win: type-DI is a *discovery-layer* concern — the Rust engine does NOT change
@@ -79,22 +79,22 @@ the Rust graph already consumes. **No frozen contract moves.** Type-driven injec
 resolution rule layered on the existing name-keyed engine; the banner feature costs the engine nothing.
 
 Disambiguation (two providers of one type): exact-type match wins; ambiguity is a **native** authoring
-error (`RiptideResolutionError`), with `typing.Annotated[T, "name"]` + `@provides(name=...)` as the
+error (`TideraceResolutionError`), with `typing.Annotated[T, "name"]` + `@provides(name=...)` as the
 explicit escape hatch. (Native errors are ours — the Python-authoring analogue of Rust `FixtureError`.)
 
 ## Migration (no pytest at runtime — a one-time source codemod + a mapping + a can't-map list)
 
-Adoption is a **source-to-source translation**, run once, not a permanent compat shim. `riptide migrate`
+Adoption is a **source-to-source translation**, run once, not a permanent compat shim. `tiderace migrate`
 (libcst/ast codemod) rewrites a pytest suite into native form and emits a per-run report:
 
 **Mechanical mappings (the mapping table):**
 
-| pytest | → riptide | note |
+| pytest | → tiderace | note |
 |---|---|---|
-| `@pytest.fixture` | `@riptide.provides` | `scope=`/`autouse=` copied; yield/return preserved |
-| `@pytest.mark.parametrize("a,b", [...])` | `@riptide.cases([...])` | ids preserved |
-| `@pytest.mark.skipif(c, reason=r)` | `@riptide.skip_if(c, reason=r)` | |
-| `@pytest.mark.skip` / `xfail` | `@riptide.skip` / `@riptide.xfail` | |
+| `@pytest.fixture` | `@tiderace.provides` | `scope=`/`autouse=` copied; yield/return preserved |
+| `@pytest.mark.parametrize("a,b", [...])` | `@tiderace.cases([...])` | ids preserved |
+| `@pytest.mark.skipif(c, reason=r)` | `@tiderace.skip_if(c, reason=r)` | |
+| `@pytest.mark.skip` / `xfail` | `@tiderace.skip` / `@tiderace.xfail` | |
 | `def test(db)` (name-DI) | `def test(db: Db)` (type-DI) | type looked up from the provider's provided type |
 
 **The hard edge — and the explicit "cannot map" list** (emitted as TODOs + a report, never silently
@@ -110,21 +110,21 @@ dropped):
    un-inferable.
 5. **Indirect parametrization / `pytest.param(..., marks=...)` / id-functions** — partial map, remainder
    flagged.
-6. **Plugins & `pytest_*` hooks** — out of scope (riptide gets its own hook host later); flagged.
-7. **Builtin fixtures** (`tmp_path`, `monkeypatch`, `capsys`, …) — map to riptide's own builtins where
+6. **Plugins & `pytest_*` hooks** — out of scope (tiderace gets its own hook host later); flagged.
+7. **Builtin fixtures** (`tmp_path`, `monkeypatch`, `capsys`, …) — map to tiderace's own builtins where
    they exist; unmapped ones flagged.
 
 ## Consequences
 
-- ➕ riptide is now its own thing **end to end** — engine *and* surface; pytest is neither imported nor
+- ➕ tiderace is now its own thing **end to end** — engine *and* surface; pytest is neither imported nor
   authored-against in native mode.
-- ➕ Type-DI is a real, modern differentiator (Python type hints as the wiring), not `s/pytest/riptide/`.
+- ➕ Type-DI is a real, modern differentiator (Python type hints as the wiring), not `s/pytest/tiderace/`.
 - ➕ The Rust engine is untouched — type-DI rides the existing name-keyed `deps` (frozen contract safe).
 - ➕ Migration is honest: a one-time codemod + a mapping table + a **named** can't-map list, not a
   forever-pytest dependency.
 - ➖ Type-DI imposes an annotation burden pytest never did — the migration's main friction (owned, #1
   above).
-- ➖ Real reimplementation surface: the `riptide` package (decorators + resolver), the shim's native
+- ➖ Real reimplementation surface: the `tiderace` package (decorators + resolver), the shim's native
   discovery branch, the codemod. Sequenced below.
 - ⚠️ Ambiguous-type resolution must be a hard, clear error — implicit "first match wins" would reintroduce
   exactly the spooky-action we're rejecting.
@@ -132,22 +132,22 @@ dropped):
 ## Alternatives considered (the 4-way fork)
 
 1. **Type-driven DI** — *chosen.* Distinctive, explicit, leans on type hints.
-2. **One explicit `@riptide.test(use=[...], cases=[...])` decorator** — simple, but less of an identity;
+2. **One explicit `@tiderace.test(use=[...], cases=[...])` decorator** — simple, but less of an identity;
    keep `use=` as a possible disambiguation affordance.
 3. **Registry + `ctx` object** — most explicit, most verbose; rejected as boilerplate-heavy.
 4. **Pytest-shaped, rebranded** — rejected: it is the copy the human explicitly pushed back on.
 
 ## Build sequence
 
-- **N1 — `riptide` package core** (this change): `provides` + type-DI resolver + `cases`; native errors;
+- **N1 — `tiderace` package core** (this change): `provides` + type-DI resolver + `cases`; native errors;
   a pure-Python proof (no pytest) that resolves by type and runs bodies with teardown.
-- **N2 — marks**: `skip`/`skip_if`/`xfail`/`tag` + their `__riptide_marks__` protocol.
+- **N2 — marks**: `skip`/`skip_if`/`xfail`/`tag` + their `__tiderace_marks__` protocol.
 - **N3 — shim native discovery**: native-first `_is_fixture`, type→name resolution feeding the Rust graph;
   pytest path becomes compat-only.
-- **N4 — `riptide migrate`**: the codemod + mapping table + can't-map report.
+- **N4 — `tiderace migrate`**: the codemod + mapping table + can't-map report.
 - **N5 — conformance**: migrate a real OSS suite, measure auto-map rate, grow the can't-map list from
   reality.
-- **B1 — native builtin resources** (ROADMAP-v2; delivered 2026-06-21): `riptide.builtins` ships
+- **B1 — native builtin resources** (ROADMAP-v2; delivered 2026-06-21): `tiderace.builtins` ships
   `monkeypatch`/`tmp_path`/`capsys`/`capfd` as ordinary function-scoped yield providers, auto-registered
   globally by the shim. **Decision — builtins are injected by *distinct* types, not bare stdlib types:**
   `MonkeyPatch`, `Capsys`, `Capfd`, and `TmpPath(pathlib.Path)` (a real `Path` subclass). A bare `Path`
@@ -161,7 +161,7 @@ dropped):
 Conformance showed `request` usage splits into three cases; the native answer is decided per case
 rather than offering a broad `Request` object:
 
-- **`request.param`** — **supported** natively via provider-level params (B5, `@riptide.provides(params=...)`).
+- **`request.param`** — **supported** natively via provider-level params (B5, `@tiderace.provides(params=...)`).
   `migrate` no longer flags `request` on a parametrized provider.
 - **`request.getfixturevalue(...)`** — **permanent can't-map.** Dynamic, name-keyed fixture lookup is
   the exact spooky-action type-DI rejects; the migration tells the user to request the provider as a

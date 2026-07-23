@@ -4,32 +4,26 @@ tiderace ships a reproducible benchmark harness. Run it yourself rather than tru
 — results vary by machine and, especially, by how fast your Python imports the test suite's
 dependencies.
 
-!!! info "Naming"
-    The binaries currently build as `riptide` / `riptide-daemon` — a retired codename being
-    consolidated under tiderace. Read them as tiderace. In the harness, *old* / *tiderace (old)*
-    refers to the **retired** engine (Rust orchestrating parallel pytest workers + SQLite), kept
-    only as a baseline.
-
 ## The three-way harness
 
 `benchmarks/bench_3way.sh` compares **pytest** vs the **old** (retired) engine vs the **native**
 pure-Rust engine over the same corpus:
 
 ```bash
-# defaults: corpus = benchmarks/fixtures/fx_corpus, python = .riptide-fx-venv/bin/python
+# defaults: corpus = benchmarks/fixtures/fx_corpus, python = .tiderace-fx-venv/bin/python
 benchmarks/bench_3way.sh [corpus-dir] [venv-python]
 ```
 
 It needs [hyperfine](https://github.com/sharkdp/hyperfine) and both engines built. The script sets
-`RIPTIDE_PYTHON` and `RIPTIDE_SHIM` for you and runs three scenarios. Note how it drives the native
+`TIDERACE_PYTHON` and `TIDERACE_SHIM` for you and runs three scenarios. Note how it drives the native
 engine:
 
-- **Cold full run** uses `riptide-daemon run . --all` — no-fork + restore is the **default** path
-  (no flag). The `RIPTIDE_FORCE_FORK=1` variant is the debug/benchmark baseline that reverts to
+- **Cold full run** uses `tiderace-daemon run . --all` — no-fork + restore is the **default** path
+  (no flag). The `TIDERACE_FORCE_FORK=1` variant is the debug/benchmark baseline that reverts to
   fork-per-test, so the script can show what removing the fork buys.
-- **Warm no-change** uses `riptide-daemon run .` (impact-aware) against persisted
-  `.riptide-state.json` — nothing should execute.
-- **Inner loop** uses `riptide-daemon bench <dir> 4` to time a warm rerun of one test.
+- **Warm no-change** uses `tiderace-daemon run .` (impact-aware) against persisted
+  `.tiderace-state.json` — nothing should execute.
+- **Inner loop** uses `tiderace-daemon bench <dir> 4` to time a warm rerun of one test.
 
 ## The scenarios & the measured numbers
 

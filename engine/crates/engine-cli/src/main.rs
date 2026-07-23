@@ -1,8 +1,8 @@
-//! `riptide` — thin CLI front-end over `engine-core` (the engine owns the logic). Phase 2 commands:
+//! `tiderace` — thin CLI front-end over `engine-core` (the engine owns the logic). Phase 2 commands:
 //!
-//! - `riptide collect <path>`: discover tests and print their node ids + styles.
-//! - `riptide run <path>`: collect, fork-execute via the Wellspring, print a report, and set the
-//!   pytest-style exit code. Needs `RIPTIDE_SHIM` (path to `shim.py`); `RIPTIDE_PYTHON` defaults
+//! - `tiderace collect <path>`: discover tests and print their node ids + styles.
+//! - `tiderace run <path>`: collect, fork-execute via the Wellspring, print a report, and set the
+//!   pytest-style exit code. Needs `TIDERACE_SHIM` (path to `shim.py`); `TIDERACE_PYTHON` defaults
 //!   to `python3`.
 
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ use engine_core::exec::{ForkWorker, Worker};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: riptide <collect|run> <path>");
+        eprintln!("usage: tiderace <collect|run> <path>");
         return ExitCode::from(64);
     }
     let root = PathBuf::from(&args[2]);
@@ -46,11 +46,11 @@ fn cmd_collect(root: &Path) -> ExitCode {
 }
 
 fn cmd_run(root: &Path) -> ExitCode {
-    let python = std::env::var("RIPTIDE_PYTHON").unwrap_or_else(|_| "python3".to_string());
-    let shim = match std::env::var("RIPTIDE_SHIM") {
+    let python = std::env::var("TIDERACE_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let shim = match std::env::var("TIDERACE_SHIM") {
         Ok(s) => PathBuf::from(s),
         Err(_) => {
-            eprintln!("error: set RIPTIDE_SHIM to the path of py-shim/shim.py");
+            eprintln!("error: set TIDERACE_SHIM to the path of py-shim/shim.py");
             return ExitCode::FAILURE;
         }
     };

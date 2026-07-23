@@ -1,6 +1,6 @@
 # Stage B — Persistent worker pool: IPC contract & lane map
 
-Goal: `riptide watch` holds a pool of W long-lived Python workers that import pytest
+Goal: `tiderace watch` holds a pool of W long-lived Python workers that import pytest
 **once**. Each edit→test cycle dispatches only the affected node ids to warm workers,
 so cycles after the first pay ~zero interpreter/pytest startup.
 
@@ -50,8 +50,8 @@ Rust closes the worker's stdin (EOF) → worker breaks its loop and exits 0.
 ## Lane map (dependencies)
 
 ```
-CONTRACT (this file, frozen) ──▶ ┌─ Lane P  Python worker (riptide/worker.py)        [subagent]
-                                 ├─ Lane R  Rust pool + watch loop (riptide/pool.rs)  [spine — owned by orchestrator]
+CONTRACT (this file, frozen) ──▶ ┌─ Lane P  Python worker (tiderace/worker.py)        [subagent]
+                                 ├─ Lane R  Rust pool + watch loop (tiderace/pool.rs)  [spine — owned by orchestrator]
                                  ├─ Lane Wt notify-based debounced file watcher helper [subagent]
                                  ├─ Lane Bn benchmark: warm re-run latency scenario     [subagent]
                                  └─ Lane Sx security/robustness review of the pool/IPC  [subagent, read-only]
@@ -65,7 +65,7 @@ Genuinely parallel (disjoint files / read-only): P, Wt, Bn, Sx. The Rust pool +
 then integrates the others.
 
 ## Acceptance
-- `riptide watch` runs an initial pass, then re-runs only impacted tests on file save,
+- `tiderace watch` runs an initial pass, then re-runs only impacted tests on file save,
   with 2nd-cycle latency ≪ a cold run (target: warm re-run of a handful of tests in
   well under the cold full-run time; pool import paid once).
 - All existing tests stay green; new unit tests for protocol (de)serialization and the

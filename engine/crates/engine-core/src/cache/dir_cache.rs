@@ -105,7 +105,7 @@ mod tests {
         fn new(tag: &str) -> Self {
             static SEQ: AtomicU64 = AtomicU64::new(0);
             let p = std::env::temp_dir().join(format!(
-                "riptide_dircache_{tag}_{}_{}",
+                "tiderace_dircache_{tag}_{}_{}",
                 std::process::id(),
                 SEQ.fetch_add(1, Ordering::Relaxed)
             ));
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn get_on_missing_directory_is_a_miss() {
-        let c = DirCache::new("/nonexistent/riptide/cache/dir");
+        let c = DirCache::new("/nonexistent/tiderace/cache/dir");
         assert!(c.get(&key("t.py::a")).is_none());
         // put must not panic even if the directory can't be created/written.
         c.put(&key("t.py::a"), CachedOutcome::new(Outcome::Passed, ""));

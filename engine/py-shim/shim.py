@@ -18,7 +18,7 @@ The fixture **definitions** are authored with `@pytest.fixture` (the corpus is a
 differential oracle), so the engine reads pytest's fixture *marker* metadata — scope / params /
 autouse — via `FixtureFunctionDefinition`. It does NOT use pytest's collection or runner: closure
 resolution, nearest-override, scope layering, fork-from-warm, parametrization fan-out and yield
-teardown are all implemented here. A future native `@riptide.fixture` decorator would replace only
+teardown are all implemented here. A future native `@tiderace.fixture` decorator would replace only
 the marker read (ADR-E001).
 """
 from __future__ import annotations
@@ -111,7 +111,7 @@ class FixtureDef:
     """A discovered fixture definition + the location it was declared at.
 
     `bindings` maps each of the function's parameter *names* to the *provider name* that satisfies it.
-    For pytest-authored fixtures the two are identical (name-DI); for riptide-native providers they may
+    For pytest-authored fixtures the two are identical (name-DI); for tiderace-native providers they may
     differ (the param is wired by **type**, ADR-E012), so callers must build kwargs from `bindings`,
     not from raw parameter names. `deps` (provider names — the registry keys the closure walks) is
     derived from the bindings."""
@@ -159,8 +159,8 @@ def _is_fixture(obj) -> bool:
 
 
 def _is_native_provider(obj) -> bool:
-    """A riptide-native provider (ADR-E012) — carries the riptide-owned marker, not pytest's."""
-    return hasattr(obj, "__riptide_provider__")
+    """A tiderace-native provider (ADR-E012) — carries the tiderace-owned marker, not pytest's."""
+    return hasattr(obj, "__tiderace_provider__")
 
 
 def _safe_type_hints(func) -> dict:
@@ -172,7 +172,7 @@ def _safe_type_hints(func) -> dict:
 
 def _provider_for_type(annotation, type_index: dict):
     """The single provider name registered for `annotation`'s type, or None (0 or >1 ⇒ name fallback).
-    `Annotated[T, "name"]` disambiguates. Strict ambiguity errors are the `riptide` package's job at
+    `Annotated[T, "name"]` disambiguates. Strict ambiguity errors are the `tiderace` package's job at
     author time; the shim stays lenient so mixed/compat suites keep running."""
     key, want = annotation, None
     if typing.get_origin(annotation) is typing.Annotated:
@@ -200,7 +200,7 @@ def _bind_by_type(func, type_index: dict) -> dict:
 
 
 def _native_fixture_def(obj, location: str, type_index: dict) -> FixtureDef:
-    spec = obj.__riptide_provider__
+    spec = obj.__tiderace_provider__
     return FixtureDef(
         name=spec.name,
         # B5: provider-level params fan the provider out (read via `request.param`); `()` ⇒ unparametrized.
@@ -316,7 +316,7 @@ def _discover(root: str) -> Registry:
     # type index, then build the defs (a two-pass the name-DI pytest path doesn't need).
     type_index: dict = {}
     for obj, _loc in native:
-        spec = obj.__riptide_provider__
+        spec = obj.__tiderace_provider__
         type_index.setdefault(spec.provides, []).append(spec.name)
     for obj, location in native:
         reg.add(_native_fixture_def(obj, location, type_index))
@@ -325,12 +325,12 @@ def _discover(root: str) -> Registry:
 
 
 def _register_builtins(reg: Registry) -> None:
-    """Register riptide's always-available builtin resources (ROADMAP-v2 B1: monkeypatch/tmp_path/
+    """Register tiderace's always-available builtin resources (ROADMAP-v2 B1: monkeypatch/tmp_path/
     capsys/capfd) at the root location (""), so every test can request them — by type (the migrated
     form, `mp: MonkeyPatch`) or by name (the pytest form, `monkeypatch`), with no per-tree import."""
     try:
-        import riptide.builtins as builtins_pkg
-    except Exception:  # noqa: BLE001 — riptide not importable ⇒ no builtins (pure-pytest fallback)
+        import tiderace.builtins as builtins_pkg
+    except Exception:  # noqa: BLE001 — tiderace not importable ⇒ no builtins (pure-pytest fallback)
         return
     for obj in builtins_pkg.providers():
         reg.add(_native_fixture_def(obj, "", {}))
@@ -352,7 +352,7 @@ def _import_conftest(path: str, rel_dir: str):
 def _closure(reg: Registry, module_key: str, requested: dict, extra: list | None = None) -> list[FixtureDef]:
     """Resolved fixture closure for a test, dependencies-before-dependents (topo). Includes
     requested fixtures (the provider names of `requested`'s param→provider bindings), `extra` provider
-    names (e.g. `@riptide.uses` — set up but not injected), all in-scope autouse fixtures, and their
+    names (e.g. `@tiderace.uses` — set up but not injected), all in-scope autouse fixtures, and their
     transitive deps."""
     ordered: list[FixtureDef] = []
     seen: set[str] = set()
@@ -674,7 +674,7 @@ class _Coverage:
                     self.touched.setdefault(os.path.abspath(fn), set()).add(line_no)
                 return mon.DISABLE  # per-location disable ⇒ each line fires at most once (cheap)
 
-            mon.use_tool_id(tid, "riptide")
+            mon.use_tool_id(tid, "tiderace")
             mon.register_callback(tid, events.LINE, on_line)
             mon.set_events(tid, events.LINE)
         else:  # ≤3.11 fallback
@@ -766,7 +766,7 @@ class Engine:
             return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason}
 
         # Split requested params: fixtures (resolved by the graph) vs. bare params filled positionally
-        # by @riptide.cases. Without this, a parametrized test's params look like missing fixtures.
+        # by @tiderace.cases. Without this, a parametrized test's params look like missing fixtures.
         fixture_requested = {p: t for p, t in requested.items() if self.reg.is_provider(t)}
         case_params = [p for p in requested if p not in fixture_requested]
         case_kwargs_list = [dict(zip(case_params, c.values)) for c in self._cases(node_id, style)] or [{}]
@@ -779,7 +779,7 @@ class Engine:
         # checked only `force_no_fork`, so whole-run no-fork (`--no-fork`, i.e. the SubprocessWorker /
         # Windows path) ran opaque modules in-process regardless and silently produced wrong results —
         # e.g. a module-level generator stayed advanced across tests. See
-        # `py-riptide/proof_windows_opaque_fork.py`.
+        # `py-tiderace/proof_windows_opaque_fork.py`.
         #
         # A trusted-pure test skips the check: known pure ⇒ it won't mutate, so restorability is moot.
         must_fork = False
@@ -791,7 +791,7 @@ class Engine:
             if must_fork:
                 force_no_fork = False
 
-        uses = self._uses(node_id, style)  # @riptide.uses: set up by type, not injected (B2)
+        uses = self._uses(node_id, style)  # @tiderace.uses: set up by type, not injected (B2)
         closure = _closure(self.reg, module_key, fixture_requested, uses)
         parametrized = [d for d in closure if d.params]
         if parametrized:
@@ -926,7 +926,7 @@ class Engine:
                     in_process=False, trusted_pure=False) -> tuple:
         """In the forked child: set up function-scope fixtures (incl. parametrized + reinit-after-fork
         resources, which thus get a FRESH handle per child), run the body, tear down in reverse.
-        `case_kwargs` are the @riptide.cases values bound to the test's bare params. Returns
+        `case_kwargs` are the @tiderace.cases values bound to the test's bare params. Returns
         `(outcome, detail, coverage)` where coverage is `{rel_path: [lines]}` (empty unless enabled)."""
         module_key = _module_key(node_id)
         local: dict[str, object] = {}
@@ -1026,7 +1026,7 @@ class Engine:
         return self.reg.bind_params(func)
 
     def _marks(self, node_id: str, style: str) -> list:
-        """The native marks (`__riptide_marks__`) on a test, read by attribute — the riptide-owned
+        """The native marks (`__tiderace_marks__`) on a test, read by attribute — the tiderace-owned
         analogue of pytest's marker read. unittest methods carry none."""
         if style == "unittest_method":
             return []
@@ -1036,10 +1036,10 @@ class Engine:
             func = getattr(getattr(module, cls), method)
         else:
             func = getattr(module, node_id.partition("::")[2])
-        return list(getattr(func, "__riptide_marks__", ()))
+        return list(getattr(func, "__tiderace_marks__", ()))
 
     def _uses(self, node_id: str, style: str) -> list:
-        """Provider names a test depends on via `@riptide.uses(Type, ...)` — resolved by type, set up
+        """Provider names a test depends on via `@tiderace.uses(Type, ...)` — resolved by type, set up
         in the closure but never passed as args (the native `usefixtures`). unittest carries none."""
         if style == "unittest_method":
             return []
@@ -1050,14 +1050,14 @@ class Engine:
         else:
             func = getattr(module, node_id.partition("::")[2])
         names = []
-        for t in getattr(func, "__riptide_uses__", ()):
+        for t in getattr(func, "__tiderace_uses__", ()):
             provs = self.reg.by_type.get(t, [])
             if len(provs) == 1:  # unambiguous; ambiguity is the author's to disambiguate
                 names.append(provs[0])
         return names
 
     def _cases(self, node_id: str, style: str) -> list:
-        """The native `@riptide.cases` variants on a test, read by attribute. unittest has none."""
+        """The native `@tiderace.cases` variants on a test, read by attribute. unittest has none."""
         if style == "unittest_method":
             return []
         module = importlib.import_module(_module_name(_module_key(node_id)))
@@ -1066,7 +1066,7 @@ class Engine:
             func = getattr(getattr(module, cls), method)
         else:
             func = getattr(module, node_id.partition("::")[2])
-        return list(getattr(func, "__riptide_cases__", ()))
+        return list(getattr(func, "__tiderace_cases__", ()))
 
     def teardown_all(self) -> None:
         while self.active:
@@ -1197,7 +1197,7 @@ def _introspect_assertion(exc: AssertionError) -> str | None:
         return None
 
     lines = [
-        "assertion failed (riptide rich diff):",
+        "assertion failed (tiderace rich diff):",
         f"    {ast.unparse(cmp.left)} {op} {ast.unparse(cmp.comparators[0])}",
         f"    left  = {_short_repr(left)}",
         f"    right = {_short_repr(right)}",
@@ -1382,7 +1382,7 @@ def subinterp() -> int:
     root = sys.argv[1]
     sys.path.insert(0, root)
     paths = list(sys.path)
-    workers = max(1, int(os.environ.get("RIPTIDE_SUBINTERP_WORKERS") or (os.cpu_count() or 4)))
+    workers = max(1, int(os.environ.get("TIDERACE_SUBINTERP_WORKERS") or (os.cpu_count() or 4)))
 
     in_q = interpreters.create_queue()
     out_q = interpreters.create_queue()
@@ -1419,9 +1419,9 @@ def subinterp() -> int:
 def serve() -> int:
     root = sys.argv[1]
     no_fork = "--no-fork" in sys.argv[2:]
-    coverage = "--coverage" in sys.argv[2:] or os.environ.get("RIPTIDE_COVERAGE") == "1"
-    purity = "--purity" in sys.argv[2:] or os.environ.get("RIPTIDE_PURITY") == "1"
-    restore = "--restore" in sys.argv[2:] or os.environ.get("RIPTIDE_RESTORE") == "1"
+    coverage = "--coverage" in sys.argv[2:] or os.environ.get("TIDERACE_COVERAGE") == "1"
+    purity = "--purity" in sys.argv[2:] or os.environ.get("TIDERACE_PURITY") == "1"
+    restore = "--restore" in sys.argv[2:] or os.environ.get("TIDERACE_RESTORE") == "1"
     sys.path.insert(0, root)
     _preimport(root)
     reg = _discover(root)

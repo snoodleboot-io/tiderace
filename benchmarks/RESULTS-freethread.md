@@ -87,7 +87,7 @@ broadly (numpy already does; the long tail does not). The build blocker that par
 
 ```bash
 FT=$(uv python find cpython-3.14.4+freethreaded)   # uv python install cpython-3.14.4+freethreaded first
-.riptide-fx-venv/bin/python benchmarks/freethread_spike.py   # GIL-enabled baseline
+.tiderace-fx-venv/bin/python benchmarks/freethread_spike.py   # GIL-enabled baseline
 "$FT"                       benchmarks/freethread_spike.py   # free-threaded
 # numpy leg: uv venv --python "$FT" <dir> && uv pip install --python <dir>/bin/python numpy
 ```

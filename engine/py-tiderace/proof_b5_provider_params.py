@@ -1,4 +1,4 @@
-"""B5 proof — provider-level parametrization (`@riptide.provides(params=...)`) through the REAL shim.
+"""B5 proof — provider-level parametrization (`@tiderace.provides(params=...)`) through the REAL shim.
 **No pytest.** A parametrized provider fans the test out, one run per param value, which the provider
 reads via `request.param` — the native form of `@pytest.fixture(params=...)`.
 
@@ -19,7 +19,7 @@ import shim  # noqa: E402
 
 CORPUS = textwrap.dedent(
     '''
-    import riptide
+    import tiderace
 
     SEEN = []
 
@@ -27,7 +27,7 @@ CORPUS = textwrap.dedent(
         def __init__(self, name):
             self.name = name
 
-    @riptide.provides(params=["sqlite", "memory", "postgres"])
+    @tiderace.provides(params=["sqlite", "memory", "postgres"])
     def backend(request) -> Backend:        # fans out: one run per param; value via request.param
         return Backend(request.param)
 
@@ -35,7 +35,7 @@ CORPUS = textwrap.dedent(
         SEEN.append(b.name)
         assert b.name in ("sqlite", "memory", "postgres")
 
-    @riptide.provides(params=[1, 2])
+    @tiderace.provides(params=[1, 2])
     def n(request) -> int:
         return request.param
 

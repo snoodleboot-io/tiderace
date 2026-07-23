@@ -5,11 +5,9 @@ isolation, coverage, and impact analysis in compiled Rust; a thin Python *shim* 
 runs inside CPython, and it exists solely to import user code and invoke test bodies. There is **no
 pytest at runtime** — tiderace is the runner, not a wrapper around one.
 
-> **Naming.** The project is **tiderace**. During the pure-Rust rebuild the engine was codenamed
-> *riptide*; that name is retired. Some binaries and identifiers still carry it (`riptide`,
-> `riptide-daemon`, `RIPTIDE_*`, `.riptide-state.json`) pending a mechanical rename — read them as
-> tiderace. An earlier generation — a separate `tiderace` binary that orchestrated *pytest* workers —
-> has been removed.
+> **tiderace** is a pure-Rust test engine for Python: the binaries (`tiderace`, `tiderace-daemon`),
+> env vars (`TIDERACE_*`), and state file (`.tiderace-state.json`) all carry the name. An earlier
+> generation that orchestrated *pytest* workers has been removed — this engine runs no pytest.
 
 ---
 
@@ -21,7 +19,7 @@ reached over a narrow, swappable transport.
 ```mermaid
 flowchart LR
     subgraph rust["Rust — the engine (owns all logic & state)"]
-        CLI["riptide / riptide-daemon<br/>(CLI &amp; warm daemon)"]
+        CLI["tiderace / tiderace-daemon<br/>(CLI &amp; warm daemon)"]
         CORE["engine-core<br/>collection · fixtures · scheduler<br/>coverage · impact · cache · exec"]
         CLI --> CORE
     end
@@ -33,7 +31,7 @@ flowchart LR
 
     subgraph py["Python — the substrate (no logic)"]
         SHIM["py-shim/shim.py<br/>import user code · invoke test body<br/>fork / no-fork+restore · coverage · purity"]
-        USER["user tests + fixtures<br/>(+ py-riptide authoring pkg)"]
+        USER["user tests + fixtures<br/>(+ py-tiderace authoring pkg)"]
         SHIM --> USER
     end
 
@@ -55,8 +53,8 @@ knows whether Python is a subprocess over pipes or an embedded interpreter over 
 ```mermaid
 flowchart TB
     subgraph bins["Binaries"]
-        RIP["riptide<br/>(engine-cli)<br/>collect · run"]
-        DAE["riptide-daemon<br/>(engine-daemon)<br/>run · serve · watch · bench"]
+        RIP["tiderace<br/>(engine-cli)<br/>collect · run"]
+        DAE["tiderace-daemon<br/>(engine-daemon)<br/>run · serve · watch · bench"]
         PROBE["inproc-probe<br/>(engine-inproc) ②"]
     end
 
@@ -76,14 +74,14 @@ flowchart TB
     subgraph daemon["engine-daemon (warm server)"]
         EH["EngineHandler"]
         POOL["pool (parallel wellsprings)"]
-        PERS["persist (.riptide-state.json)"]
+        PERS["persist (.tiderace-state.json)"]
         WATCH["watch · fs_watcher · invalidator"]
         RPC["rpc_server · socket · session"]
     end
 
     subgraph python["Python"]
         SHIM["py-shim/shim.py<br/>(executor)"]
-        AUTH["py-riptide/riptide<br/>(@provides · @cases · @uses · migrate)"]
+        AUTH["py-tiderace/tiderace<br/>(@provides · @cases · @uses · migrate)"]
     end
 
     RIP --> core
@@ -96,12 +94,12 @@ flowchart TB
 
 | Layer | Crate / dir | Responsibility |
 |---|---|---|
-| CLI | `engine-cli` → `riptide` | one-shot `collect` / `run` |
-| Daemon | `engine-daemon` → `riptide-daemon` | warm server: impact-aware `run`, `serve` (RPC), `watch`, parallel pool |
+| CLI | `engine-cli` → `tiderace` | one-shot `collect` / `run` |
+| Daemon | `engine-daemon` → `tiderace-daemon` | warm server: impact-aware `run`, `serve` (RPC), `watch`, parallel pool |
 | Engine | `engine-core` | all collection/graph/schedule/exec/coverage/impact/cache logic |
 | ② | `engine-inproc` → `inproc-probe` | embedded-CPython transport experiment (PyO3) |
 | Substrate | `py-shim/shim.py` | import user code, invoke bodies, isolation, coverage, purity |
-| Authoring | `py-riptide/riptide` | native type-DI decorators + `migrate` codemod |
+| Authoring | `py-tiderace/tiderace` | native type-DI decorators + `migrate` codemod |
 
 ---
 
@@ -227,8 +225,8 @@ Key properties:
   writes to free/module names, `os.environ`/`os.chdir`/`random.seed`-style calls) without running — a
   sufficient (conservative) impurity test that seeds the tier decision.
 
-The daemon enables this by default: it sets `RIPTIDE_RESTORE=1` and requests no-fork on every test; the
-shim downgrades to fork only where unsound. `RIPTIDE_FORCE_FORK=1` reverts to fork-per-test (debug /
+The daemon enables this by default: it sets `TIDERACE_RESTORE=1` and requests no-fork on every test; the
+shim downgrades to fork only where unsound. `TIDERACE_FORCE_FORK=1` reverts to fork-per-test (debug /
 benchmark baseline only — not a user flag).
 
 ---
@@ -286,7 +284,7 @@ flowchart TB
         EXE["execute test"] --> MON["sys.monitoring<br/>records touched lines/files"]
         MON --> CR["CoverageReport<br/>(per test: files → lines)"]
         CR --> DG["DepGraph<br/>(test ↔ source files)"]
-        DG --> ST["persist .riptide-state.json<br/>(per-test deps + file content hashes)"]
+        DG --> ST["persist .tiderace-state.json<br/>(per-test deps + file content hashes)"]
     end
 
     subgraph run2["Next run"]
@@ -301,7 +299,7 @@ flowchart TB
 
 Two complementary layers:
 
-- **Impact-skip (active path, `engine-daemon/persist.rs`).** Per-run, local: `.riptide-state.json` stores
+- **Impact-skip (active path, `engine-daemon/persist.rs`).** Per-run, local: `.tiderace-state.json` stores
   each test's dependency files (from coverage) + file content hashes. On re-run, `changed_files()` +
   `plan()` select only impacted tests; with **no** changes nothing runs — the wellspring isn't even
   launched.
@@ -311,7 +309,7 @@ Two complementary layers:
   machine with the same inputs. The `purity` gate excludes nondeterministic tests from caching. The remote
   tier is a shareable **`DirCache`** (a directory: a CI cache path / shared mount / artifact); an HTTP or
   object-store client is a drop-in behind the same `Cache` trait. The daemon consults it in `run`
-  (**cache hit → impact-skip → run**): set `RIPTIDE_CACHE_DIR` to a shared directory and a result CI
+  (**cache hit → impact-skip → run**): set `TIDERACE_CACHE_DIR` to a shared directory and a result CI
   computed is served without re-running, even when this machine's local impact state is stale. Only
   *pure* outcomes are cached (the purity gate keeps it sound).
 
@@ -338,7 +336,7 @@ stateDiagram-v2
     Recycle --> Serve: relaunch on next Run
 ```
 
-Modes (`riptide-daemon <mode> <root>`):
+Modes (`tiderace-daemon <mode> <root>`):
 
 - **`run`** — impact-aware one-shot (coverage on; runs only changed tests, parallel pool).
 - **`run --all`** — full run across the parallel pool.
@@ -349,15 +347,15 @@ Modes (`riptide-daemon <mode> <root>`):
 
 ---
 
-## 10. Authoring & migration (py-riptide)
+## 10. Authoring & migration (py-tiderace)
 
 tiderace runs ordinary pytest-style tests (function/method/unittest styles, fixtures) **and** offers a
 native, type-driven authoring model so suites can drop the pytest dependency entirely.
 
-- **Native type-DI** (ADR-E012): `@riptide.provides` (declare a provider by return type),
-  `@riptide.cases` (parametrization), `@riptide.uses` (set up by type, not injected). Fixtures resolve by
+- **Native type-DI** (ADR-E012): `@tiderace.provides` (declare a provider by return type),
+  `@tiderace.cases` (parametrization), `@tiderace.uses` (set up by type, not injected). Fixtures resolve by
   **type**, built by the Rust fixture graph.
-- **`riptide migrate`** — an AST codemod (`py-riptide/riptide/migrate.py`) that rewrites a pytest suite to
+- **`tiderace migrate`** — an AST codemod (`py-tiderace/tiderace/migrate.py`) that rewrites a pytest suite to
   the native model; conformance is tracked by auto-map % over pinned real-world repos.
 
 ---
@@ -400,5 +398,5 @@ The authoritative rationale lives in `planning/current/pure-rust-test-engine/des
 | The cache | `engine-core/src/cache/` (`cache_key.rs`, `tiered_cache.rs`, `purity.rs`) |
 | Parallel pool | `engine-daemon/src/pool.rs` |
 | Daemon modes | `engine-daemon/src/main.rs`, `rpc_server.rs`, `watch.rs` |
-| Authoring / migration | `py-riptide/riptide/` (`builtins`, `_resolve.py`, `migrate.py`) |
+| Authoring / migration | `py-tiderace/tiderace/` (`builtins`, `_resolve.py`, `migrate.py`) |
 | Benchmarks | `benchmarks/RESULTS-3way.md`, `RESULTS-inproc.md`, `bench_3way.sh` |

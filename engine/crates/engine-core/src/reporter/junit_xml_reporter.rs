@@ -21,7 +21,7 @@ impl Reporter for JunitXmlReporter {
 
         let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         out.push_str(&format!(
-            "<testsuite name=\"riptide\" tests=\"{}\" failures=\"{}\" errors=\"{}\" skipped=\"{}\" time=\"{:.3}\">\n",
+            "<testsuite name=\"tiderace\" tests=\"{}\" failures=\"{}\" errors=\"{}\" skipped=\"{}\" time=\"{:.3}\">\n",
             report.total(),
             failures,
             errors,

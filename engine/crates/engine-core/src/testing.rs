@@ -1,4 +1,4 @@
-//! Test-support for **live scenarios** — the ones that need a real Python (`.riptide-fx-venv`, a
+//! Test-support for **live scenarios** — the ones that need a real Python (`.tiderace-fx-venv`, a
 //! CPython 3.14 with `concurrent.interpreters`, …) rather than a scripted stub.
 //!
 //! ## Why this exists
@@ -10,7 +10,7 @@
 //! bearing invariants (no-fork ≡ fork, sub-interp ≡ fork, purity detection). A green suite could mean
 //! "the isolation ladder is sound" or "none of that ran"; nothing in the output distinguished them.
 //!
-//! That is not hypothetical. `.riptide-fx-venv/bin/python` was a symlink into a *versioned* VSCode
+//! That is not hypothetical. `.tiderace-fx-venv/bin/python` was a symlink into a *versioned* VSCode
 //! snap path (`snap/code/244/…`); when that revision was garbage-collected the venv broke, and
 //! `cargo test --workspace` kept reporting `ok` with **10 live tests silently skipped**.
 //!
@@ -18,7 +18,7 @@
 //!
 //! Call [`skip_live`] instead of `eprintln!("SKIP: …")`.
 //!
-//! * **Strict where it counts** — with `RIPTIDE_REQUIRE_LIVE=1` a skip becomes a **panic**, i.e. a
+//! * **Strict where it counts** — with `TIDERACE_REQUIRE_LIVE=1` a skip becomes a **panic**, i.e. a
 //!   failing test. An environment that is *supposed* to run the live paths sets it and can no longer
 //!   pass by accident. Both venv-provisioning CI jobs set it; see `.github/workflows/ci.yml`.
 //! * **Uniform, greppable marker** — `SKIPPED (live)`, so when output *is* shown the reason is
@@ -32,11 +32,11 @@
 //! passing test to write to the terminal.
 //!
 //! So the guarantee here is **not** "you will notice a skip locally" — it is "an environment that
-//! claims to run the live paths cannot silently fail to". `RIPTIDE_REQUIRE_LIVE=1` in CI is the
+//! claims to run the live paths cannot silently fail to". `TIDERACE_REQUIRE_LIVE=1` in CI is the
 //! enforcement; the marker is a diagnostic for when you go looking.
 
 /// The env var that turns a live-scenario skip into a hard failure.
-pub const REQUIRE_LIVE: &str = "RIPTIDE_REQUIRE_LIVE";
+pub const REQUIRE_LIVE: &str = "TIDERACE_REQUIRE_LIVE";
 
 /// Whether the caller's environment demands that live scenarios actually run.
 pub fn live_required() -> bool {
@@ -54,7 +54,7 @@ pub fn live_required() -> bool {
 ///
 /// ```ignore
 /// let Some(python) = venv_python() else {
-///     skip_live("`.riptide-fx-venv` (CPython 3.14) not present");
+///     skip_live("`.tiderace-fx-venv` (CPython 3.14) not present");
 ///     return;
 /// };
 /// ```

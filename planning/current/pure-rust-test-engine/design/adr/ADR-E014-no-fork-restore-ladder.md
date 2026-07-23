@@ -44,8 +44,8 @@ Supporting mechanisms (all in `py-shim/shim.py`):
 - **Purity guard** (`_purity_verdict`) — records whether a test actually mutated shared state; the verdict
   promotes a test to tier 1 and gates cache eligibility (E004).
 
-The daemon turns this on by default: `RIPTIDE_RESTORE=1` + `force_no_fork` on every `ExecRequest`; the
-shim downgrades to fork where unsound. `RIPTIDE_FORCE_FORK=1` reverts to fork-per-test — a debug/benchmark
+The daemon turns this on by default: `TIDERACE_RESTORE=1` + `force_no_fork` on every `ExecRequest`; the
+shim downgrades to fork where unsound. `TIDERACE_FORCE_FORK=1` reverts to fork-per-test — a debug/benchmark
 escape, **not** a user-facing flag.
 
 ## Why (the trade-off)

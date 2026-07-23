@@ -9,7 +9,7 @@ A short summary of the approach.
 
 ## Affected Modules
 
-Which parts of [`../../../riptide/`](../../../riptide/) change, and how.
+Which parts of [`../../../tiderace/`](../../../tiderace/) change, and how.
 
 - `module.rs` — ...
 

@@ -108,9 +108,9 @@ Built + proven:
   no learning pass** (it *contains* impurity instead of predicting it). Opaque modules auto-fall-back to
   fork (`_restorable()`), so it's sound.
 - **Daemon `run` (no-fork by default)** — the win, end-to-end through the **pipe daemon** (not just the
-  in-process bench). The daemon optimistically requests no-fork with `RIPTIDE_RESTORE=1`; the shim
+  in-process bench). The daemon optimistically requests no-fork with `TIDERACE_RESTORE=1`; the shim
   restores restorable modules and forks opaque ones. **No persisted verdicts needed for correctness.**
-  (Originally shipped behind a `--fast` flag, now removed — it's the default; `RIPTIDE_FORCE_FORK=1` is
+  (Originally shipped behind a `--fast` flag, now removed — it's the default; `TIDERACE_FORCE_FORK=1` is
   the inverse.)
 
 Measured (fx_corpus, 509 tests, **cold one-shot** through the daemon, hyperfine -r 6):

@@ -6,7 +6,7 @@ version.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "riptide"
+name = "tiderace"
 path = "src/main.rs"
 
 [dependencies]

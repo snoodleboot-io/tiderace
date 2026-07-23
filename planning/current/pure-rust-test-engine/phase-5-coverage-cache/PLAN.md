@@ -111,7 +111,7 @@ A service that cannot start is a **hard blocker**, surfaced immediately ([PIPELI
 |---|------|----------------|------------------------|
 | E1 | Rust toolchain + `cargo-llvm-cov` (≥80/70 gate) | pre-installed (carry-forward) | `cargo --version && cargo llvm-cov --version` |
 | E2 | venv on **CPython ≥3.12** (required for `sys.monitoring`) | `uv venv` (carry-forward; no sudo) | `python -c "import sys; assert sys.version_info>=(3,12)"` |
-| E3 | venv on **CPython 3.11** (to exercise the `TraceCollector` fallback path live) | `uv venv .riptide-py311` | `python3.11 -c "import sys; print(sys.version_info)"` |
+| E3 | venv on **CPython 3.11** (to exercise the `TraceCollector` fallback path live) | `uv venv .tiderace-py311` | `python3.11 -c "import sys; print(sys.version_info)"` |
 | E4 | pytest + coverage.py **baseline oracle** (differential coverage comparison) | `uv pip install` | `python -c "import coverage, pytest"` |
 | E5 | **Local remote-CAS server** — a real minimal HTTP content-addressed store implementing `has/get/get_blob/put/put_blob` (§5.2) | **started by Lane 0** (small `engine-cli serve-cache` or a vendored test server bin), bound to `127.0.0.1:<port>`, `0600` token file | `curl -s 127.0.0.1:$PORT/healthz` + a `put_blob`→`get_blob` round-trip script |
 | E6 | **Coverage-overhead corpus** — a suite sized to measure per-test `sys.monitoring`/settrace tax vs no-coverage | `benchmarks/fixtures/` generator (extend) | run count + per-test timing emitted |

@@ -43,7 +43,7 @@ incremental execution + interpreter snapshotting so per-test isolation is free. 
 
 ## Affected Modules
 
-This is a near-total rebuild of the run path; today's [`../../../riptide/`](../../../riptide/)
+This is a near-total rebuild of the run path; today's [`../../../tiderace/`](../../../tiderace/)
 single binary becomes a Cargo **workspace** ([ADR-E005](design/adr/ADR-E005-workspace-trait-seams.md)):
 
 - **Port forward (evolve):** `collector.rs` (regex discovery → `collection/`), `hasher.rs`

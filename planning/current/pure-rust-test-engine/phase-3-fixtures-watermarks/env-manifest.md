@@ -12,7 +12,7 @@ corpus (E7). Nothing hit the network.
 |---|------|---------|------------------------|------------------------|--------|
 | E1 | Rust toolchain (cargo, rustc, clippy, rustfmt) | cargo 1.95.0, clippy 0.1.95, rustfmt 1.9.0-stable | pre-installed | `cargo --version && cargo clippy --version && rustfmt --version` | ✅ |
 | E2 | `cargo-llvm-cov` | 0.8.7 | pre-installed | `cargo llvm-cov --version` | ✅ |
-| E3 | Isolated venv, CPython 3.12+ | CPython **3.14.4** | `uv venv .riptide-fx-venv` (offline; `ensurepip`/stdlib-venv absent → `uv` per Phase 1 precedent) | `./.riptide-fx-venv/bin/python -V` → 3.14.4 | ✅ |
+| E3 | Isolated venv, CPython 3.12+ | CPython **3.14.4** | `uv venv .tiderace-fx-venv` (offline; `ensurepip`/stdlib-venv absent → `uv` per Phase 1 precedent) | `./.tiderace-fx-venv/bin/python -V` → 3.14.4 | ✅ |
 | E4 | pytest baseline (in venv) | pytest 9.1.0 | `uv pip install --offline pytest` (resolved from uv cache; no network) | `python -c "import pytest"` → ok | ✅ |
 | E5 | Real C-extension (numpy) | numpy 2.4.6 | `uv pip install --offline numpy` (from uv cache) | `python -c "import numpy; print(numpy.__version__)"` → 2.4.6 | ✅ |
 | E6 | In-memory sqlite (non-fork-safe resource) | sqlite3 3.50.4 (stdlib) | stdlib `sqlite3` — no install | `python -c "import sqlite3; sqlite3.connect(':memory:')"` → ok | ✅ |
@@ -37,17 +37,17 @@ hyperfine 1.20.0
 $ uv --version
 uv 0.11.7 (x86_64-unknown-linux-gnu)
 
-$ ./.riptide-fx-venv/bin/python -V
+$ ./.tiderace-fx-venv/bin/python -V
 Python 3.14.4
 
-$ ./.riptide-fx-venv/bin/python -c "import pytest, numpy, sqlite3; \
+$ ./.tiderace-fx-venv/bin/python -c "import pytest, numpy, sqlite3; \
     print('pytest', pytest.__version__, '| numpy', numpy.__version__, '| sqlite3', sqlite3.sqlite_version)"
 pytest 9.1.0 | numpy 2.4.6 | sqlite3 3.50.4
 
-$ ./.riptide-fx-venv/bin/python -c "import sqlite3; sqlite3.connect(':memory:'); print('sqlite ok')"
+$ ./.tiderace-fx-venv/bin/python -c "import sqlite3; sqlite3.connect(':memory:'); print('sqlite ok')"
 sqlite ok
 
-$ ./.riptide-fx-venv/bin/python -m pytest -q benchmarks/fixtures/fx_corpus
+$ ./.tiderace-fx-venv/bin/python -m pytest -q benchmarks/fixtures/fx_corpus
 ........................................................................ [ 98%]
 .......                                                                  [100%]
 511 passed in 1.41s
@@ -55,11 +55,11 @@ $ ./.riptide-fx-venv/bin/python -m pytest -q benchmarks/fixtures/fx_corpus
 
 ## Venv decision + rationale
 
-**Decision: fresh `.riptide-fx-venv` (matches plan E3 — no deviation).**
+**Decision: fresh `.tiderace-fx-venv` (matches plan E3 — no deviation).**
 
-The plan's E3 wanted a fresh `.riptide-fx-venv`; the spike venv (`.riptide-spike-venv`) already had
+The plan's E3 wanted a fresh `.tiderace-fx-venv`; the spike venv (`.tiderace-spike-venv`) already had
 pytest 9.1.0 + numpy 2.4.6, so reuse was the fallback. The fresh venv was attempted first **offline**
-and it worked completely from the uv cache — `uv venv .riptide-fx-venv` then
+and it worked completely from the uv cache — `uv venv .tiderace-fx-venv` then
 `uv pip install --offline pytest numpy` resolved and installed 6 packages
 (`pytest 9.1.0`, `numpy 2.4.6`, `pluggy 1.6.0`, `iniconfig 2.3.0`, `packaging 26.2`, `pygments 2.20.0`)
 in ~45 ms with **no network access**. Because the canonical fresh-venv path succeeded offline, there
@@ -67,7 +67,7 @@ was no reason to fall back to reusing the spike venv — the plan's preferred E3
 
 - Both venvs run CPython **3.14.4** (≥3.12 as required) and import `pytest`, `numpy`, `sqlite3`.
 - The fresh venv keeps Phase 3 deps isolated from the Phase 1 spike venv; system Python untouched.
-- `.riptide-spike-venv` remains available as a verified fallback if `.riptide-fx-venv` is deleted.
+- `.tiderace-spike-venv` remains available as a verified fallback if `.tiderace-fx-venv` is deleted.
 
 ## Corpus: location, collected count, pytest result
 
@@ -116,22 +116,22 @@ warm_array                         1
 ## How to verify the whole environment (one shot)
 
 ```bash
-cd /home/snoodleboot/Documents/software/riptide
+cd /home/snoodleboot/Documents/software/tiderace
 cargo --version && cargo clippy --version && rustfmt --version
 hyperfine --version && cargo llvm-cov --version
-./.riptide-fx-venv/bin/python -c "import pytest, numpy, sqlite3; print('py ok')"
-./.riptide-fx-venv/bin/python -m pytest -q benchmarks/fixtures/fx_corpus   # expect: 511 passed
+./.tiderace-fx-venv/bin/python -c "import pytest, numpy, sqlite3; print('py ok')"
+./.tiderace-fx-venv/bin/python -m pytest -q benchmarks/fixtures/fx_corpus   # expect: 511 passed
 ```
 
 ## How to regenerate the corpus / run it under pytest
 
 ```bash
 # regenerate the corpus deterministically (byte-for-byte identical)
-./.riptide-fx-venv/bin/python benchmarks/fixtures/fx_corpus/generate_fx_corpus.py
+./.tiderace-fx-venv/bin/python benchmarks/fixtures/fx_corpus/generate_fx_corpus.py
 # run it
-./.riptide-fx-venv/bin/python -m pytest -q benchmarks/fixtures/fx_corpus     # expect: 511 passed
+./.tiderace-fx-venv/bin/python -m pytest -q benchmarks/fixtures/fx_corpus     # expect: 511 passed
 # inspect the ordering + scope-count probe (set the probe dir explicitly)
-FX_CORPUS_PROBE_DIR=/tmp/fx_probe ./.riptide-fx-venv/bin/python -m pytest -q benchmarks/fixtures/fx_corpus
+FX_CORPUS_PROBE_DIR=/tmp/fx_probe ./.tiderace-fx-venv/bin/python -m pytest -q benchmarks/fixtures/fx_corpus
 cat /tmp/fx_probe/events.log     # setup/teardown order
 cat /tmp/fx_probe/counts.json    # per-fixture body run counts
 ```
@@ -140,22 +140,22 @@ cat /tmp/fx_probe/counts.json    # per-fixture body run counts
 
 ```bash
 # venv + runtime state are gitignored and safe to delete
-rm -rf .riptide-fx-venv .riptide.db .riptide-coverage
+rm -rf .tiderace-fx-venv .tiderace.db .tiderace-coverage
 # the fx_corpus tree is committed (deterministic); regenerate any time:
-./.riptide-fx-venv/bin/python benchmarks/fixtures/fx_corpus/generate_fx_corpus.py
+./.tiderace-fx-venv/bin/python benchmarks/fixtures/fx_corpus/generate_fx_corpus.py
 ```
 
 ## Notes / deviations
 
-- **No deviation from plan E3** — the fresh `.riptide-fx-venv` was provisioned exactly as the plan
-  asked, and it worked entirely offline from the uv cache. (`.riptide-spike-venv` reuse was the
+- **No deviation from plan E3** — the fresh `.tiderace-fx-venv` was provisioned exactly as the plan
+  asked, and it worked entirely offline from the uv cache. (`.tiderace-spike-venv` reuse was the
   documented fallback; it was not needed.)
 - All Python deps live in the isolated venv; system Python was left untouched. No `sudo`, no system
   packages modified, no network access used.
 - Python is CPython **3.14.4** (the env's available interpreter), which satisfies the plan's "3.12+"
   requirement.
-- `.gitignore` updated to ignore the new Lane 0 artifacts: added `.riptide.db`, `.riptide-coverage/`,
-  and `.riptide-fx-venv/` (the repo's existing entries used the older `.tiderace-*` naming). The
+- `.gitignore` updated to ignore the new Lane 0 artifacts: added `.tiderace.db`, `.tiderace-coverage/`,
+  and `.tiderace-fx-venv/` (the repo's existing entries used the older `.tiderace-*` naming). The
   `fx_corpus` **source tree is committed** (deterministic generated corpus); only `__pycache__/`
   (already ignored) and the per-run probe tempdir (outside the tree) are excluded.
 ```

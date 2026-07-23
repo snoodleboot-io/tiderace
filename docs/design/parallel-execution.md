@@ -94,8 +94,8 @@ Key properties:
   (`global`, writes to free/module names, `os.environ`/`os.chdir`/`random.seed`-style calls) without
   running — a conservative impurity test that seeds the tier decision.
 
-The daemon enables this by default: it sets `RIPTIDE_RESTORE=1` and requests no-fork on every test;
-the shim downgrades to fork only where unsound. `RIPTIDE_FORCE_FORK=1` reverts to fork-per-test as a
+The daemon enables this by default: it sets `TIDERACE_RESTORE=1` and requests no-fork on every test;
+the shim downgrades to fork only where unsound. `TIDERACE_FORCE_FORK=1` reverts to fork-per-test as a
 debug / benchmark baseline only — it is **not** a user-facing tuning flag.
 
 ## The sub-interpreter tier (Windows parallelism)
@@ -113,7 +113,7 @@ one, refuses to load in a sub-interpreter (which rules out pandas/scipy/torch wi
 
 ```mermaid
 flowchart TD
-    START["run --all<br/>RIPTIDE_SUBINTERP=1"] --> PROBE["probe each module<br/>(import in an isolated<br/>sub-interpreter — safe?)"]
+    START["run --all<br/>TIDERACE_SUBINTERP=1"] --> PROBE["probe each module<br/>(import in an isolated<br/>sub-interpreter — safe?)"]
     PROBE --> PART{"module<br/>sub-interpreter-safe?"}
     PART -->|"yes (pure-Python /<br/>stdlib / sub-interp-friendly)"| SI["SubInterpWorker<br/>parallel pool, per-interpreter GIL<br/>no fork"]
     PART -->|"no (numpy &c.)"| REST["fork pool (Unix) /<br/>no-fork SubprocessWorker (Windows)"]
@@ -121,8 +121,8 @@ flowchart TD
     REST --> OUT
 ```
 
-- **Detect** — `riptide-daemon probe` imports each module in a throwaway isolated sub-interpreter and
-  records `safe` / `unsafe`. The verdict is **content-addressed and cached** (`.riptide-state.json`),
+- **Detect** — `tiderace-daemon probe` imports each module in a throwaway isolated sub-interpreter and
+  records `safe` / `unsafe`. The verdict is **content-addressed and cached** (`.tiderace-state.json`),
   so a module is re-probed only when its content changes — the same pattern as purity verdicts.
 - **Route** — safe modules go to the `SubInterpWorker` pool (parallel, no fork); everything else takes
   the ordinary fork/no-fork pool. A mixed suite gets *partial* parallelism: its pure-Python modules run
@@ -132,11 +132,11 @@ flowchart TD
   treated as unsafe and routed away. The tier is verified **result-identical to the fork pool** on the
   safe subset.
 
-It is **opt-in** (`RIPTIDE_SUBINTERP=1` on `run --all`; `RIPTIDE_SUBINTERP_WORKERS` sizes the pool)
+It is **opt-in** (`TIDERACE_SUBINTERP=1` on `run --all`; `TIDERACE_SUBINTERP_WORKERS` sizes the pool)
 because its payoff is Windows-specific: on Linux the fork pool already parallelizes, so the tier
 measures at parity there and buys nothing. Requires CPython 3.14+ (`concurrent.interpreters`); on older
 interpreters `probe` reports `unknown` and callers fall back to fork. See the
-[CLI reference](../api/cli.md) for the `probe` mode and the `RIPTIDE_SUBINTERP*` env vars.
+[CLI reference](../api/cli.md) for the `probe` mode and the `TIDERACE_SUBINTERP*` env vars.
 
 ## The transport seam
 

@@ -15,7 +15,7 @@ use engine_core::scheduler::{LocalityScheduler, ScheduleInput, ScheduledTest, Sc
 /// LPT-balances the groups across workers; each worker runs its batch on its own thread. The
 /// per-batch isolation backend is platform-specific (see [`run_batch`]): fork-per-test on Unix, the
 /// no-fork SubprocessWorker (snapshot/restore) on Windows. Coverage rides along if the wellsprings
-/// inherit `RIPTIDE_COVERAGE` (the caller's env), so impact footprints are still captured.
+/// inherit `TIDERACE_COVERAGE` (the caller's env), so impact footprints are still captured.
 #[allow(clippy::too_many_arguments)]
 pub fn run_parallel(
     python: &str,
@@ -164,7 +164,7 @@ mod tests {
     // The live test gates on the fx venv (resolved by path), exactly like daemon_e2e — it runs where
     // the venv exists (incl. the coverage CI job) and skips cleanly otherwise.
     fn venv_python() -> Option<PathBuf> {
-        let p = repo_root().join(".riptide-fx-venv/bin/python");
+        let p = repo_root().join(".tiderace-fx-venv/bin/python");
         p.exists().then_some(p)
     }
     /// Any interpreter — the fx venv, else a bare `python3`/`python` on `PATH`. Lets the pool's
@@ -225,11 +225,11 @@ mod tests {
     #[test]
     fn runs_a_two_module_corpus_across_two_workers() {
         let Some(python) = venv_python() else {
-            skip_live("`.riptide-fx-venv` not present");
+            skip_live("`.tiderace-fx-venv` not present");
             return;
         };
         // Two modules so the LocalityScheduler distributes them across the two workers.
-        let dir = std::env::temp_dir().join(format!("riptide_pool_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tiderace_pool_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -292,7 +292,7 @@ mod tests {
             skip_live("no Python interpreter available");
             return;
         };
-        let dir = std::env::temp_dir().join(format!("riptide_pool_iso_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tiderace_pool_iso_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // A restorable module that mutates a global: test_b fails iff test_a's append leaked.

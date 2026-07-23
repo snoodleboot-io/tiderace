@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// On-disk warm state for impact-aware one-shot `run`s. Persists each test's outcome + its dependency
 /// footprint (touched files, from
 /// coverage) and the content hash of every touched file, so a later `run` re-executes **only** the
-/// tests whose dependencies changed. Stored as JSON at `<root>/.riptide-state.json`.
+/// tests whose dependencies changed. Stored as JSON at `<root>/.tiderace-state.json`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PersistedState {
     /// relative source path -> content hash (hex) at the time it was last run.

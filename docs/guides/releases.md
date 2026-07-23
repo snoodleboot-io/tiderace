@@ -3,10 +3,6 @@
 tiderace uses **trunk-based development** with **semantic versioning**. A release is cut by pushing a
 version tag; CI then builds and publishes the binaries.
 
-!!! info "Naming"
-    The binaries currently build as `riptide` / `riptide-daemon` from the `engine/` workspace — a
-    retired codename being consolidated under tiderace. Read them as tiderace.
-
 ## Versioning
 
 Versions follow semver (`MAJOR.MINOR.PATCH`):
@@ -28,8 +24,8 @@ git push origin v0.2.0  # → triggers .github/workflows/release.yml
 
 `release.yml` (also runnable manually via **workflow_dispatch**) then:
 
-1. builds `riptide` and `riptide-daemon` from the `engine/` workspace (`cargo build --release`),
-2. stages them as `riptide-linux-x86_64` / `riptide-daemon-linux-x86_64` with a `sha256sums.txt`,
+1. builds `tiderace` and `tiderace-daemon` from the `engine/` workspace (`cargo build --release`),
+2. stages them as `tiderace-linux-x86_64` / `tiderace-daemon-linux-x86_64` with a `sha256sums.txt`,
 3. uploads them as a build artifact and — on a tag push — **attaches them to the GitHub Release**.
 
 ## Workflow overview
@@ -38,7 +34,7 @@ git push origin v0.2.0  # → triggers .github/workflows/release.yml
 flowchart TD
     PUSH["push / PR → main"] --> CI["ci.yml: build · lint · test · coverage<br/>(engine/ workspace, linux + windows)"]
     PUSH --> DOCS["docs.yml: build + deploy the MkDocs site"]
-    TAG["push tag v*"] --> REL["release.yml: build riptide · riptide-daemon<br/>→ attach to the GitHub Release"]
+    TAG["push tag v*"] --> REL["release.yml: build tiderace · tiderace-daemon<br/>→ attach to the GitHub Release"]
 ```
 
 ## CI workflows
@@ -48,7 +44,7 @@ See `.github/workflows/` for the full definitions:
 | File | Trigger | Purpose |
 |---|---|---|
 | `ci.yml` | Push to `main`, PRs | Build · clippy · fmt · test + the coverage gate over the `engine/` workspace (linux + windows) |
-| `release.yml` | Tag push (`v*`) or manual dispatch | Build the `riptide` / `riptide-daemon` binaries and attach them to the GitHub Release |
+| `release.yml` | Tag push (`v*`) or manual dispatch | Build the `tiderace` / `tiderace-daemon` binaries and attach them to the GitHub Release |
 | `docs.yml` | Push to `main` (docs paths) | Build and deploy the MkDocs site to GitHub Pages |
 
 ## Caching in CI
@@ -56,6 +52,6 @@ See `.github/workflows/` for the full definitions:
 The project's workflows cache the **Cargo** registry, git dependencies, and `engine/target` (keyed on
 `engine/Cargo.lock`) so builds stay fast — that's the only thing they cache.
 
-Caching **`.riptide-state.json`** (impact-analysis state) is a pattern for running tiderace *in your
+Caching **`.tiderace-state.json`** (impact-analysis state) is a pattern for running tiderace *in your
 own project's CI* to skip unchanged tests — see [CI](ci.md). It doesn't apply to this pipeline, which
 builds and tests the engine itself rather than running a downstream suite through the daemon.

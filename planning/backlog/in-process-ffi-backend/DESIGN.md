@@ -9,7 +9,7 @@
 Add `InProcessTransport`, a third implementation of the existing `ShimTransport` trait
 (`engine-core/src/exec/transport.rs`). Production wires `PipeTransport` (subprocess over pipes); tests
 wire an in-process double; this adds an in-process **real** backend that embeds CPython via PyO3 and
-drives riptide's executor by FFI. Isolation stays fork-from-embedded (ADR-E013): the warm embedded
+drives tiderace's executor by FFI. Isolation stays fork-from-embedded (ADR-E013): the warm embedded
 interpreter is the in-process Wellspring, and a `fork()` per test inherits it copy-on-write. Only the
 **control plane** changes (FFI call vs JSON-over-pipe); the **isolation** and everything above the seam
 (Worker, scheduler, cache, impact, reporters) are untouched.
@@ -30,7 +30,7 @@ interpreter is the in-process Wellspring, and a `fork()` per test inherits it co
 The `spike-inproc/` go/no-go crate has been removed (it was disposable); its evidence, recorded here so
 this ticket is self-contained (full code in git history):
 
-- **PyO3 embeds one CPython and Rust drives riptide's own executor by FFI — no pytest.** Rust imported
+- **PyO3 embeds one CPython and Rust drives tiderace's own executor by FFI — no pytest.** Rust imported
   the user module and called the bare `test_*` bodies (catching `AssertionError`), and per-test
   `(name, outcome, detail)` came back as **Rust values**, not bytes over a pipe — the
   `InProcessTransport::exchange` shape. `unittest.TestCase.run()` driven the same way.
@@ -57,7 +57,7 @@ coverage rides the same additive field.
    the single-threaded-parent-at-fork constraint; stream outcome+coverage back over a minimal pipe.
 3. **`PyConfig` home/venv plumbing** — resolve the spike's cosmetic warnings; honor the target venv.
 4. **C-ext smoke** — numpy/pandas/pydantic-core imported + used in one interpreter under fork.
-5. **Benchmark** — `riptide-daemon bench`-style cold/warm over the many-cheap-tests corpus, in-process
+5. **Benchmark** — `tiderace-daemon bench`-style cold/warm over the many-cheap-tests corpus, in-process
    vs `PipeTransport`; record the delta in `benchmarks/RESULTS-native.md`.
 
 ## Testing

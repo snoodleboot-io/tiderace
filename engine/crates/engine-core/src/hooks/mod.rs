@@ -1,4 +1,4 @@
-//! Plugin / hook host (Phase 7, design 12, ADR-E001) — riptide owns the hooks; **no `pluggy`**.
+//! Plugin / hook host (Phase 7, design 12, ADR-E001) — tiderace owns the hooks; **no `pluggy`**.
 //!
 //! A Rust-native [`HookHost`] dispatches typed lifecycle [`HookEvent`]s to registered [`Hook`]
 //! plugins by static method call over a `Vec` — none of pytest's per-call, Python-level dispatch

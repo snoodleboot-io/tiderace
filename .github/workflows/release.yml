@@ -22,14 +22,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build release binaries
-        run: cargo build --release --bin riptide --bin riptide-daemon
+        run: cargo build --release --bin tiderace --bin tiderace-daemon
 
       - name: Stage artifacts
         run: |
           mkdir -p dist
-          install -Dm755 target/release/riptide        "dist/riptide-linux-x86_64"
-          install -Dm755 target/release/riptide-daemon "dist/riptide-daemon-linux-x86_64"
-          (cd dist && sha256sum riptide-linux-x86_64 riptide-daemon-linux-x86_64 > sha256sums.txt)
+          install -Dm755 target/release/tiderace        "dist/tiderace-linux-x86_64"
+          install -Dm755 target/release/tiderace-daemon "dist/tiderace-daemon-linux-x86_64"
+          (cd dist && sha256sum tiderace-linux-x86_64 tiderace-daemon-linux-x86_64 > sha256sums.txt)
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

@@ -52,7 +52,7 @@ def _run(root, batch, workers):
     p = subprocess.Popen(
         [sys.executable, _SHIM, root, "--subinterp"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        env={**os.environ, "RIPTIDE_SUBINTERP_WORKERS": str(workers)},
+        env={**os.environ, "TIDERACE_SUBINTERP_WORKERS": str(workers)},
     )
     _rd(p.stdout)  # ready
     t0 = time.perf_counter()

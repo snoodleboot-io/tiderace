@@ -32,10 +32,6 @@ That design unlocks two things no pytest plugin can do together:
   hashing mean an unchanged test never runs — and a result is content-addressed, so the same machinery
   works as a build-system-style cache.
 
-> **Naming.** The project is **tiderace**. The engine binaries currently build as `riptide` /
-> `riptide-daemon` (a retired codename being consolidated under tiderace) — read them as tiderace. An
-> earlier generation that *orchestrated pytest* (a separate `tiderace` binary) has been removed.
-
 ## How it compares
 
 | | tiderace | pytest | pytest-xdist | pytest-forked |
@@ -68,27 +64,27 @@ The no-fork isolation ladder makes even a *cold* full run beat pytest; impact-sk
 ```bash
 git clone https://github.com/snoodleboot-io/tiderace
 cd tiderace/engine && cargo build --release
-# binaries: target/release/riptide  and  target/release/riptide-daemon
+# binaries: target/release/tiderace  and  target/release/tiderace-daemon
 ```
 
 ## Quick start
 
 ```bash
 # The engine needs to know your shim + interpreter (it inherits these via env)
-export RIPTIDE_SHIM="$PWD/py-shim/shim.py"
-export RIPTIDE_PYTHON="$(which python3)"
+export TIDERACE_SHIM="$PWD/py-shim/shim.py"
+export TIDERACE_PYTHON="$(which python3)"
 
 # First run — executes all tests, records coverage footprints + state
-./target/release/riptide-daemon run /path/to/tests
+./target/release/tiderace-daemon run /path/to/tests
 
 # Subsequent runs — only tests affected by changed files (no change → nothing runs)
-./target/release/riptide-daemon run /path/to/tests
+./target/release/tiderace-daemon run /path/to/tests
 
 # Forced full run
-./target/release/riptide-daemon run /path/to/tests --all
+./target/release/tiderace-daemon run /path/to/tests --all
 
 # Watch — warm interpreter, re-run impacted tests on save (millisecond loops)
-./target/release/riptide-daemon watch /path/to/tests
+./target/release/tiderace-daemon watch /path/to/tests
 ```
 
 ## How it works
@@ -101,14 +97,14 @@ export RIPTIDE_PYTHON="$(which python3)"
 5. **Isolate** — per test: pure → no-fork · state-mutating → no-fork + snapshot/restore · opaque → fork
    (sound by construction; see [ADR-E014](planning/current/pure-rust-test-engine/design/adr/ADR-E014-no-fork-restore-ladder.md)).
 6. **Run** — invoke the body in the warm interpreter via the shim; capture coverage + purity.
-7. **Persist** — outcomes, per-test footprints, and file hashes to `.riptide-state.json`.
+7. **Persist** — outcomes, per-test footprints, and file hashes to `.tiderace-state.json`.
 
 See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full design with diagrams.
 
 ## Add to .gitignore
 
 ```gitignore
-.riptide-state.json
+.tiderace-state.json
 ```
 
 ## Documentation

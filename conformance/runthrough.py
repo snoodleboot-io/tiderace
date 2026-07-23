@@ -1,9 +1,9 @@
 """N5 conformance — **run-through tier** (ROADMAP-v2 B6). Beyond the static auto-map %, this *executes*
-a real suite **through riptide's engine** and diffs every test's outcome against an oracle run, yielding
+a real suite **through tiderace's engine** and diffs every test's outcome against an oracle run, yielding
 an **execution pass-rate** (the number that actually matters for adoption) and naming any divergences as
 engine bugs to file.
 
-This first target is a pure-`unittest` repo (cachetools): unittest needs **no migration** (riptide
+This first target is a pure-`unittest` repo (cachetools): unittest needs **no migration** (tiderace
 drives `TestCase` natively, ADR-E001), so it isolates the *execution* path. The oracle is stock
 `unittest` (a `TestSuite` run, which honors `setUpClass`) — the correct oracle for a unittest suite;
 pytest merely wraps the same machinery for these.
@@ -23,7 +23,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def _setup_paths(root: str, src: str | None) -> None:
-    sys.path.insert(0, os.path.join(_HERE, os.pardir, "engine", "py-riptide"))  # riptide
+    sys.path.insert(0, os.path.join(_HERE, os.pardir, "engine", "py-tiderace"))  # tiderace
     sys.path.insert(0, os.path.join(_HERE, os.pardir, "engine", "py-shim"))     # shim
     sys.path.insert(0, root)
     if src:
@@ -79,7 +79,7 @@ def _module_import(module_key: str) -> str:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="runthrough", description="execute a suite through riptide vs an oracle")
+    ap = argparse.ArgumentParser(prog="runthrough", description="execute a suite through tiderace vs an oracle")
     ap.add_argument("root")
     ap.add_argument("--src", default=None, help="extra dir to add to sys.path (the package under test)")
     ap.add_argument("--fork", action="store_true", help="use the fork executor (default: in-process)")
@@ -90,7 +90,7 @@ def main(argv=None) -> int:
     _setup_paths(root, src)
     import shim  # noqa: E402 — after sys.path is set
 
-    print(f"=== N5 run-through: {os.path.basename(root)} executed THROUGH riptide vs unittest oracle ===\n")
+    print(f"=== N5 run-through: {os.path.basename(root)} executed THROUGH tiderace vs unittest oracle ===\n")
     shim._preimport(root)
     reg = shim._discover(root)
     engine = shim.Engine(reg, no_fork=not args.fork, root=root)
@@ -115,7 +115,7 @@ def main(argv=None) -> int:
             match += 1
         else:
             mismatch += 1
-            diffs.append(f"  DIFF {node_id}: riptide={got} oracle={want}")
+            diffs.append(f"  DIFF {node_id}: tiderace={got} oracle={want}")
     engine.teardown_all()
 
     total = match + mismatch

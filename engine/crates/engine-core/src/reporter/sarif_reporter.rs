@@ -16,7 +16,7 @@ impl Reporter for SarifReporter {
             .iter()
             .filter(|r| matches!(r.outcome, Outcome::Failed | Outcome::Error))
             .map(|r| SarifResult {
-                rule_id: "riptide.test-failure",
+                rule_id: "tiderace.test-failure",
                 level: "error", // both Failed and Error map to SARIF level "error"
                 message: SarifMessage { text: &r.detail },
                 locations: vec![SarifLocation {
@@ -35,9 +35,9 @@ impl Reporter for SarifReporter {
             runs: vec![SarifRun {
                 tool: SarifTool {
                     driver: SarifDriver {
-                        name: "riptide",
+                        name: "tiderace",
                         rules: vec![SarifRule {
-                            id: "riptide.test-failure",
+                            id: "tiderace.test-failure",
                         }],
                     },
                 },

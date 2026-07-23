@@ -11,7 +11,7 @@ flowchart TB
     subgraph run1["First run (coverage on)"]
         EXE["execute test"] --> MON["sys.monitoring<br/>records touched files"]
         MON --> DG["DepGraph<br/>(test → source files)"]
-        DG --> ST["persist .riptide-state.json<br/>(per-test deps + file content hashes)"]
+        DG --> ST["persist .tiderace-state.json<br/>(per-test deps + file content hashes)"]
     end
     subgraph run2["Next run"]
         HASH["hash current files"] --> CHG{"which files changed?<br/>(content-hash diff)"}
@@ -27,7 +27,7 @@ flowchart TB
 2. **Dep graph.** Footprints fold into a `DepGraph` (`engine-core/src/coverage/dep_graph.rs`): test
    node id ↔ the source files it touched.
 3. **Persist.** The graph plus the content hash of every touched file are written to
-   [`.riptide-state.json`](database.md) (`engine-daemon/src/persist.rs`).
+   [`.tiderace-state.json`](database.md) (`engine-daemon/src/persist.rs`).
 4. **Content-hash diff.** On the next run, tiderace re-hashes the files and diffs against the stored
    hashes (`changed_files()`) — content-based, so touching a file without editing it triggers nothing.
 5. **Plan.** `plan()` partitions the candidate tests into `to_run` and `cached`; only `to_run`
@@ -57,13 +57,13 @@ makes a warm "no changes" run land in milliseconds.
 ```
 Run 1 (full, coverage on):  all tests run, dep graph + hashes built
 Run 2 (edit src/auth.py):   only tests whose deps include src/auth.py run
-Run 3 (no changes):         nothing runs — state served from .riptide-state.json
+Run 3 (no changes):         nothing runs — state served from .tiderace-state.json
 ```
 
 ## Building the footprint
 
 The footprint is built from coverage, captured automatically on runs where the daemon sets
-`RIPTIDE_COVERAGE=1`. There is no separate instrumentation command and no `coverage run` — the
+`TIDERACE_COVERAGE=1`. There is no separate instrumentation command and no `coverage run` — the
 footprint is a side effect of executing the test in-process. See [coverage](coverage.md).
 
 ## Relationship to the content-addressed cache

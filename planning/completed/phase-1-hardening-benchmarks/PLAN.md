@@ -1,13 +1,13 @@
-# Phase 1 — Riptide Hardening, Test Suite & Benchmark Harness
+# Phase 1 — Tiderace Hardening, Test Suite & Benchmark Harness
 
 > **Status:** Decisions locked — awaiting final **GO** to unblock Lane 0. **No lane begins until explicit approval.**
 > **Owner:** orchestrator-agent · **Persona:** Software Engineer · **Date:** 2026-06-10
 
 ## Decisions locked (2026-06-10)
-1. **Branch:** placeholder authorized → `feat/riptide-hardening-benchmarks` (no ticket; internal repo).
+1. **Branch:** placeholder authorized → `feat/tiderace-hardening-benchmarks` (no ticket; internal repo).
 2. **Rust structure:** idiomatic Rust modules — "one class per file" **waived** for Rust (C2 resolved).
-3. **Scope:** **Full plan W1–W12** incl. pyproject `[tool.riptide]` reader. Linux-only; mutation testing deferred.
-4. **Installs:** isolated installs approved → `./.riptide-bench-venv/` + `cargo install`; system Python untouched.
+3. **Scope:** **Full plan W1–W12** incl. pyproject `[tool.tiderace]` reader. Linux-only; mutation testing deferred.
+4. **Installs:** isolated installs approved → `./.tiderace-bench-venv/` + `cargo install`; system Python untouched.
 
 This plan follows the multiagent implementation protocol: load conventions → discover
 agents → design a genuinely-parallel execution model → gate on environment readiness →
@@ -31,7 +31,7 @@ Derived from the gap analysis. Each work item (W#) is traceable to a lane and a 
 | W8 | **Reference Python fixture suite** generator (shared by W6 + W7 + env health check) | Reproducible target with a real import graph | `benchmarks/fixtures/` |
 | W9 | **CI workflow** (build, clippy, rustfmt, test, coverage, bench-smoke) | README shows CI badges; no workflow exists | `.github/workflows/` |
 | W10 | **Docs reconciliation** (impact caveat, install URLs, config status, results table) | Docs describe unimplemented behaviour | `README.md`, `docs/**` |
-| W11 | `pyproject.toml [tool.riptide]` config reader *(decision: include or defer)* | Documented but unimplemented | `main.rs` |
+| W11 | `pyproject.toml [tool.tiderace]` config reader *(decision: include or defer)* | Documented but unimplemented | `main.rs` |
 | W12 | **Security review** of subprocess construction & path handling | Untrusted nodeids/paths reach `Command` | review-only (diff) |
 
 ---
@@ -89,15 +89,15 @@ The env-setup subagent **starts/verifies everything itself** (the pipeline owns 
 | # | Service / process | Purpose | Start / provision | Health check |
 |---|---|---|---|---|
 | E1 | Rust toolchain (cargo, rustc ≥1.75, clippy, rustfmt) | Build, lint, format, test | verify present | `cargo --version && cargo clippy --version && rustfmt --version` |
-| E2 | Isolated Python venv `./.riptide-bench-venv/` | Reproducible Python deps, no system pollution | `python3 -m venv` | `./.riptide-bench-venv/bin/python -V` |
+| E2 | Isolated Python venv `./.tiderace-bench-venv/` | Reproducible Python deps, no system pollution | `python3 -m venv` | `./.tiderace-bench-venv/bin/python -V` |
 | E3 | `pytest` + `coverage` (in venv) | Engine runtime deps (coverage currently **MISSING — verified**) | `pip install pytest coverage` | `python -c "import pytest, coverage"` |
 | E4 | `pytest-xdist`, `pytest-testmon` (in venv) | Benchmark competitors | `pip install pytest-xdist pytest-testmon` | `python -c "import xdist, testmon"` |
 | E5 | `hyperfine` | Statistically-sound wall-time benchmarking | `cargo install hyperfine` (or pkg mgr) | `hyperfine --version` |
 | E6 | `cargo-llvm-cov` | Rust coverage vs thresholds (line80/branch70) | `cargo install cargo-llvm-cov` | `cargo llvm-cov --version` |
-| E7 | Reference fixture suite (W8) | Shared target for tests + benchmarks | generate into `benchmarks/fixtures/sample_project/` | `riptide collect` finds N tests; pytest runs green |
+| E7 | Reference fixture suite (W8) | Shared target for tests + benchmarks | generate into `benchmarks/fixtures/sample_project/` | `tiderace collect` finds N tests; pytest runs green |
 | E8 | Feature branch + session file | Governance (general.md) | pipeline creates *(needs ticket ID — §9)* | `git branch --show-current` matches; session file valid |
 
-**Stop/cleanup:** `deactivate` venv (dir is gitignored & removable); `rm -rf .riptide-bench-venv .riptide.db .riptide-coverage`; branch via normal git. All documented in the generated `env-manifest.md`.
+**Stop/cleanup:** `deactivate` venv (dir is gitignored & removable); `rm -rf .tiderace-bench-venv .tiderace.db .tiderace-coverage`; branch via normal git. All documented in the generated `env-manifest.md`.
 
 **Network dependency risk:** E3–E6 require package downloads. If the sandbox is network-restricted, this is a **hard blocker** surfaced immediately (§9), not worked around.
 
@@ -205,7 +205,7 @@ flowchart TD
 - *Impact:* Given `src/foo.py` changes, When run, Then **only tests covering `foo.py`** execute.
 - *unittest:* Given `class AuthTests(unittest.TestCase)`, When collected, Then its `test_*` methods are discovered.
 - *Status:* Given a failing test, Then process exit code is **1** and it is classified `failed` (not `error`).
-- *Coverage persistence:* Given `--coverage`, Then `coverage_data` rows exist in `.riptide.db`.
+- *Coverage persistence:* Given `--coverage`, Then `coverage_data` rows exist in `.tiderace.db`.
 
 **TDD (unit — concurrent with code, written by each file-owner):** red→green→refactor, the 7 coverage categories (happy / boundary / empty-null / error / ordering / authz / adversarial) where applicable:
 - collector: nested classes, parametrize, async, unittest, non-test funcs after a class (the indentation bug).
@@ -224,7 +224,7 @@ flowchart TD
 |---|---|
 | Rust → Python/pytest subprocess | Integration test runs the binary on the fixture; asserts pass/fail/skip counts match a direct `pytest` run |
 | Rust → `coverage.py` | Run `--coverage` on fixture; assert `test_file_deps` + `coverage_data` populated; assert **2nd run skips** unchanged tests |
-| Rust → SQLite (`.riptide.db`) | Test opens the DB post-run and asserts expected rows (hashes, results, deps) |
+| Rust → SQLite (`.tiderace.db`) | Test opens the DB post-run and asserts expected rows (hashes, results, deps) |
 | unittest execution path | Fixture includes a `unittest.TestCase`; assert it is collected **and** run with correct status |
 | Benchmark harness → pytest / xdist / testmon / unittest / hyperfine | Harness emits a populated table with **non-zero timings for every tool**; missing tool = blocker, not a blank cell |
 

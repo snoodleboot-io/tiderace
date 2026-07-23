@@ -1,7 +1,7 @@
 //! TID-5 — live acceptance for the no-COW `SubprocessWorker` (`--no-fork`, ADR-E008 / design 05 §7).
 //!
 //! Drives the real shim in its `--no-fork` mode against a **real Python** and asserts correct outcomes
-//! across test styles. Unlike the fork-based acceptance suites (which need the rich `.riptide-fx-venv`),
+//! across test styles. Unlike the fork-based acceptance suites (which need the rich `.tiderace-fx-venv`),
 //! this uses a **stdlib-only** corpus, so it runs wherever *any* interpreter is on `PATH` — including
 //! **Windows CI**, which has no `fork()`. That closes the ROADMAP Phase-7 gap: the no-fork fallback is
 //! now exercised end-to-end on the platform it exists for.
@@ -31,7 +31,7 @@ fn shim() -> PathBuf {
 /// A usable interpreter: prefer the rich fx venv (local dev), else a bare `python3`/`python` on `PATH`
 /// (CI, incl. Windows via `actions/setup-python`). `None` ⇒ skip cleanly.
 fn any_python() -> Option<String> {
-    let venv = repo_root().join(".riptide-fx-venv/bin/python");
+    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
     if venv.exists() {
         return Some(venv.to_string_lossy().into_owned());
     }
@@ -83,7 +83,7 @@ fn expected(node_id: &str) -> Outcome {
 fn write_corpus(tag: &str) -> PathBuf {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "riptide_nofork_{tag}_{}_{}",
+        "tiderace_nofork_{tag}_{}_{}",
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
     ));
@@ -170,7 +170,7 @@ fn no_fork_is_result_identical_to_fork() {
 /// Windows, and the shim used to handle it two wrong ways: the optimistic path called `os.fork()` and
 /// raised an uncaught `AttributeError` (killing the worker), while `--no-fork` mode skipped the
 /// restorability check entirely and ran the module in-process, leaking un-restorable state into the
-/// next test. See `py-riptide/proof_windows_opaque_fork.py`.
+/// next test. See `py-tiderace/proof_windows_opaque_fork.py`.
 ///
 /// So the expectation is genuinely platform-dependent, and this asserts both halves:
 /// * **fork-capable** (Unix) — the module forks and the tests pass, no leak;
@@ -232,8 +232,8 @@ fn opaque_module_is_isolated_by_fork_or_refused_never_leaked() {
 /// silently broke.
 ///
 /// Without `fork()` there is no COW copy, so snapshot/restore is this worker's only isolation. The
-/// worker didn't request it (no `--restore`, no `RIPTIDE_RESTORE`); it inherited whatever the caller
-/// exported. Under the daemon that happened to be `RIPTIDE_RESTORE=1`, so this looked fine — but
+/// worker didn't request it (no `--restore`, no `TIDERACE_RESTORE`); it inherited whatever the caller
+/// exported. Under the daemon that happened to be `TIDERACE_RESTORE=1`, so this looked fine — but
 /// standalone the flag was unset and every module-level mutation persisted into the next test on that
 /// module. The existing acceptance corpus never mutated globals, so nothing caught it.
 ///

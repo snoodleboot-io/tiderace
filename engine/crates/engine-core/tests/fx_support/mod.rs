@@ -9,7 +9,7 @@
 //!     parametrization, override) can assert without Python.
 //!
 //! **No mocks at the python/sqlite boundary** (BINDING, test-mocking-rules): the
-//! live scenarios shell out to the real `.riptide-fx-venv` interpreter running real
+//! live scenarios shell out to the real `.tiderace-fx-venv` interpreter running real
 //! pytest + numpy + sqlite, exactly as the contract's §8 boundaries demand.
 
 #![allow(dead_code)] // each integration-test binary uses a different subset of these helpers.
@@ -61,7 +61,7 @@ pub fn fx_corpus_root() -> PathBuf {
 /// the same venv-presence guard `differential.rs` uses — but they DO run when the
 /// venv is present.
 pub fn fx_venv_python() -> Option<PathBuf> {
-    let p = repo_root().join(".riptide-fx-venv/bin/python");
+    let p = repo_root().join(".tiderace-fx-venv/bin/python");
     p.exists().then_some(p)
 }
 

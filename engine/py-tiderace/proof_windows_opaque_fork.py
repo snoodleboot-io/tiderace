@@ -19,7 +19,7 @@ without isolation. A wrong green is worse than a reported error.
 
 Windows is simulated by deleting `os.fork`, which is how CPython presents that platform.
 
-Run:  .riptide-fx-venv/bin/python engine/py-riptide/proof_windows_opaque_fork.py
+Run:  .tiderace-fx-venv/bin/python engine/py-tiderace/proof_windows_opaque_fork.py
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ def test_pure():
 
 
 def corpus() -> str:
-    tmp = tempfile.mkdtemp(prefix="riptide_winfork_")
+    tmp = tempfile.mkdtemp(prefix="tiderace_winfork_")
     (pathlib.Path(tmp) / "test_opaque.py").write_text(OPAQUE)
     (pathlib.Path(tmp) / "test_pure.py").write_text(PURE)
     if tmp not in sys.path:

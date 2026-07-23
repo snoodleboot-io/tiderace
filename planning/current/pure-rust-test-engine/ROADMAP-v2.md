@@ -16,7 +16,7 @@ Both tracks are **core-complete**; the only open item is the ② in-process back
 side-bet — see the ticket [`planning/backlog/in-process-ffi-backend/`](../../backlog/in-process-ffi-backend/)).
 
 - **Track A:** Phase 4 (RichDiff/async/unittest), Phase 5 (coverage→DepGraph→impact→cache), Phase 6
-  (LocalityScheduler + **runnable warm daemon**: `EngineHandler` e2e, `tiderace watch`, `riptide-daemon`
+  (LocalityScheduler + **runnable warm daemon**: `EngineHandler` e2e, `tiderace watch`, `tiderace-daemon`
   bin), Phase 7 (5 reporters, plugin host, Windows CI, measured perf). Purity guard + sandbox
   *interception* deferred (cache `Purity` seam exists).
 - **Track B:** B1–B7 done — migrate conformance **70% → 89%** across 4 repos (anyio 99%, click 94%,
@@ -51,9 +51,9 @@ under Linear team `tidewire` (issues `TID-*`). What landed since, and what it ch
   above.
 - **Migrate conformance** — **89% → 91%** (click 95%, flask 83%, anyio 99%; 352 mapped / 36 can't-map).
   The `70% → 89%` figures in the summary above are superseded.
-- **Test-environment integrity** (PR #9) — live acceptance tests self-skipped when `.riptide-fx-venv`
+- **Test-environment integrity** (PR #9) — live acceptance tests self-skipped when `.tiderace-fx-venv`
   was absent, and libtest reports an early return as `ok`; `engine · linux` never provisioned that venv,
-  so it had been running the whole live suite as no-ops. `RIPTIDE_REQUIRE_LIVE=1` now turns a
+  so it had been running the whole live suite as no-ops. `TIDERACE_REQUIRE_LIVE=1` now turns a
   live-scenario skip into a failure in both venv-provisioning CI jobs. Treat any pre-#9 "suite green"
   claim in this document with that caveat.
 - **Free-threading evaluated** (TID-3, PR #13) — PEP 703 / CPython 3.14t as a parallel no-fork tier.
@@ -81,7 +81,7 @@ Early, **B** decides whether anyone *tries* it (auto-map %); later, **A** decide
 **reconceived** Phase-7 pytest-compat as the migration codemod.
 
 **Sequencing heuristic:** (1) cheap B-gaps that move the adoption number → now; (2) then drive the spine
-at **Phase 5** (coverage/impact — the reason riptide exists); (3) run conformance continuously as the
+at **Phase 5** (coverage/impact — the reason tiderace exists); (3) run conformance continuously as the
 tripwire back to B; (4) **②** in-process backend stays a parallel side-bet, never a blocker.
 
 **Definition of Done (every item):** code + a focused test/proof (no pytest in native paths) + green
@@ -99,13 +99,13 @@ one-line ADR/doc note if a decision was made.
 | 3 Fixtures + watermarks | ✅ done | merged to `main_v2` |
 | 4 Full styles + assertions | ✅ **done** | marks/`@cases` + RichDiff + async + unittest fidelity; **purity guard shipped** via the no-fork ladder (E014) — fs/clock/net interception still open |
 | 5 Coverage + cache | ✅ **done** | coverage→DepGraph→impact + content-addressed cache; **live-loop wiring done** (TID-7) + remote `DirCache` (TID-6) |
-| 6 Scheduler + daemon | ✅ **done** | LocalityScheduler + warm daemon (EngineHandler e2e, watch, `riptide-daemon` bin); inner loop ~7ms |
+| 6 Scheduler + daemon | ✅ **done** | LocalityScheduler + warm daemon (EngineHandler e2e, watch, `tiderace-daemon` bin); inner loop ~7ms |
 | 7 Compat + reporting + hardening | 🟢 **core done** | 5 reporters + plugin host + Windows CI + measured perf; further governor tuning iterative |
 
 | Track B item | Status |
 |---|---|
 | Native surface (`@provides`/`@cases`/marks, type-DI) | ✅ N1–N4 |
-| `riptide migrate` codemod + report | ✅ |
+| `tiderace migrate` codemod + report | ✅ |
 | Conformance harness (instrument) | ✅ |
 | **Builtins (monkeypatch/tmp_path/…)** | ✅ done (click 70%→93%) |
 | **Type-inference for untyped fixtures (B3)** | ✅ done (total 79%→85%) |
@@ -126,7 +126,7 @@ one-line ADR/doc note if a decision was made.
 ### Phase 4 — Full styles + assertions  🟢 **core delivered (2026-06-21)**
 *Designs: [09-assertions](design/09-assertions.md), [10-test-styles](design/10-test-styles.md); [ADR-E009](design/adr/ADR-E009-lazy-assertion-introspection.md). Proofs: `proof_n7_assertions.py`, `proof_n8_async_unittest.py`.*
 
-- [x] Native parametrization — `@riptide.cases` through the fork engine
+- [x] Native parametrization — `@tiderace.cases` through the fork engine
 - [x] Native marks — `@skip`/`@skip_if`/`@xfail`(+strict)/`@tag`, shim-honored
 - [x] **Lazy assertion introspection + RichDiff** (the big one) — ADR-E009
   - Failing `assert` re-evaluated once in the live frame → operand source + values + element/line/key diff
@@ -162,8 +162,8 @@ one-line ADR/doc note if a decision was made.
 
 - [x] **`LocalityScheduler`** — duration-aware LPT balancing + scope-locality (5 tests; makespan ≤ round-robin on uneven durations; a module co-locates; dominant group splits)
 - [x] **FS watch + invalidation** — `engine-daemon`: content-hash `Invalidator` (conftest/config/C-ext recycle; test→recollect; source→impact; identical bytes→no-op) + `notify`-backed `FsWatcher` + noise-filtering `Debouncer`
-- [x] **Warm daemon** — full + runnable: `Session` (invalidation→impact→cache→`ChangeOutcome`); RPC protocol + `serve_connection` + `serve_unix_socket`; **`EngineHandler` over a warm reused wellspring** (e2e-proven: discover/run real Python, warm); `riptide-daemon` binary (run/serve/watch/bench)
-- [x] **`tiderace watch`** native mode — `react_to_change` (edit→minimum-rerun, unit-tested) + `watch_loop` (FsWatcher→debounce→react) + `riptide-daemon watch`. Measured warm rerun ≈ **7 ms** vs pytest ≈ 650 ms ([RESULTS-native.md](../../../benchmarks/RESULTS-native.md))
+- [x] **Warm daemon** — full + runnable: `Session` (invalidation→impact→cache→`ChangeOutcome`); RPC protocol + `serve_connection` + `serve_unix_socket`; **`EngineHandler` over a warm reused wellspring** (e2e-proven: discover/run real Python, warm); `tiderace-daemon` binary (run/serve/watch/bench)
+- [x] **`tiderace watch`** native mode — `react_to_change` (edit→minimum-rerun, unit-tested) + `watch_loop` (FsWatcher→debounce→react) + `tiderace-daemon watch`. Measured warm rerun ≈ **7 ms** vs pytest ≈ 650 ms ([RESULTS-native.md](../../../benchmarks/RESULTS-native.md))
 
 ### Phase 7 — Reporting + hardening (compat → migration)  🟡 **reporters done**
 *Designs: [12-plugin-host](design/12-plugin-host.md), [13-cross-cutting](design/13-cross-cutting.md); [ADR-E008](design/adr/ADR-E008-cross-platform.md). Note: "pytest-compat layer" is **replaced** by Track B migration.*
@@ -180,22 +180,22 @@ one-line ADR/doc note if a decision was made.
 
 ### B1 — Native builtin resources  ✅ **done (2026-06-21)**
 *Conformance: builtins were **77%** of click's can't-map; `monkeypatch` 21 + `tmp_path` 4 = 76% of those.*
-*Delivered: `engine/py-riptide/riptide/builtins/`; proof `proof_n5_builtins.py`; [ADR-E012](design/adr/ADR-E012-native-type-driven-authoring.md) B1 note.*
+*Delivered: `engine/py-tiderace/tiderace/builtins/`; proof `proof_n5_builtins.py`; [ADR-E012](design/adr/ADR-E012-native-type-driven-authoring.md) B1 note.*
 
-- [x] `riptide.builtins.monkeypatch` — `@provides`-style, function-scoped, **with teardown** (undo on yield-exit)
+- [x] `tiderace.builtins.monkeypatch` — `@provides`-style, function-scoped, **with teardown** (undo on yield-exit)
   - API: `setattr`/`delattr`/`setitem`/`delitem`/`setenv`/`delenv`/`syspath_prepend`/`chdir`; injected as `mp: MonkeyPatch`
   - Done: proof shows env/attr mutation isolated + teardown restores (no pytest), through the real shim
-- [x] `riptide.builtins.tmp_path` — function-scoped `TmpPath(pathlib.Path)` to a fresh temp dir (cleaned on teardown)
+- [x] `tiderace.builtins.tmp_path` — function-scoped `TmpPath(pathlib.Path)` to a fresh temp dir (cleaned on teardown)
 - [x] `capsys` / `capfd` — `Capsys`/`Capfd` capture providers returning a `.readouterr()` `CaptureResult`
 - [x] `tmpdir` — legacy alias mapped by `migrate` to `TmpPath` (with a py.path caveat)
-- [x] **Teach `migrate`** to map these builtins to the riptide providers (stop flagging them)
+- [x] **Teach `migrate`** to map these builtins to the tiderace providers (stop flagging them)
   - Done: re-ran conformance → **click auto-map 70% → 93%** (can't-map 43→10; entire builtin bucket eliminated)
   - **Decision:** builtins injected by *distinct* types (not bare `pathlib.Path`) to keep type-DI unambiguous
 
 ### B2 — `usefixtures` handling  ✅ **done (2026-06-22)**  *(capability shipped; corpus bucket gated upstream — see note)*
 *Proof `proof_b2_uses.py`.*
-- [x] Native `@riptide.uses(Provider)` — by type; the shim sets the provider up (and tears it down) in the closure without injecting it
-- [x] `migrate`: `@pytest.mark.usefixtures("x")` → `@riptide.uses(<TypeOfX>)` when the referenced fixture's type is known; flag otherwise
+- [x] Native `@tiderace.uses(Provider)` — by type; the shim sets the provider up (and tears it down) in the closure without injecting it
+- [x] `migrate`: `@pytest.mark.usefixtures("x")` → `@tiderace.uses(<TypeOfX>)` when the referenced fixture's type is known; flag otherwise
   - **Honest finding:** the corpus's usefixtures bucket did **not** shrink — click's 6 all reference *untyped* fixtures, so they're blocked upstream by inference precision (B3), not by usefixtures support. The capability is delivered + proven; the bucket clears once those fixtures become typeable.
 
 ### B3 — Migration type-inference for untyped fixtures  ✅ **done (2026-06-21)**  *(was 65% of gaps across 4 repos)*
@@ -211,7 +211,7 @@ one-line ADR/doc note if a decision was made.
 ### B5 — Async + provider-level params  ✅ **done (2026-06-23)**
 *Proofs `proof_b5_provider_params.py`, `proof_b5_async_providers.py`; measured TOTAL 85%→87%, anyio 80%→89%.*
 - [x] Async providers (`async def @provides`, coroutine or async-gen w/ teardown) — set up + torn down on the **same event loop** as the (async or sync) body, wired by type; function-scope (wider-scope async is the documented edge). Sync hot path untouched.
-- [x] Provider-level parametrization — `@riptide.provides(params=[...])` fans the test out (value via `request.param`); `migrate` carries `params=` over instead of flagging
+- [x] Provider-level parametrization — `@tiderace.provides(params=[...])` fans the test out (value via `request.param`); `migrate` carries `params=` over instead of flagging
   - Done: proof shows fan-out across params + worst-wins aggregation; the **parametrized-fixture can't-map bucket cleared** (anyio 8→0, total can't-map 61→52)
 
 ### B6 — Migration **run-through-engine** tier  🟢 **harness + first repo done (2026-06-21)**

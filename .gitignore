@@ -1,17 +1,17 @@
 /target
 
 # tiderace engine runtime state
-.riptide-state.json
-.riptide-coverage/
+.tiderace-state.json
+.tiderace-coverage/
 
 # Conformance corpora: real third-party repos (anyio/click/flask/…) fetched locally for the
-# `riptide migrate` conformance harness. NEVER commit them — they carry their own licenses.
+# `tiderace migrate` conformance harness. NEVER commit them — they carry their own licenses.
 conformance/vendor/
 
 # Benchmark / spike / fixture environments (provisioned by Lane 0)
 .tiderace-bench-venv/
-.riptide-spike-venv/
-.riptide-fx-venv/
+.tiderace-spike-venv/
+.tiderace-fx-venv/
 
 # pure-rust-test-engine build artifacts (sources ARE committed)
 spike/target/

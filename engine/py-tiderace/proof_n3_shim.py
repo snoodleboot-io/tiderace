@@ -1,4 +1,4 @@
-"""N3 proof — riptide-native providers driven through the REAL engine shim (`engine/py-shim/shim.py`),
+"""N3 proof — tiderace-native providers driven through the REAL engine shim (`engine/py-shim/shim.py`),
 no pytest, no fork. Decisive on type-DI: the provider is named `database`, but tests request it as
 `store: Db` / providers request it as `conn: Db` — **no name matches**, so a pass can only happen if the
 shim resolved by TYPE. Drives `shim.Engine(..., no_fork=True)` over a temp native corpus.
@@ -11,14 +11,14 @@ import tempfile
 import textwrap
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _HERE)  # the `riptide` package
+sys.path.insert(0, _HERE)  # the `tiderace` package
 sys.path.insert(0, os.path.join(_HERE, os.pardir, "py-shim"))  # `shim`
 
 import shim  # noqa: E402
 
 CORPUS = textwrap.dedent(
     '''
-    import riptide
+    import tiderace
 
     class Db:
         def __init__(self):
@@ -32,12 +32,12 @@ CORPUS = textwrap.dedent(
         def __init__(self, db: Db):
             self.db = db
 
-    @riptide.provides(scope="module", name="database")   # provider name is "database"...
+    @tiderace.provides(scope="module", name="database")   # provider name is "database"...
     def db() -> Db:
         d = Db()
         yield d
 
-    @riptide.provides
+    @tiderace.provides
     def repo(conn: Db) -> Repo:        # ...requested here as `conn: Db` — wired by TYPE, not name
         return Repo(conn)
 
@@ -51,27 +51,27 @@ CORPUS = textwrap.dedent(
     def test_plain():
         assert 1 + 1 == 2
 
-    @riptide.skip(reason="wip")
+    @tiderace.skip(reason="wip")
     def test_skipped(store: Db):       # would touch a fixture, but skip short-circuits before setup
         raise AssertionError("must not run")
 
-    @riptide.skip_if(True, reason="env")
+    @tiderace.skip_if(True, reason="env")
     def test_skip_if():
         raise AssertionError("must not run")
 
-    @riptide.xfail(reason="known bug")
+    @tiderace.xfail(reason="known bug")
     def test_xfails():
         assert 1 == 2                  # fails → folds to xfail
 
-    @riptide.xfail(reason="fixed now", strict=True)
+    @tiderace.xfail(reason="fixed now", strict=True)
     def test_xpass_strict():
         assert True                    # unexpected pass under strict → failed
 
-    @riptide.cases([(2, 3, 5), (0, 0, 0)])
+    @tiderace.cases([(2, 3, 5), (0, 0, 0)])
     def test_add(a, b, exp):           # bare params filled by @cases (no fixtures)
         assert a + b == exp
 
-    @riptide.cases([(1,), (2,)])
+    @tiderace.cases([(1,), (2,)])
     def test_cases_plus_fixture(n, store: Db):   # @cases AND a type-DI fixture together
         store.add(n)
         assert store.count() >= 1
