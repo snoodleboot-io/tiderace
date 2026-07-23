@@ -1,0 +1,89 @@
+name: Wheels
+
+# Build the tiderace wheel with maturin and prove it installs + runs — the same
+# `scripts/build-wheel.sh` you run locally, so what CI ships is exactly what builds here.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "engine/**"
+      - "scripts/build-wheel.sh"
+      - ".github/workflows/wheels.yml"
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "engine/**"
+      - "scripts/build-wheel.sh"
+      - ".github/workflows/wheels.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke:
+    name: build wheel + smoke test (linux-x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install maturin + uv
+        run: python -m pip install --upgrade pip maturin uv
+
+      # Canonical build path — identical to local. Stages the shim into the package, then maturin build.
+      - name: Build wheel
+        run: scripts/build-wheel.sh --release -o dist
+
+      # The guarantee: a fresh install must actually run a suite with NO TIDERACE_SHIM set — the bundled
+      # shim has to be found and executed. Mirrors the local proof exactly.
+      - name: Smoke test — install the wheel and run a corpus zero-config
+        run: |
+          set -euo pipefail
+          uv venv /tmp/smoke --python 3.12
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl numpy pytest
+          /tmp/smoke/bin/python -c "import tiderace, tiderace._shim"   # package + shim shipped
+          mkdir -p /tmp/corpus
+          printf 'def test_pass():\n    assert 1+1==2\n\ndef test_fail():\n    assert 1==2\n' > /tmp/corpus/test_smoke.py
+          # activated venv, no env vars → the binary must auto-locate the bundled shim
+          out="$(cd /tmp/corpus && PATH="/tmp/smoke/bin:$PATH" env -u TIDERACE_SHIM -u TIDERACE_PYTHON tiderace-daemon run . --all)"
+          echo "$out"
+          echo "$out" | grep -q "1 failing" || { echo "smoke test did not run the corpus as expected"; exit 1; }
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: tiderace-wheel-linux-x86_64
+          path: dist/*.whl
+
+  publish:
+    name: publish to PyPI (tag only)
+    needs: build-and-smoke
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install maturin
+        run: python -m pip install --upgrade pip maturin
+      - name: Build wheel + sdist
+        run: |
+          scripts/build-wheel.sh --release -o dist
+          maturin sdist -m engine/crates/tiderace-dist/Cargo.toml -o dist
+      # Requires a PYPI_API_TOKEN repo secret. Absent that, this job no-ops the upload with a clear note
+      # rather than failing — the first real publish is a deliberate, credentialed act.
+      - name: Publish
+        env:
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -z "${MATURIN_PYPI_TOKEN:-}" ]; then
+            echo "PYPI_API_TOKEN not set — skipping upload. Add the secret to publish on tag."
+            exit 0
+          fi
+          maturin upload --skip-existing dist/*

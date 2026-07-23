@@ -30,10 +30,16 @@ fn main() -> ExitCode {
     let python = std::env::var("TIDERACE_PYTHON").unwrap_or_else(|_| "python3".to_string());
     let shim = match std::env::var("TIDERACE_SHIM") {
         Ok(s) => PathBuf::from(s),
-        Err(_) => {
-            eprintln!("error: set TIDERACE_SHIM to the path of py-shim/shim.py");
-            return ExitCode::FAILURE;
-        }
+        Err(_) => match engine_core::default_shim(&python) {
+            Some(p) => p, // shim shipped inside the installed `tiderace` package
+            None => {
+                eprintln!(
+                    "error: TIDERACE_SHIM not set and no bundled shim found — \
+                     `pip install tiderace` into this interpreter, or point TIDERACE_SHIM at py-shim/shim.py"
+                );
+                return ExitCode::FAILURE;
+            }
+        },
     };
     // Impact-aware `run` needs coverage to record each test's footprint (the warm-mode skip). The
     // wellspring (a child process) inherits this env. `--all` opts out (full run, no coverage).

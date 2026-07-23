@@ -1,0 +1,20 @@
+[package]
+name = "tiderace-dist"
+description = "Packaging crate: bundles the tiderace + tiderace-daemon binaries into one wheel (maturin)."
+edition = "2021"
+version = "0.0.1"
+license = "MIT"
+
+# Both product binaries, so a single `maturin build` ships both. The sources are the real mains in
+# engine-cli / engine-daemon — pointed at by path so there is one implementation, not a fork.
+[[bin]]
+name = "tiderace"
+path = "../engine-cli/src/main.rs"
+
+[[bin]]
+name = "tiderace-daemon"
+path = "../engine-daemon/src/main.rs"
+
+[dependencies]
+engine-core = { path = "../engine-core" }
+engine-daemon = { path = "../engine-daemon" }

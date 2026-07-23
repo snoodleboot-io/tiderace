@@ -1,0 +1,37 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "tiderace"
+version = "0.0.1"
+description = "A pure-Rust test engine for Python — its own runner, not a pytest wrapper."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "John Aven" }]
+keywords = ["testing", "pytest", "rust", "test-runner", "impact-analysis"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Testing",
+]
+
+[project.urls]
+Homepage = "https://snoodleboot-io.github.io/tiderace/"
+Repository = "https://github.com/snoodleboot-io/tiderace"
+
+[tool.maturin]
+# Ship the compiled binaries (tiderace, tiderace-daemon) — this crate owns both.
+bindings = "bin"
+manifest-path = "Cargo.toml"
+# Bundle the Python authoring package (@tiderace.provides, the `migrate` codemod, and the staged
+# `_shim/shim.py` that the binaries auto-locate). Paths are relative to this pyproject.toml.
+python-source = "../../py-tiderace"
+module-name = "tiderace"
+# One binary wheel per platform (py3-none-<platform>), usable across all Python 3.12+.
+strip = true
+# maturin bin-wheels don't emit python-source; include the package tree explicitly so the
+# authoring API + the staged shim ship and install importably.
+include = [{ path = "tiderace/**/*", format = "wheel" }]
