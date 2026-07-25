@@ -67,12 +67,26 @@ See [Configuration](configuration.md) for the rest of the variables.
 ./target/release/tiderace-daemon run /path/to/tests --all
 ```
 
-## Prebuilt binaries (future)
+## Install as a Python wheel (maturin)
 
-!!! note "Pre-release"
-    crates.io publishing and GitHub Releases binaries are not available yet. Build from source as
-    above. Release artifacts will be added once the rename from the `tiderace` codename to tiderace
-    is consolidated.
+tiderace also builds a **Python wheel** that ships both binaries *and* the bundled shim, so an install
+runs your suite with **no configuration** — the binaries locate the shim inside the installed package
+automatically (no `TIDERACE_SHIM` needed):
+
+```bash
+scripts/build-wheel.sh --release -o dist        # stages the shim, then `maturin build`
+uv pip install dist/*.whl                        # or: pip install dist/*.whl
+tiderace-daemon run /path/to/tests --all         # just works, zero env vars
+```
+
+The wheel is built by [`scripts/build-wheel.sh`](https://github.com/snoodleboot-io/tiderace/blob/main/scripts/build-wheel.sh)
+— the same script CI runs, so what ships is exactly what you can build here. It bundles the
+`tiderace` authoring package (`@tiderace.provides`, `tiderace migrate`) alongside the binaries.
+
+!!! note "PyPI"
+    `pip install tiderace` from PyPI isn't live yet — publishing happens on the first tagged `v*`
+    release (the `Wheels` workflow uploads via maturin once a `PYPI_API_TOKEN` is configured). Until
+    then, build the wheel locally as above.
 
 ## Add to `.gitignore`
 

@@ -39,3 +39,5 @@ benchmarks/.hyperfine/
 # mkdocs build output
 /site/
 engine/crates/engine-inproc/Cargo.lock
+engine/py-tiderace/tiderace/_shim/shim.py
+engine/crates/tiderace-dist/target/
