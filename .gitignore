@@ -41,3 +41,4 @@ benchmarks/.hyperfine/
 engine/crates/engine-inproc/Cargo.lock
 engine/py-tiderace/tiderace/_shim/shim.py
 engine/crates/tiderace-dist/target/
+dist/
