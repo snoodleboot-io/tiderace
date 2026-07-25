@@ -43,13 +43,16 @@ jobs:
       - name: Smoke test — install the wheel and run a corpus zero-config
         run: |
           set -euo pipefail
+          wheel="$(ls dist/*.whl)"                       # fail loudly if the build misplaced it
+          echo "installing $wheel"
           uv venv /tmp/smoke --python 3.12
-          uv pip install --python /tmp/smoke/bin/python dist/*.whl numpy pytest
+          uv pip install --python /tmp/smoke/bin/python "$wheel" numpy pytest
           /tmp/smoke/bin/python -c "import tiderace, tiderace._shim"   # package + shim shipped
           mkdir -p /tmp/corpus
           printf 'def test_pass():\n    assert 1+1==2\n\ndef test_fail():\n    assert 1==2\n' > /tmp/corpus/test_smoke.py
-          # activated venv, no env vars → the binary must auto-locate the bundled shim
-          out="$(cd /tmp/corpus && PATH="/tmp/smoke/bin:$PATH" env -u TIDERACE_SHIM -u TIDERACE_PYTHON tiderace-daemon run . --all)"
+          # activated venv, no env vars → the binary must auto-locate the bundled shim.
+          # Capture stderr too: the "N tests, F failing" summary is written to stderr.
+          out="$(cd /tmp/corpus && PATH="/tmp/smoke/bin:$PATH" env -u TIDERACE_SHIM -u TIDERACE_PYTHON tiderace-daemon run . --all 2>&1)"
           echo "$out"
           echo "$out" | grep -q "1 failing" || { echo "smoke test did not run the corpus as expected"; exit 1; }
 

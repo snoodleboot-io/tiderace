@@ -18,5 +18,7 @@ mkdir -p "$SHIM_DST_DIR"
 cp "$SHIM_SRC" "$SHIM_DST_DIR/shim.py"
 echo "staged shim -> tiderace/_shim/shim.py"
 
-cd "$ROOT/engine/crates/tiderace-dist"
-exec maturin build "$@"
+# Build via -m (not `cd`), so any relative `-o <dir>` the caller passes stays relative to THEIR cwd,
+# not the crate dir. maturin resolves python-source / include globs relative to the manifest either
+# way. (A `cd` here silently misplaced the wheel under the crate dir — caught by the CI smoke test.)
+exec maturin build -m "$ROOT/engine/crates/tiderace-dist/Cargo.toml" "$@"
