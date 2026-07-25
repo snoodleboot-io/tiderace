@@ -51,8 +51,12 @@ jobs:
           mkdir -p /tmp/corpus
           printf 'def test_pass():\n    assert 1+1==2\n\ndef test_fail():\n    assert 1==2\n' > /tmp/corpus/test_smoke.py
           # activated venv, no env vars → the binary must auto-locate the bundled shim.
-          # Capture stderr too: the "N tests, F failing" summary is written to stderr.
+          # Capture stderr (the "N tests, F failing" summary goes there) AND tolerate the daemon's
+          # expected non-zero exit: with a failing test in the corpus it exits 1 pytest-style, which
+          # `set -e` would otherwise treat as a script failure. We assert on the OUTPUT instead.
+          set +e
           out="$(cd /tmp/corpus && PATH="/tmp/smoke/bin:$PATH" env -u TIDERACE_SHIM -u TIDERACE_PYTHON tiderace-daemon run . --all 2>&1)"
+          set -e
           echo "$out"
           echo "$out" | grep -q "1 failing" || { echo "smoke test did not run the corpus as expected"; exit 1; }
 
