@@ -212,16 +212,33 @@ jobs:
         run: cargo audit --deny warnings
 
   # ── release stage ──────────────────────────────────────────────────────────────────────────────
-  # Build the wheel and prove it installs + runs — the same scripts/build-wheel.sh you run locally, so
-  # what CI ships is exactly what builds here. GATED on the full test suite: a red test can't ship.
-  build:
-    name: build wheel + smoke test (linux-x86_64)
+  # Derive the version ONCE, build one wheel per platform, prove each installs and runs, verify the
+  # Linux glibc floor, then publish the merged set. Still the same scripts/build-wheel.sh you run
+  # locally. GATED on the full test suite: a red test can't ship.
+  #
+  # Until 0.2.0 this stage was a single ubuntu-latest job, which shipped exactly one wheel —
+  # `py3-none-manylinux_2_39_x86_64`. Two separate defects produced that, and they need separate
+  # fixes; both are addressed below.
+  #   1. `maturin build` compiles for the HOST triple only, and there was no matrix. Windows, macOS
+  #      and aarch64 were never built at all — not unsupported, just never compiled.
+  #   2. Building on ubuntu-latest (24.04) binds the newest versioned glibc symbols, so maturin can
+  #      only tag manylinux_2_39. glibc is backward- but NOT forward-compatible, so pip correctly
+  #      refuses that wheel on Ubuntu 22.04 (2.35), Debian 12 (2.36) and RHEL 9 / AL2023 (2.34) —
+  #      every one of them silently fell back to the sdist, which needs a Rust toolchain to build.
+  #
+  # What makes one-wheel-per-platform sufficient: `bindings = "bin"` with no extension module means
+  # nothing links libpython (hence the `py3-none-<platform>` tag), so a single wheel per platform
+  # serves every Python 3.12+. There is no ABI axis to multiply the matrix by.
+
+  version:
+    name: derive version + sdist
     # engine-audit joins the gate: a known-vulnerable dependency can no longer ship a wheel, on
     # the same principle that already keeps a red test from shipping one.
     needs: [engine-linux, engine-windows, engine-coverage, engine-audit]
     # The weekly cron exists to re-check advisories, not to mint artifacts. Without this guard the
     # scheduled run would derive a release-shaped version (calculate_version.py reads GITHUB_REF =
-    # refs/heads/main and returns MAJOR.MINOR.0) and upload a wheel nobody asked for.
+    # refs/heads/main and returns MAJOR.MINOR.0) and upload a wheel nobody asked for. Everything
+    # downstream hangs off this job, so guarding here skips the whole release stage.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     outputs:
@@ -229,15 +246,20 @@ jobs:
       should_publish_testpypi: ${{ steps.version.outputs.should_publish_testpypi }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `maturin sdist` does not compile, but it does shell out to `cargo metadata`.
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Install maturin + uv
-        run: python -m pip install --upgrade pip maturin uv
+      - name: Install maturin
+        run: python -m pip install --upgrade pip maturin
 
+      # Derivation lives in its own job so it happens exactly once and every leg of the matrix
+      # below is pinned to the same answer. Running it per-leg would be actively wrong: on the
+      # non-main push path calculate_version.py builds the suffix from datetime.now(), so five
+      # legs would race to five different versions and publish a mismatched set.
       - name: Derive version (no tags)
         id: version
         env:
@@ -247,46 +269,164 @@ jobs:
           GITHUB_RUN_NUMBER: ${{ github.run_number }}
         run: python .github/scripts/calculate_version.py
 
-      - name: Inject the derived version into the package
-        run: |
-          sed -i "s/^version = .*/version = \"${{ steps.version.outputs.version }}\"/" engine/crates/tiderace-dist/pyproject.toml
-          grep -m1 "^version = " engine/crates/tiderace-dist/pyproject.toml
+      - name: Pin the derived version into the package
+        run: python scripts/set_version.py "${{ steps.version.outputs.version }}"
 
-      # Canonical build path — identical to local. Stages the shim, then maturin. Also build an sdist.
-      - name: Build wheel + sdist
-        run: |
-          scripts/build-wheel.sh --release -o dist
-          maturin sdist -m engine/crates/tiderace-dist/Cargo.toml -o dist
+      # The sdist is platform-independent, so it is built once here rather than five times.
+      - name: Build sdist
+        run: maturin sdist -m engine/crates/tiderace-dist/Cargo.toml -o dist
 
-      # The guarantee: a fresh install must run a suite with NO env vars — the bundled shim is found and
-      # executed. `run --all` exits non-zero pytest-style on a failing test, so tolerate that and assert
-      # on the output. Mirrors the local proof exactly.
-      - name: Smoke test — install the wheel and run a corpus zero-config
-        run: |
-          set -euo pipefail
-          wheel="$(ls dist/*.whl)"
-          echo "installing $wheel"
-          uv venv /tmp/smoke --python 3.12
-          uv pip install --python /tmp/smoke/bin/python "$wheel" numpy pytest
-          /tmp/smoke/bin/python -c "import tiderace, tiderace._shim"
-          mkdir -p /tmp/corpus
-          printf 'def test_pass():\n    assert 1+1==2\n\ndef test_fail():\n    assert 1==2\n' > /tmp/corpus/test_smoke.py
-          set +e
-          out="$(cd /tmp/corpus && PATH="/tmp/smoke/bin:$PATH" env -u TIDERACE_SHIM -u TIDERACE_PYTHON tiderace-daemon run . --all 2>&1)"
-          set -e
-          echo "$out"
-          echo "$out" | grep -q "1 failing" || { echo "smoke test did not run the corpus as expected"; exit 1; }
-
-      - name: Upload dist
+      - name: Upload sdist
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: tiderace-dist
+          name: tiderace-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build:
+    name: wheel · ${{ matrix.name }}
+    needs: [version]
+    runs-on: ${{ matrix.runs-on }}
+    container: ${{ matrix.container }}
+    strategy:
+      # One platform failing should not hide the state of the other four — with five legs, a
+      # cancelled matrix costs a whole round-trip to learn what a single run could have told us.
+      fail-fast: false
+      matrix:
+        include:
+          # The Linux legs build INSIDE the official manylinux images rather than on the runner.
+          # That is the fix for defect #2: the toolchain there links against glibc 2.28, so the
+          # binary only ever references symbols old enough to load on RHEL 8 and everything newer.
+          # 2_28 specifically — it is the oldest glibc that still runs the Node-based GitHub
+          # Actions natively (manylinux2014 / glibc 2.17 cannot run actions/checkout).
+          #
+          # Chosen over PyO3/maturin-action so scripts/build-wheel.sh stays the single canonical
+          # build path, and so this adds no new third-party action to the supply-chain surface
+          # that was just pinned down. Images are digest-pinned on the same principle.
+          - name: linux-x86_64
+            runs-on: ubuntu-24.04
+            container: quay.io/pypa/manylinux_2_28_x86_64@sha256:f854c50adf7b7a325bc4794316f3758d387a41d61f9e2ebca0f26c7dc8f761d4
+            macos-target: ""
+          - name: linux-aarch64
+            runs-on: ubuntu-24.04-arm   # native arm runner — free for public repos, no QEMU
+            container: quay.io/pypa/manylinux_2_28_aarch64@sha256:b9dd5b2d6885fae144119ac934978003bcc413087ea08f602a960257205ec246
+            macos-target: ""
+          # MACOSX_DEPLOYMENT_TARGET sets the floor in the wheel's platform tag. Left unset, each
+          # runner stamps its own OS version and we would repeat the glibc mistake on macOS.
+          # 11.0 is the first Apple Silicon release; 10.13 is comfortably above Rust's 10.12 floor.
+          - name: macos-arm64
+            runs-on: macos-14
+            container: ""
+            macos-target: "11.0"
+          - name: macos-x86_64
+            runs-on: macos-13
+            container: ""
+            macos-target: "10.13"
+          - name: windows-x86_64
+            runs-on: windows-latest
+            container: ""
+            macos-target: ""
+    defaults:
+      run:
+        # build-wheel.sh is bash; on Windows this resolves to Git Bash. Setting it at job level
+        # keeps one set of step bodies instead of a POSIX and a PowerShell variant of each.
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The manylinux images ship the CPython builds but no rustup, and setup-python cannot install
+      # into them — so the container legs provision by hand and put the image's cp312 on PATH.
+      # requires-python is >=3.12, so cp312 is the floor interpreter.
+      - name: Provision toolchain (manylinux container)
+        if: matrix.container != ''
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust toolchain
+        if: matrix.container == ''
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Set up Python
+        if: matrix.container == ''
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine/target
+          # Keyed on matrix.name, not runner.os: the two Linux legs are different architectures and
+          # must not share a target dir, and neither may share with the non-container engine jobs.
+          key: ${{ matrix.name }}-wheel-cargo-${{ hashFiles('engine/Cargo.lock') }}
+
+      - name: Install maturin + uv
+        run: python -m pip install --upgrade pip maturin uv
+
+      - name: Pin the derived version into the package
+        run: python scripts/set_version.py "${{ needs.version.outputs.version }}"
+
+      # Canonical build path — identical to local. Stages the shim, then maturin.
+      - name: Build wheel
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos-target }}
+        run: scripts/build-wheel.sh --release -o dist
+
+      # The guarantee: a fresh install must run a suite with NO env vars — the bundled shim is found
+      # and executed. Previously inline bash that hardcoded POSIX venv layout and an extensionless
+      # binary name; now a script, because it has to pass on Windows and macOS too.
+      - name: Smoke test — install the wheel and run a corpus zero-config
+        run: python scripts/smoke_wheel.py --dist dist
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # upload-artifact requires unique names per job; the publish jobs glob them back
+          # together with merge-multiple.
+          name: tiderace-wheel-${{ matrix.name }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  verify-glibc-floor:
+    # The regression guard for defect #2, which no existing job could have caught: the smoke test
+    # above installs each wheel on the same machine that built it, so glibc matches by construction
+    # and the check stays green while the wheel is uninstallable everywhere else.
+    #
+    # glibc 2.34 (AlmaLinux 9 — i.e. RHEL 9, Rocky 9, Amazon Linux 2023) sits deliberately between
+    # the 2.28 build floor and the 2.39 the broken wheels were tagged with. The 0.1.0 and 0.2.0
+    # wheels could NOT install here. If this job passes, the floor genuinely moved.
+    name: verify glibc floor · install on glibc 2.34
+    needs: [build]
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_34_x86_64@sha256:249cdcdcd91ba0639b50140a5a4cd09eead2056e2f76267e7919678a66f9d33d
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: tiderace-wheel-linux-x86_64
           path: dist/
+      - name: Put the image's cp312 on PATH
+        run: echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
+      - name: Install uv
+        run: python -m pip install --upgrade pip uv
+      - name: Install and run the wheel on an older glibc than it was built on
+        run: python scripts/smoke_wheel.py --dist dist
 
   publish-testpypi:
     name: publish preview to TestPyPI (PRs to main)
-    needs: build
-    if: vars.PYPI_PUBLISH == 'true' && github.event_name == 'pull_request' && github.event.action != 'closed' && needs.build.outputs.should_publish_testpypi == 'true'
+    needs: [version, build, verify-glibc-floor]
+    if: vars.PYPI_PUBLISH == 'true' && github.event_name == 'pull_request' && github.event.action != 'closed' && needs.version.outputs.should_publish_testpypi == 'true'
     runs-on: ubuntu-latest
     environment:
       name: testpypi
@@ -296,8 +436,12 @@ jobs:
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: tiderace-dist
+          # Five wheels + the sdist, uploaded by six different jobs, flattened into one dist/.
+          pattern: tiderace-*
           path: dist/
+          merge-multiple: true
+      - name: List what is about to be published
+        run: ls -l dist/
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
@@ -305,7 +449,7 @@ jobs:
 
   publish-pypi:
     name: publish release to PyPI (push to main)
-    needs: build
+    needs: [version, build, verify-glibc-floor]
     if: vars.PYPI_PUBLISH == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
@@ -316,8 +460,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: tiderace-dist
+          pattern: tiderace-*
           path: dist/
+          merge-multiple: true
+      - name: List what is about to be published
+        run: ls -l dist/
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           skip-existing: true
