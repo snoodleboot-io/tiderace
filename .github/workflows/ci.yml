@@ -11,6 +11,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Advisories land against dependencies that never changed, so a push-only pipeline can sit
+  # green for months while a crate in Cargo.lock goes vulnerable underneath it. The weekly run
+  # is what makes `engine-audit` a monitor rather than a snapshot. It also re-runs the suite
+  # against a freshly-resolved `stable` toolchain, catching rustc drift before a PR eats it.
+  # The wheel/publish path is skipped on this trigger — see the `build` job's `if:`.
+  schedule:
+    - cron: "0 7 * * 1"   # Mondays 07:00 UTC
   workflow_dispatch:
 
 concurrency:
@@ -33,15 +40,19 @@ jobs:
       run:
         working-directory: engine
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # Pinned to a commit SHA, so the ref name no longer selects the toolchain — the `stable`
+        # BRANCH defaults `toolchain` to stable, but the `v1` tag makes it required with no default
+        # and hard-exits when empty. Every call site therefore passes `toolchain` explicitly.
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
+          toolchain: stable
           components: clippy, rustfmt
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -56,7 +67,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.14"
 
@@ -105,13 +116,14 @@ jobs:
       run:
         working-directory: engine
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
+          toolchain: stable
           components: clippy, rustfmt
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -124,7 +136,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Set up Python
         # Provides `python` on PATH so the no-fork acceptance runs on Windows (no fork() here).
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.14"
       - name: Unit + lib + daemon tests (no-fork acceptance runs; fork integration self-skips)
@@ -136,15 +148,20 @@ jobs:
     name: engine · coverage (line >= 88)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
+          toolchain: stable
           components: llvm-tools-preview
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        # Same ref-name caveat as rust-toolchain: the `cargo-llvm-cov` branch defaults `tool` to
+        # cargo-llvm-cov, but the v2 tag does not. Pinned to v2, so name the tool explicitly.
+        uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
+        with:
+          tool: cargo-llvm-cov
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.14"
       - name: Provision the fx venv (numpy + pytest) at the repo root
@@ -169,20 +186,53 @@ jobs:
           TIDERACE_REQUIRE_LIVE: "1"
         run: cargo llvm-cov --workspace --ignore-filename-regex '(main|socket)\.rs' --fail-under-lines 88
 
+  engine-audit:
+    name: engine · cargo audit (RustSec advisories)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - name: Install cargo-audit
+        # Prebuilt binary — `cargo install cargo-audit` compiles for minutes; this is seconds.
+        uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
+        with:
+          tool: cargo-audit
+      - name: Audit Cargo.lock against the RustSec advisory DB
+        # `--deny warnings` also fails on unmaintained/unsound/yanked crates, not just on CVEs.
+        # That is affordable here precisely because the tree is tiny — 50 crates, three direct
+        # third-party deps (notify, serde, serde_json) — so the advisory surface barely moves.
+        # If an unmaintained advisory ever lands on a transitive crate with no fix available and
+        # blocks unrelated PRs, drop to a bare `cargo audit` (CVEs only) or add an `--ignore
+        # RUSTSEC-YYYY-NNNN` with a comment justifying it. Do not delete the gate.
+        run: cargo audit --deny warnings
+
   # ── release stage ──────────────────────────────────────────────────────────────────────────────
   # Build the wheel and prove it installs + runs — the same scripts/build-wheel.sh you run locally, so
   # what CI ships is exactly what builds here. GATED on the full test suite: a red test can't ship.
   build:
     name: build wheel + smoke test (linux-x86_64)
-    needs: [engine-linux, engine-windows, engine-coverage]
+    # engine-audit joins the gate: a known-vulnerable dependency can no longer ship a wheel, on
+    # the same principle that already keeps a red test from shipping one.
+    needs: [engine-linux, engine-windows, engine-coverage, engine-audit]
+    # The weekly cron exists to re-check advisories, not to mint artifacts. Without this guard the
+    # scheduled run would derive a release-shaped version (calculate_version.py reads GITHUB_REF =
+    # refs/heads/main and returns MAJOR.MINOR.0) and upload a wheel nobody asked for.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
       should_publish_testpypi: ${{ steps.version.outputs.should_publish_testpypi }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - name: Install maturin + uv
@@ -228,7 +278,7 @@ jobs:
           echo "$out" | grep -q "1 failing" || { echo "smoke test did not run the corpus as expected"; exit 1; }
 
       - name: Upload dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tiderace-dist
           path: dist/
@@ -244,11 +294,11 @@ jobs:
     permissions:
       id-token: write   # trusted publishing — no token
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: tiderace-dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
           skip-existing: true
@@ -264,10 +314,10 @@ jobs:
     permissions:
       id-token: write   # trusted publishing — no token
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: tiderace-dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           skip-existing: true

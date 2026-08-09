@@ -1,0 +1,41 @@
+# Dependency update automation.
+#
+# This is the other half of the `engine-audit` job in ci.yml: audit tells you a dependency went
+# bad, dependabot is what moves you off it. Audit alone just turns the pipeline red.
+#
+# Note on SHA pins: every action in ci.yml/docs.yml is pinned to a commit SHA with a trailing
+# `# vX.Y.Z` comment. Dependabot reads that comment to know which version the SHA represents, and
+# rewrites BOTH the SHA and the comment on an update. Keep the comment format intact — strip it and
+# these pins silently stop being maintained.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"          # covers all of .github/workflows/
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      # First-party actions move together and are low-risk; one PR instead of five.
+      github-actions:
+        patterns:
+          - "actions/*"
+
+  - package-ecosystem: cargo
+    directory: "/engine"    # the workspace root — where Cargo.toml + Cargo.lock live
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    groups:
+      # serde and serde_json are version-coupled in practice; splitting them across two PRs just
+      # makes each one fail to build until the other lands.
+      serde:
+        patterns:
+          - "serde"
+          - "serde_*"
