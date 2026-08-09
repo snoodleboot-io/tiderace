@@ -6,7 +6,8 @@
 //!   - `serve <root>` — bind the per-project Unix socket and serve RPC clients until Shutdown (unix).
 //!   - `watch <root>` — block, and on each save re-run only the impacted tests (the inner loop).
 //!
-//! Env: `TIDERACE_SHIM` (path to `py-shim/shim.py`, required); `TIDERACE_PYTHON` (default `python3`);
+//! Env: `TIDERACE_SHIM` (path to `py-shim/shim.py`, required); `TIDERACE_PYTHON` (default `python3`,
+//! or `python` on Windows, whose venvs create no `python3.exe` — see `engine_core::default_python`);
 //! `TIDERACE_SOCKET` (serve mode socket path; default `<tmp>/tiderace-daemon.sock`).
 
 use std::path::{Path, PathBuf};
@@ -27,7 +28,7 @@ fn main() -> ExitCode {
     let mode = args[1].as_str();
     let root = PathBuf::from(&args[2]);
 
-    let python = std::env::var("TIDERACE_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let python = std::env::var("TIDERACE_PYTHON").unwrap_or_else(|_| engine_core::default_python());
     let shim = match std::env::var("TIDERACE_SHIM") {
         Ok(s) => PathBuf::from(s),
         Err(_) => match engine_core::default_shim(&python) {

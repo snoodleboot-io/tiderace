@@ -58,8 +58,18 @@ The no-fork isolation ladder makes even a *cold* full run beat pytest; impact-sk
 
 ## Install
 
-> **Pre-release:** build from source from the `engine/` Cargo workspace; prebuilt binaries are not
-> published yet.
+```bash
+pip install tiderace        # or: uv pip install tiderace
+```
+
+That ships the `tiderace` and `tiderace-daemon` binaries plus the authoring package — no Rust
+toolchain and no configuration. Requires Python 3.12+.
+
+**Prebuilt wheels:** Linux x86_64 and aarch64 (glibc 2.28+, so RHEL 8, Debian 10+, Ubuntu 18.10+),
+macOS universal2 (11.0+, Apple Silicon and Intel), and Windows x86_64. Anything else falls back to
+the sdist, which does need a Rust toolchain.
+
+### From source
 
 ```bash
 git clone https://github.com/snoodleboot-io/tiderace

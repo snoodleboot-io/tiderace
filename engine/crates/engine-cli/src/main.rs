@@ -3,7 +3,7 @@
 //! - `tiderace collect <path>`: discover tests and print their node ids + styles.
 //! - `tiderace run <path>`: collect, fork-execute via the Wellspring, print a report, and set the
 //!   pytest-style exit code. Needs `TIDERACE_SHIM` (path to `shim.py`); `TIDERACE_PYTHON` defaults
-//!   to `python3`.
+//!   to `python3` (`python` on Windows — see `engine_core::default_python`).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -46,7 +46,7 @@ fn cmd_collect(root: &Path) -> ExitCode {
 }
 
 fn cmd_run(root: &Path) -> ExitCode {
-    let python = std::env::var("TIDERACE_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let python = std::env::var("TIDERACE_PYTHON").unwrap_or_else(|_| engine_core::default_python());
     let shim = match std::env::var("TIDERACE_SHIM") {
         Ok(s) => PathBuf::from(s),
         Err(_) => match engine_core::default_shim(&python) {
