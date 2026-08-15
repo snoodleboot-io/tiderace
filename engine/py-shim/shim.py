@@ -82,10 +82,55 @@ def _module_key(node_id: str) -> str:
     return node_id.partition("::")[0]
 
 
+_ROOT = ""  # the run root (argv[1]); set by serve()/probe()/subinterp() before any import
+
+
+def _skip_exceptions() -> tuple[type[BaseException], ...]:
+    """Every exception type that means "skip this test", not "this test broke".
+
+    `unittest.SkipTest` is the obvious one. `pytest.skip()` and
+    `pytest.importorskip()` raise `_pytest.outcomes.Skipped`, which derives from
+    `BaseException` rather than `SkipTest` — so without it here a skip falls
+    through to the catch-all and is reported as an error. A suite that skips a
+    test because an optional backend is absent then shows up as broken.
+    """
+    try:
+        from _pytest.outcomes import Skipped
+    except Exception:  # noqa: BLE001 — pytest absent ⇒ unittest skips only
+        return (unittest.SkipTest,)
+    return (unittest.SkipTest, Skipped)
+
+
+_SKIP_EXCEPTIONS = _skip_exceptions()
+
+
 def _module_name(module_key: str) -> str:
-    """Importable dotted module name for a module key ('tests/m.py' -> 'tests.m')."""
+    """Importable dotted module name for a module key ('tests/m.py' -> 'tests.m').
+
+    Rooted the way pytest roots it: walk up while the directory is a package
+    (has `__init__.py`), and import relative to the first directory that is not.
+    That directory is also put on `sys.path`, because the dotted name is only
+    resolvable from there.
+
+    Naming relative to the run root instead is wrong whenever a test package is
+    named like a stdlib module. `<root>/types/test_x.py` yields `types.test_x`,
+    and `types` resolves to the stdlib module — "No module named
+    'types.test_x'; 'types' is not a package" — so every test under such a
+    directory errors, but only when the run root sits above it. Running that
+    directory directly renames the module and the errors vanish, which makes the
+    bug look like a batch-size effect rather than a naming one.
+    """
     path = module_key[:-3] if module_key.endswith(".py") else module_key
-    return path.replace("/", ".").replace(os.sep, ".")
+    base = os.path.abspath(_ROOT) if _ROOT else os.getcwd()
+    absolute = os.path.join(base, path.replace("/", os.sep))
+    directory, stem = os.path.split(absolute)
+    parts = [stem]
+    while os.path.exists(os.path.join(directory, "__init__.py")):
+        directory, package = os.path.split(directory)
+        parts.insert(0, package)
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    return ".".join(parts)
 
 
 def _class_method(node_id: str) -> tuple[str, str]:
@@ -636,7 +681,7 @@ async def _invoke_async(node_id: str, style: str, args: dict) -> tuple[str, str]
         plain = "".join(traceback.format_exception_only(type(exc), exc))
         rich = _introspect_assertion(exc)
         return "failed", (rich + plain) if rich else plain
-    except unittest.SkipTest as exc:
+    except _SKIP_EXCEPTIONS as exc:
         return "skipped", str(exc)
     except Exception as exc:  # noqa: BLE001 — any test error maps to Outcome::Error
         return "error", "".join(traceback.format_exception_only(type(exc), exc))
@@ -769,7 +814,12 @@ class Engine:
         # by @tiderace.cases. Without this, a parametrized test's params look like missing fixtures.
         fixture_requested = {p: t for p, t in requested.items() if self.reg.is_provider(t)}
         case_params = [p for p in requested if p not in fixture_requested]
-        case_kwargs_list = [dict(zip(case_params, c.values)) for c in self._cases(node_id, style)] or [{}]
+        # `@tiderace.cases` yields positional variants; `@pytest.mark.parametrize`
+        # yields name→value maps (argnames need not follow the signature order).
+        case_kwargs_list = [
+            c if isinstance(c, dict) else dict(zip(case_params, c.values))
+            for c in self._cases(node_id, style)
+        ] or [{}]
 
         # Soundness gate for BOTH in-process paths. A module whose shared state we can't snapshot/restore
         # (opaque globals — an open file, a generator, a live socket) must fork: running it in-process
@@ -1057,7 +1107,11 @@ class Engine:
         return names
 
     def _cases(self, node_id: str, style: str) -> list:
-        """The native `@tiderace.cases` variants on a test, read by attribute. unittest has none."""
+        """The variants of a test: native `@tiderace.cases`, else `@pytest.mark.parametrize`.
+
+        unittest has neither — pytest cannot parametrize a `TestCase` method
+        either, so the early return matches the oracle.
+        """
         if style == "unittest_method":
             return []
         module = importlib.import_module(_module_name(_module_key(node_id)))
@@ -1066,11 +1120,58 @@ class Engine:
             func = getattr(getattr(module, cls), method)
         else:
             func = getattr(module, node_id.partition("::")[2])
-        return list(getattr(func, "__tiderace_cases__", ()))
+        native = list(getattr(func, "__tiderace_cases__", ()))
+        return native or _parametrize_cases(func)
 
     def teardown_all(self) -> None:
         while self.active:
             _teardown(self.active.pop().gen)
+
+
+def _parametrize_cases(func) -> list[dict]:
+    """Expand `@pytest.mark.parametrize` on ``func`` into one kwargs dict per case.
+
+    The corpus is authored against pytest, so a test whose arguments come from
+    `parametrize` looks, to a runner that only knows fixtures, like a test
+    requesting fixtures nobody provides — it is then called bare and dies on
+    "missing 1 required positional argument". Reading the marker turns those
+    into ordinary cases, which the existing `case_kwargs` path already runs.
+
+    Values are returned as name→value maps rather than positionally, because
+    `parametrize`'s argnames need not match the signature order.
+
+    Stacked marks multiply, as in pytest. Ids are not modelled: this engine
+    reports one result per node, aggregating its variants.
+    """
+    marks = [m for m in getattr(func, "pytestmark", ()) if getattr(m, "name", "") == "parametrize"]
+    if not marks:
+        return []
+    axes: list[list[dict]] = []
+    for mark in marks:
+        names = mark.args[0]
+        names = (
+            [n.strip() for n in names.split(",") if n.strip()] if isinstance(names, str)
+            else list(names)
+        )
+        axis: list[dict] = []
+        for entry in mark.args[1]:
+            # `pytest.param(...)` carries `.values`/`.marks`; both are checked so a
+            # plain dict argvalue (which has a `.values` *method*) is not mistaken for one.
+            if hasattr(entry, "values") and hasattr(entry, "marks"):
+                raw = tuple(entry.values)
+            elif len(names) == 1:
+                raw = (entry,)
+            else:
+                raw = tuple(entry)
+            axis.append(dict(zip(names, raw)))
+        axes.append(axis)
+    cases: list[dict] = []
+    for combo in itertools.product(*axes):
+        merged: dict = {}
+        for piece in combo:
+            merged.update(piece)
+        cases.append(merged)
+    return cases
 
 
 def _skip_decision(marks: list):
@@ -1112,7 +1213,7 @@ def _invoke(node_id: str, style: str, args: dict) -> tuple[str, str]:
         plain = "".join(traceback.format_exception_only(type(exc), exc))
         rich = _introspect_assertion(exc)  # lazy: only a FAILED assert pays this (ADR-E009)
         return "failed", (rich + plain) if rich else plain
-    except unittest.SkipTest as exc:
+    except _SKIP_EXCEPTIONS as exc:
         return "skipped", str(exc)
     except Exception as exc:  # noqa: BLE001 — any test error maps to Outcome::Error
         return "error", "".join(traceback.format_exception_only(type(exc), exc))
@@ -1141,7 +1242,7 @@ def _invoke_unittest(module, node_id: str) -> tuple[str, str]:
         cls.setUpClass()
         ran_setup = True
         cls(method).run(result)
-    except unittest.SkipTest as exc:  # setUpClass may skip the whole class
+    except _SKIP_EXCEPTIONS as exc:  # setUpClass may skip the whole class
         return "skipped", str(exc)
     finally:
         if ran_setup:
@@ -1335,6 +1436,8 @@ def probe() -> int:
     Same framed pipe as `serve`: reads `{"module": "<rel/path.py>"}` frames, replies
     `{"module", "safe": true|false|null, "reason"?}`. No tests run — this only decides eligibility."""
     root = sys.argv[1]
+    global _ROOT
+    _ROOT = root
     sys.path.insert(0, root)
     paths = list(sys.path)  # the sub-interpreter inherits the same import roots (root + site-packages + …)
     _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
@@ -1380,6 +1483,8 @@ def subinterp() -> int:
     from concurrent import interpreters  # 3.14+; the caller probes first, so this is expected present
 
     root = sys.argv[1]
+    global _ROOT
+    _ROOT = root
     sys.path.insert(0, root)
     paths = list(sys.path)
     workers = max(1, int(os.environ.get("TIDERACE_SUBINTERP_WORKERS") or (os.cpu_count() or 4)))
@@ -1418,6 +1523,8 @@ def subinterp() -> int:
 
 def serve() -> int:
     root = sys.argv[1]
+    global _ROOT
+    _ROOT = root
     no_fork = "--no-fork" in sys.argv[2:]
     coverage = "--coverage" in sys.argv[2:] or os.environ.get("TIDERACE_COVERAGE") == "1"
     purity = "--purity" in sys.argv[2:] or os.environ.get("TIDERACE_PURITY") == "1"
