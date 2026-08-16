@@ -87,8 +87,16 @@ jobs:
         # TIDERACE_REQUIRE_LIVE=1 turns a live-scenario skip into a failure (engine_core::testing).
         # This job provisions the interpreter above, so a skip here means the environment broke — and
         # that must fail loudly rather than pass as a silent no-op.
+        #
+        # PYTHONPATH puts the in-tree `tiderace` package on the interpreters the workers spawn (TID-21).
+        # The shim's `_register_builtins` is best-effort — `import tiderace.builtins` failing means NO
+        # builtin is registered — so without this every builtin (monkeypatch/tmp_path/capsys/capfd/
+        # caplog) was silently absent and completely uncovered, while the suite stayed green because
+        # nothing asked for one. Paired with REQUIRE_LIVE above, `builtins_acceptance` now fails the
+        # job if that ever regresses instead of skipping past it.
         env:
           TIDERACE_REQUIRE_LIVE: "1"
+          PYTHONPATH: ${{ github.workspace }}/engine/py-tiderace
         run: cargo test --all
 
       - name: Type-check the excluded engine-inproc crate
@@ -182,8 +190,11 @@ jobs:
         # TIDERACE_REQUIRE_LIVE=1: the venv is provisioned above, so a silent live-skip here would
         # quietly drop the exec/fork + daemon paths out of the measured set and shrink the gate to the
         # pure-logic core. Fail instead.
+        # PYTHONPATH: same reason as the linux job (TID-21) — without the in-tree `tiderace` package
+        # the builtin providers never register, so their paths drop out of the measured set too.
         env:
           TIDERACE_REQUIRE_LIVE: "1"
+          PYTHONPATH: ${{ github.workspace }}/engine/py-tiderace
         run: cargo llvm-cov --workspace --ignore-filename-regex '(main|socket)\.rs' --fail-under-lines 88
 
   engine-audit:
