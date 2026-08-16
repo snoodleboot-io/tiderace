@@ -593,6 +593,24 @@ _UNKNOWN_PURITY = object()
 # exist there, so the shim must decide what to do instead rather than call `os.fork` and raise.
 _FORK_AVAILABLE = hasattr(os, "fork")
 
+# A fork child that cannot send its result frame at all exits with this code, so the parent can say
+# *that* happened rather than falling through to the generic "no result" (TID-15). Picked above the
+# signal-exit band (128+N) so it can't be confused with a shell-reported death-by-signal.
+_EXIT_UNREPORTABLE = 199
+
+
+def _child_fault_detail(exc: BaseException) -> str:
+    """The diagnostic a fork child sends when it fails OUTSIDE the test body — fixture setup or
+    teardown, the coverage probe, the purity snapshot. `_invoke` already formats body failures; this
+    is the path that used to vanish into `no result from child`, so it names the stage explicitly and
+    carries the full traceback (the child is about to `_exit`, so this is the only chance to say it)."""
+    label = "the test body was never reached" if isinstance(exc, Exception) else type(exc).__name__
+    try:
+        trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    except BaseException:  # noqa: BLE001 — a __repr__ that raises must not cost us the whole frame
+        trace = "".join(traceback.format_exception_only(type(exc), exc))
+    return f"fixture setup/teardown raised ({label}):\n{trace}"
+
 
 def _snapshot_shared(module) -> dict:
     """A deep snapshot of a module's mutable top-level state — the names a test could mutate to
@@ -930,12 +948,26 @@ class Engine:
                 elif purity is not _UNKNOWN_PURITY:
                     payload["pure"] = False
                     payload["impurity"] = purity
+            except BaseException as exc:  # noqa: BLE001 — report it; never die silently (TID-15)
+                # `_invoke` guards the test BODY only, so anything raised by fixture setup/teardown,
+                # the coverage probe, or the purity snapshot lands here. Swallowing it exited 0 with an
+                # empty pipe, and the parent could say no more than "no result from child" — a defect
+                # indistinguishable, from the outside, from a test that genuinely failed. Send the
+                # traceback back instead so the failure names its own cause.
+                payload = {"outcome": "error", "detail": _child_fault_detail(exc)[:4000]}
+            try:
                 os.write(write_fd, json.dumps(payload).encode())
-            except BaseException:  # noqa: BLE001 — never hang the child on the way out
-                pass
-            finally:
-                os.close(write_fd)
-                os._exit(0)
+            except BaseException:  # noqa: BLE001 — payload itself is unsendable
+                # Serialising or writing the frame failed (an unserialisable coverage map, a closed
+                # pipe). Exit non-zero so the parent reports `child exited N` against a documented
+                # code rather than the bare generic; a silent 0 would look like a lost result.
+                try:
+                    os.close(write_fd)
+                except BaseException:  # noqa: BLE001
+                    pass
+                os._exit(_EXIT_UNREPORTABLE)
+            os.close(write_fd)
+            os._exit(0)
 
         os.close(write_fd)
         ready, _, _ = select.select([read_fd], [], [], deadline_ms / 1000.0)
@@ -958,10 +990,29 @@ class Engine:
         if not data:
             if os.WIFSIGNALED(status):
                 return "error", f"child killed by signal {os.WTERMSIG(status)}", {}, _UNKNOWN_PURITY
-            if os.WIFEXITED(status) and os.WEXITSTATUS(status) != 0:
-                return "error", f"child exited {os.WEXITSTATUS(status)}", {}, _UNKNOWN_PURITY
-            return "error", "no result from child", {}, _UNKNOWN_PURITY
-        res = json.loads(data.decode())
+            code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else None
+            if code == _EXIT_UNREPORTABLE:
+                return ("error",
+                        "child ran the test but could not serialise its result frame — the outcome is "
+                        "lost. Most likely an unserialisable coverage map or a detail string that is "
+                        "not valid JSON.", {}, _UNKNOWN_PURITY)
+            if code:
+                return "error", f"child exited {code}", {}, _UNKNOWN_PURITY
+            # The child now reports its own faults (TID-15), so reaching here means it left without
+            # running the handler at all — `os._exit`/`os.abort` from inside the test, or the runtime
+            # dying between fork and the first frame.
+            return ("error",
+                    "child exited 0 without sending a result — the test process terminated itself "
+                    "(os._exit/os.abort) or the interpreter died before the result frame was written.",
+                    {}, _UNKNOWN_PURITY)
+        try:
+            res = json.loads(data.decode())
+        except (ValueError, UnicodeDecodeError) as exc:
+            # A truncated or corrupt frame (child killed mid-write) must stay a reported error — letting
+            # it raise here would take the worker down with it and lose the whole batch, not one test.
+            return ("error",
+                    f"child sent an unreadable result frame ({exc}); {len(data)} bytes received",
+                    {}, _UNKNOWN_PURITY)
         # Reconstruct the purity tri-state from the pipe: pure omitted ⇒ unknown; True ⇒ measured pure;
         # False ⇒ impure (with reason).
         if "pure" not in res:
