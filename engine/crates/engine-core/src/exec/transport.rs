@@ -69,7 +69,7 @@ pub(crate) fn run_batch<T: ShimTransport + ?Sized>(
         let duration_ms = start.elapsed().as_millis() as u64;
         // A parametrized node reports one result per case (TID-25). The cases already ran and forked
         // individually, so this reports what was executed rather than the worst of it.
-        if !resp.variants.is_empty() {
+        if resp.expanded || !resp.variants.is_empty() {
             results.extend(resp.variants.into_iter().map(|v| {
                 let touched = v.coverage.keys().cloned().collect();
                 TestResult::new(
@@ -217,6 +217,7 @@ mod tests {
                 coverage: Default::default(),
                 pure: None,
                 variants: Vec::new(),
+                expanded: false,
             })
         }
     }

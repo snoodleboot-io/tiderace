@@ -28,13 +28,17 @@ pub struct RunPlan {
     pub deadline_ms: u64,
     /// Whether the fork tier may take the optimistic in-process ladder for pure tests.
     ///
-    /// **On by default** (TID-23). It was off while restore rebound module globals rather than
-    /// restoring them in place (TID-22) — the ladder's safety net was not sound, and speed is not
-    /// worth a wrong green. With identity preserved for every container the snapshot can hold, the
-    /// ladder is worth 2.4x on a real corpus (24.0s -> 10.2s) at identical outcomes.
+    /// **Off by default.** Turned on in TID-23 on a measurement that looked clean, then turned back
+    /// off when TID-26 uncovered 129 previously-uncollected tests and four of them failed under the
+    /// ladder while passing under fork.
     ///
-    /// A module the shim cannot snapshot-restore still forks: `_restorable` is the backstop, and it
-    /// is consulted only when restore is on, which `ForkWorker::launch_optimistic` guarantees.
+    /// The cause is a real limit, not a bug to patch out: `_snapshot_shared` snapshots the **test
+    /// module's** globals only. A test that mutates state owned by a *library* module — registering
+    /// into a registry, installing a prompt pack — has nothing restored, and the next test sees it.
+    /// Fork has no such hole, because the child is a whole pristine process.
+    ///
+    /// Worth ~2.4x when it is safe (24.0s -> 10.2s on a real corpus), so it stays available behind
+    /// `--optimistic`; it is not sound enough to be the default.
     pub optimistic_no_fork: bool,
     /// Node ids recorded pure, eligible for the bare no-fork tier (TID-1).
     pub trusted_pure: HashSet<String>,
@@ -47,7 +51,7 @@ impl Default for RunPlan {
             scheduler: SchedulerKind::default(),
             workers: default_workers(),
             deadline_ms: DEFAULT_DEADLINE_MS,
-            optimistic_no_fork: true,
+            optimistic_no_fork: false,
             trusted_pure: HashSet::new(),
         }
     }
@@ -71,8 +75,8 @@ impl RunPlan {
                 self.strategy.fallback()
             ));
         }
-        if !self.optimistic_no_fork {
-            s.push_str(" fork-every-test");
+        if self.optimistic_no_fork {
+            s.push_str(" optimistic-no-fork");
         }
         s
     }
@@ -135,14 +139,15 @@ mod tests {
     }
 
     #[test]
-    fn the_optimistic_ladder_is_on_by_default_and_its_absence_is_visible() {
-        assert!(RunPlan::default().optimistic_no_fork);
+    fn the_optimistic_ladder_is_off_by_default_and_visible_when_on() {
+        // Off because restore only covers the test module's own globals, so a test that mutates a
+        // library module's state leaks into the next one (found via TID-26).
+        assert!(!RunPlan::default().optimistic_no_fork);
         let plan = RunPlan {
-            optimistic_no_fork: false,
+            optimistic_no_fork: true,
             ..RunPlan::default()
         };
-        // Turning it OFF is now the notable choice, so that is what the header calls out.
-        assert!(plan.header().contains("fork-every-test"));
+        assert!(plan.header().contains("optimistic-no-fork"));
     }
 
     #[test]

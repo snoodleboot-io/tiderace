@@ -31,7 +31,7 @@ Options for `run`:
       --scheduler <KIND>  batch packing: locality | round-robin (default: locality)
       --timeout <MS>      per-test deadline in milliseconds (default: 5000)
       --no-fork           alias for --strategy subprocess
-      --fork-every-test   disable the in-process ladder; fork for every test (slower, strictest)
+      --optimistic        let restorable tests skip the fork (~2.4x; see the note below)
   -q, --quiet             suppress the per-test lines; print only the tally
   -h, --help              show this message
 
@@ -40,9 +40,10 @@ Environment:
   TIDERACE_PYTHON         interpreter to drive (default: python3 / python)
 
 Notes:
-  By default a test the shim can snapshot-restore runs in-process instead of forking (~2.4x on a
-  large corpus). Isolation is preserved by snapshot/restore, and a module that cannot be restored
-  still forks. `--fork-every-test` opts out.
+  `--optimistic` runs restorable tests in-process instead of forking (~2.4x on a large corpus), but
+  snapshot/restore only covers the TEST module's globals. A test that mutates a library module's
+  state — registering into a registry, installing a pack — leaks into the next test. Forking every
+  test has no such hole, so it is the default.
 
   `--strategy subinterp` is a hybrid: a sub-interpreter cannot load a single-phase C extension
   (numpy is the canonical case), so modules are probed and only the safe subset runs on the pool;
@@ -163,7 +164,7 @@ impl Options {
                     plan.strategy = WorkerStrategy::Subprocess;
                     strategy_set = true;
                 }
-                "--fork-every-test" => plan.optimistic_no_fork = false,
+                "--optimistic" => plan.optimistic_no_fork = true,
                 "-q" | "--quiet" => quiet = true,
                 other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
                 _ => {
@@ -346,16 +347,16 @@ mod tests {
     }
 
     #[test]
-    fn quiet_and_fork_every_test_are_recorded() {
-        let o = parse(&["-q", "--fork-every-test", "tests"]).expect("parses");
+    fn quiet_and_optimistic_are_recorded() {
+        let o = parse(&["-q", "--optimistic", "tests"]).expect("parses");
         assert!(o.quiet);
-        assert!(!o.plan.optimistic_no_fork);
-        assert!(o.plan.header().contains("fork-every-test"));
+        assert!(o.plan.optimistic_no_fork);
+        assert!(o.plan.header().contains("optimistic-no-fork"));
     }
 
     #[test]
-    fn the_in_process_ladder_is_the_default() {
-        assert!(parse(&["tests"]).expect("parses").plan.optimistic_no_fork);
+    fn forking_every_test_is_the_default() {
+        assert!(!parse(&["tests"]).expect("parses").plan.optimistic_no_fork);
     }
 
     /// A typo must stop the run. Falling through to the default would execute a different tier than

@@ -91,6 +91,13 @@ pub struct ExecResponse {
     /// byte-identical to before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variants: Vec<VariantResult>,
+    /// `variants` is the complete answer for this request, even when empty (TID-26).
+    ///
+    /// Needed because an empty list is otherwise ambiguous: an unparametrized node also sends none.
+    /// A class marked `inherited_methods` that turns out to inherit nothing must contribute zero
+    /// results, not one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expanded: bool,
 }
 
 /// One parametrization case's result — a pytest-style `node_id[params]` and its own outcome.
