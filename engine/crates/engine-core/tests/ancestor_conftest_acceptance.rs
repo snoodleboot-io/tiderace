@@ -6,11 +6,12 @@
 //! `sys.path` surgery. Skipping it does not degrade gracefully — the tests below fail later, naming
 //! a cause that has nothing to do with conftest discovery.
 //!
-//! Two properties are pinned here, because the gap had two halves:
-//!   * **side effects** — the ancestor conftest runs, and runs *before* test modules import;
+//! Three properties are pinned here:
+//!   * **side effects + ordering** — the ancestor conftest runs, and runs *before* test modules
+//!     import. Stdlib-only, so this runs everywhere including Windows CI's bare interpreter.
 //!   * **fixtures** — its fixtures are visible below it, and a nearer conftest still overrides them.
-//!
-//! Stdlib-only corpus, so any interpreter on `PATH` can run it.
+//!     Needs `pytest` to declare a fixture at all, so it self-skips where pytest is absent.
+//!   * **the ceiling** — collection stops at rootdir instead of climbing to `/`.
 
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
@@ -48,11 +49,22 @@ fn any_python() -> Option<String> {
     None
 }
 
-/// Builds `<pkg>/{pyproject.toml, conftest.py, tests/{conftest.py, test_ancestor.py}}` and returns
-/// the **run root** (`<pkg>/tests`) — one level below where the ancestor conftest lives.
+/// An interpreter that can actually `import pytest`. Windows CI runs a bare `actions/setup-python`
+/// with no pytest, so a corpus that declares fixtures has to self-skip there rather than fail.
+fn python_with_pytest() -> Option<String> {
+    let python = any_python()?;
+    let ok = std::process::Command::new(&python)
+        .args(["-c", "import pytest"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    ok.then_some(python)
+}
+
+/// A fresh `<pkg>/tests/` layout. Returns `(pkg, run_root)`; `pkg` is one level above the run root.
 ///
 /// `pyproject.toml` is what makes `<pkg>` the rootdir, and therefore the ceiling for collection.
-fn write_corpus(tag: &str) -> (PathBuf, PathBuf) {
+fn new_pkg(tag: &str) -> (PathBuf, PathBuf) {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let pkg = std::env::temp_dir().join(format!(
         "tiderace_ancestor_{tag}_{}_{}",
@@ -62,21 +74,81 @@ fn write_corpus(tag: &str) -> (PathBuf, PathBuf) {
     let _ = std::fs::remove_dir_all(&pkg);
     let tests = pkg.join("tests");
     std::fs::create_dir_all(&tests).unwrap();
-
     std::fs::write(
         pkg.join("pyproject.toml"),
         "[project]\nname = \"ancestor-probe\"\n",
     )
     .unwrap();
+    (pkg, tests)
+}
 
-    // The ancestor conftest: one env side effect and one fixture, plus a fixture name the nearer
-    // conftest will shadow.
+/// The bug as it was actually hit: an ancestor conftest whose whole job is a side effect.
+///
+/// `AT_IMPORT` is captured while the test *module* is imported, so it fails unless the conftest ran
+/// before `_preimport` — the ordering half, which a check at call time would not catch.
+/// Deliberately free of any `pytest` import so a bare interpreter runs it.
+#[test]
+fn ancestor_conftest_side_effect_applies_before_test_modules_import() {
+    let Some(python) = any_python() else {
+        skip_live("no Python interpreter available");
+        return;
+    };
+    let (pkg, run_root) = new_pkg("sideeffect");
     std::fs::write(
         pkg.join("conftest.py"),
+        "import os\n\nos.environ.setdefault(\"TIDERACE_ANCESTOR_PROBE\", \"set-by-root-conftest\")\n",
+    )
+    .unwrap();
+    std::fs::write(
+        run_root.join("test_ancestor.py"),
         "import os\n\
-         import pytest\n\
          \n\
-         os.environ.setdefault(\"TIDERACE_ANCESTOR_PROBE\", \"set-by-root-conftest\")\n\
+         AT_IMPORT = os.environ.get(\"TIDERACE_ANCESTOR_PROBE\")\n\
+         \n\
+         \n\
+         def test_side_effect_applied():\n\
+         \x20   assert os.environ.get(\"TIDERACE_ANCESTOR_PROBE\") == \"set-by-root-conftest\"\n\
+         \n\
+         \n\
+         def test_ran_before_module_import():\n\
+         \x20   assert AT_IMPORT == \"set-by-root-conftest\"\n",
+    )
+    .unwrap();
+
+    let items = RegexCollector::new()
+        .collect(&run_root)
+        .expect("collection");
+    assert_eq!(items.len(), 2, "2 tests in the corpus");
+
+    let mut worker = SubprocessWorker::new(10_000, 1).with_target(python, &shim(), &run_root);
+    let results = worker.run(&items).expect("batch runs against real Python");
+
+    for r in &results {
+        assert_eq!(
+            r.outcome,
+            Outcome::Passed,
+            "TID-19: {} did not pass; detail: {}",
+            r.node_id,
+            r.detail
+        );
+    }
+    let _ = std::fs::remove_dir_all(&pkg);
+}
+
+/// Fixtures declared in an ancestor conftest are visible below it — and a nearer conftest still wins.
+///
+/// Declaring a fixture requires pytest, so this self-skips on a bare interpreter. The side-effect
+/// test above is what carries the coverage there.
+#[test]
+fn ancestor_conftest_fixtures_are_visible_and_still_overridable() {
+    let Some(python) = python_with_pytest() else {
+        skip_live("no interpreter with pytest available");
+        return;
+    };
+    let (pkg, run_root) = new_pkg("fixtures");
+    std::fs::write(
+        pkg.join("conftest.py"),
+        "import pytest\n\
          \n\
          \n\
          @pytest.fixture\n\
@@ -89,10 +161,9 @@ fn write_corpus(tag: &str) -> (PathBuf, PathBuf) {
          \x20   return \"ancestor\"\n",
     )
     .unwrap();
-
     // The nearer conftest overrides `shadowed` — the precedence half of the fix.
     std::fs::write(
-        tests.join("conftest.py"),
+        run_root.join("conftest.py"),
         "import pytest\n\
          \n\
          \n\
@@ -101,25 +172,9 @@ fn write_corpus(tag: &str) -> (PathBuf, PathBuf) {
          \x20   return \"nearer\"\n",
     )
     .unwrap();
-
-    // `AT_IMPORT` is captured while the test module is imported, which proves ordering: the ancestor
-    // conftest must already have run by then, exactly as pytest guarantees.
     std::fs::write(
-        tests.join("test_ancestor.py"),
-        "import os\n\
-         \n\
-         AT_IMPORT = os.environ.get(\"TIDERACE_ANCESTOR_PROBE\")\n\
-         \n\
-         \n\
-         def test_ancestor_conftest_side_effect_applied():\n\
-         \x20   assert os.environ.get(\"TIDERACE_ANCESTOR_PROBE\") == \"set-by-root-conftest\"\n\
-         \n\
-         \n\
-         def test_ancestor_conftest_ran_before_module_import():\n\
-         \x20   assert AT_IMPORT == \"set-by-root-conftest\"\n\
-         \n\
-         \n\
-         def test_ancestor_fixture_is_visible(from_ancestor):\n\
+        run_root.join("test_ancestor.py"),
+        "def test_ancestor_fixture_is_visible(from_ancestor):\n\
          \x20   assert from_ancestor == \"ancestor\"\n\
          \n\
          \n\
@@ -128,21 +183,10 @@ fn write_corpus(tag: &str) -> (PathBuf, PathBuf) {
     )
     .unwrap();
 
-    (pkg, tests)
-}
-
-/// The whole fix, end to end: side effect, ordering, visibility, and precedence.
-#[test]
-fn conftest_above_the_run_root_is_collected() {
-    let Some(python) = any_python() else {
-        skip_live("no Python interpreter available");
-        return;
-    };
-    let (pkg, run_root) = write_corpus("collect");
     let items = RegexCollector::new()
         .collect(&run_root)
         .expect("collection");
-    assert_eq!(items.len(), 4, "4 tests in the corpus");
+    assert_eq!(items.len(), 2, "2 tests in the corpus");
 
     let mut worker = SubprocessWorker::new(10_000, 1).with_target(python, &shim(), &run_root);
     let results = worker.run(&items).expect("batch runs against real Python");
@@ -162,18 +206,22 @@ fn conftest_above_the_run_root_is_collected() {
 /// Collection stops at rootdir rather than climbing to `/`.
 ///
 /// Without a ceiling the walk would import whatever `conftest.py` happens to sit above the project —
-/// someone's home directory, a CI scratch dir. The marker file is what bounds it, so a corpus with no
-/// marker anywhere must simply not see the conftest above it, and must still run.
+/// someone's home directory, a CI scratch dir. The marker file is what bounds it, so with no marker
+/// anywhere the conftest above must simply not be seen, and the run must still work.
 #[test]
 fn collection_stops_at_rootdir() {
     let Some(python) = any_python() else {
         skip_live("no Python interpreter available");
         return;
     };
-    let (pkg, run_root) = write_corpus("ceiling");
-    // Drop the marker: `pkg` is no longer a rootdir, so its conftest is now out of bounds.
+    let (pkg, run_root) = new_pkg("ceiling");
+    // No marker ⇒ `pkg` is not a rootdir, so its conftest is out of bounds.
     std::fs::remove_file(pkg.join("pyproject.toml")).unwrap();
-    // Keep only the test that would notice, so the run is unambiguous.
+    std::fs::write(
+        pkg.join("conftest.py"),
+        "import os\n\nos.environ[\"TIDERACE_ANCESTOR_PROBE\"] = \"should-not-be-applied\"\n",
+    )
+    .unwrap();
     std::fs::write(
         run_root.join("test_ancestor.py"),
         "import os\n\
