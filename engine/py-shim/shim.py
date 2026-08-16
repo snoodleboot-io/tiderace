@@ -569,11 +569,21 @@ def _discover(root: str) -> Registry:
 
 def _register_builtins(reg: Registry) -> None:
     """Register tiderace's always-available builtin resources (ROADMAP-v2 B1: monkeypatch/tmp_path/
-    capsys/capfd) at the root location (""), so every test can request them — by type (the migrated
-    form, `mp: MonkeyPatch`) or by name (the pytest form, `monkeypatch`), with no per-tree import."""
+    capsys/capfd/caplog) at the root location (""), so every test can request them — by type (the
+    migrated form, `mp: MonkeyPatch`) or by name (the pytest form, `monkeypatch`), with no per-tree
+    import.
+
+    Staying best-effort is deliberate: a pure-pytest suite driven by a bare interpreter has no
+    `tiderace` installed and must still run. But the failure is now **announced** (TID-21). Silence
+    here meant every builtin was quietly missing while the suite stayed green, which is how the CI
+    fixture venv went a long time with no builtin coverage at all and how `tmp_path` sat recorded as
+    36 open errors months after it worked."""
     try:
         import tiderace.builtins as builtins_pkg
-    except Exception:  # noqa: BLE001 — tiderace not importable ⇒ no builtins (pure-pytest fallback)
+    except Exception as exc:  # noqa: BLE001 — tiderace not importable ⇒ no builtins
+        print(f"tiderace: builtin providers unavailable ({exc!r}) — monkeypatch/tmp_path/capsys/"
+              f"capfd/caplog will not resolve. Install `tiderace` into this interpreter, or put "
+              f"engine/py-tiderace on PYTHONPATH.", file=sys.stderr, flush=True)
         return
     for obj in builtins_pkg.providers():
         reg.add(_native_fixture_def(obj, "", {}))
