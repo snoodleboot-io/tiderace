@@ -1372,6 +1372,27 @@ def _maybe_await(result):
         asyncio.run(result)
 
 
+class _SkipAwareResult(unittest.TestResult):
+    """A `TestResult` that recognises pytest's `Skipped` as a skip rather than an error (TID-16).
+
+    `unittest`'s executor special-cases exactly one skip type, `unittest.SkipTest`. pytest's `skip()`
+    and `importorskip()` raise `_pytest.outcomes.Skipped`, which derives from `BaseException` and so
+    falls through to the executor's bare `except:` and is recorded via `addError`. The result: on a
+    `TestCase` (including `IsolatedAsyncioTestCase`), `pytest.importorskip("optional_dep")` — the
+    standard way to skip when an extra is absent — reported as an ERROR, turning a clean run red for
+    something that is not a defect.
+
+    `addError` receives the live `(type, value, tb)`, so the verdict is made on the exception object
+    itself; the alternative, reading it back out of `result.errors`, only ever sees a formatted
+    string. Covers skips raised from `setUp` and `tearDown` too, which route here just the same."""
+
+    def addError(self, test, err):  # noqa: N802 — unittest's own casing
+        if isinstance(err[1], _SKIP_EXCEPTIONS):
+            self.addSkip(test, str(err[1]))
+            return
+        super().addError(test, err)
+
+
 def _invoke_unittest(module, node_id: str) -> tuple[str, str]:
     """Run one `unittest.TestCase` method with fuller fidelity (Phase 4): honor `setUpClass`/
     `tearDownClass` (which `TestCase.run()` alone does NOT call), and map `@expectedFailure` /
@@ -1381,7 +1402,7 @@ def _invoke_unittest(module, node_id: str) -> tuple[str, str]:
     fork model would re-run them per child anyway; a class-scope mapping is a later refinement)."""
     cls_name, method = _class_method(node_id)
     cls = module.__dict__[cls_name]
-    result = unittest.TestResult()
+    result = _SkipAwareResult()
     ran_setup = False
     try:
         cls.setUpClass()
