@@ -20,9 +20,23 @@ impl Wellspring {
     /// Launch `python <shim> <root>` and complete the readiness handshake. `root` is placed on the
     /// shim's `sys.path`, so collected node ids resolve as module paths relative to it.
     pub fn launch(python: &str, shim: &Path, root: &Path) -> Result<Self> {
-        let mut child = Command::new(python)
-            .arg(shim)
-            .arg(root)
+        Self::launch_with(python, shim, root, false)
+    }
+
+    /// As [`launch`](Wellspring::launch), but asks the shim for snapshot/restore.
+    ///
+    /// This is the precondition for the optimistic in-process ladder: without it a test taking the
+    /// no-fork path gets no COW copy AND no snapshot, so its mutations to module globals persist
+    /// into every later test on that module. The shim reads `--restore` / `TIDERACE_RESTORE`, and
+    /// passing the flag explicitly is what keeps correctness off the caller's environment — the same
+    /// reasoning `SubprocessWorker` already applies to its own launch.
+    pub fn launch_with(python: &str, shim: &Path, root: &Path, restore: bool) -> Result<Self> {
+        let mut cmd = Command::new(python);
+        cmd.arg(shim).arg(root);
+        if restore {
+            cmd.arg("--restore");
+        }
+        let mut child = cmd
             // Pin native thread pools — threaded BLAS/OMP + fork() is a known hazard (Phase-1
             // learning; generalized as a thread/reinit policy in Phase 3).
             .env("OPENBLAS_NUM_THREADS", "1")
