@@ -3,7 +3,9 @@ use std::path::Path;
 use std::thread;
 
 use crate::domain::{TestItem, TestResult};
-use crate::exec::{probe_modules, ForkWorker, SubInterpWorker, SubprocessWorker, Worker};
+#[cfg(unix)]
+use crate::exec::ForkWorker;
+use crate::exec::{probe_modules, SubInterpWorker, SubprocessWorker, Worker};
 use crate::runner::{RunPlan, WorkerStrategy};
 use crate::scheduler::{ScheduleInput, ScheduledTest};
 
@@ -190,19 +192,26 @@ fn run_batch(
         optimistic_no_fork,
     } = exec;
     match strategy {
-        #[cfg(unix)]
         WorkerStrategy::Fork => {
-            let mut worker = ForkWorker::launch(py, sh, rt)
-                .map_err(|e| format!("failed to launch wellspring: {e}"))?
-                .with_deadline_ms(deadline_ms)
-                .with_optimistic_no_fork(optimistic_no_fork)
-                .with_trusted_pure(batch_trusted);
-            worker
-                .run(batch_items)
-                .map_err(|e| format!("execution failed: {e}"))
+            #[cfg(unix)]
+            {
+                let mut worker = ForkWorker::launch(py, sh, rt)
+                    .map_err(|e| format!("failed to launch wellspring: {e}"))?
+                    .with_deadline_ms(deadline_ms)
+                    .with_optimistic_no_fork(optimistic_no_fork)
+                    .with_trusted_pure(batch_trusted);
+                worker
+                    .run(batch_items)
+                    .map_err(|e| format!("execution failed: {e}"))
+            }
+            #[cfg(not(unix))]
+            {
+                // The optimistic ladder and the trusted-pure set are fork-only knobs; name them here
+                // so this arm consumes them on platforms where the fork branch is compiled out.
+                let _ = (optimistic_no_fork, batch_trusted);
+                Err("fork is unavailable on this platform".to_string())
+            }
         }
-        #[cfg(not(unix))]
-        WorkerStrategy::Fork => Err("fork is unavailable on this platform".to_string()),
         // The no-fork path always snapshots/restores (its only isolation without COW); the fork-only
         // knobs (optimistic ladder, trusted-pure bare no-fork) do not apply. One process per batch.
         WorkerStrategy::Subprocess => {
@@ -259,12 +268,16 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn requesting_fork_without_fork_is_refused_clearly() {
-        use crate::domain::{NodeId, TestItem, TestStyle};
+        use crate::domain::{NodeId, ScopePath, TestItem, TestStyle};
         let plan = RunPlan {
             strategy: WorkerStrategy::Fork,
             ..RunPlan::default()
         };
-        let items = vec![TestItem::new(NodeId::new("t.py::a"), TestStyle::Function)];
+        let items = vec![TestItem::new(
+            NodeId::new("t.py::a"),
+            TestStyle::Function,
+            ScopePath::module("t.py"),
+        )];
         let err = run_parallel(
             "python3",
             Path::new("shim.py"),
