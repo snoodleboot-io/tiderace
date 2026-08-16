@@ -195,10 +195,16 @@ fn run_batch(
         WorkerStrategy::Fork => {
             #[cfg(unix)]
             {
-                let mut worker = ForkWorker::launch(py, sh, rt)
+                // The ladder and restore are launched together or not at all — see
+                // `ForkWorker::launch_optimistic`.
+                let launched = if optimistic_no_fork {
+                    ForkWorker::launch_optimistic(py, sh, rt)
+                } else {
+                    ForkWorker::launch(py, sh, rt)
+                };
+                let mut worker = launched
                     .map_err(|e| format!("failed to launch wellspring: {e}"))?
                     .with_deadline_ms(deadline_ms)
-                    .with_optimistic_no_fork(optimistic_no_fork)
                     .with_trusted_pure(batch_trusted);
                 worker
                     .run(batch_items)

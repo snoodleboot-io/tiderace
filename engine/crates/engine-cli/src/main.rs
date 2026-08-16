@@ -31,7 +31,7 @@ Options for `run`:
       --scheduler <KIND>  batch packing: locality | round-robin (default: locality)
       --timeout <MS>      per-test deadline in milliseconds (default: 5000)
       --no-fork           alias for --strategy subprocess
-      --force-fork        disable the optimistic in-process ladder for pure tests
+      --optimistic        let pure tests skip the fork (faster; see TID-22 before trusting it)
   -q, --quiet             suppress the per-test lines; print only the tally
   -h, --help              show this message
 
@@ -40,6 +40,10 @@ Environment:
   TIDERACE_PYTHON         interpreter to drive (default: python3 / python)
 
 Notes:
+  `--optimistic` is off by default: its safety net is snapshot/restore, which currently rebinds
+  module globals instead of restoring them in place (TID-22). Forking every test is slower and
+  correct; speed here is not worth a wrong green.
+
   `--strategy subinterp` is a hybrid: a sub-interpreter cannot load a single-phase C extension
   (numpy is the canonical case), so modules are probed and only the safe subset runs on the pool;
   the rest falls back. The run header says so.
@@ -159,7 +163,7 @@ impl Options {
                     plan.strategy = WorkerStrategy::Subprocess;
                     strategy_set = true;
                 }
-                "--force-fork" => plan.optimistic_no_fork = false,
+                "--optimistic" => plan.optimistic_no_fork = true,
                 "-q" | "--quiet" => quiet = true,
                 other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
                 _ => {
@@ -342,11 +346,17 @@ mod tests {
     }
 
     #[test]
-    fn quiet_and_force_fork_are_recorded() {
-        let o = parse(&["-q", "--force-fork", "tests"]).expect("parses");
+    fn quiet_and_optimistic_are_recorded() {
+        let o = parse(&["-q", "--optimistic", "tests"]).expect("parses");
         assert!(o.quiet);
-        assert!(!o.plan.optimistic_no_fork);
-        assert!(o.plan.header().contains("force-fork"));
+        assert!(o.plan.optimistic_no_fork);
+        assert!(o.plan.header().contains("optimistic-no-fork"));
+    }
+
+    #[test]
+    fn the_optimistic_ladder_is_opt_in() {
+        // Forking every test is the correct default while TID-22 is open.
+        assert!(!parse(&["tests"]).expect("parses").plan.optimistic_no_fork);
     }
 
     /// A typo must stop the run. Falling through to the default would execute a different tier than

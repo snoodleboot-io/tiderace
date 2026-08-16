@@ -17,11 +17,31 @@ pub struct ForkWorker {
 
 impl ForkWorker {
     /// Launch the worker against `root` (the directory placed on the shim's `sys.path`).
+    ///
+    /// Forks every test. To take the in-process ladder where it is sound, use
+    /// [`launch_optimistic`](ForkWorker::launch_optimistic) — which is the only way to enable it,
+    /// because enabling it on a wellspring launched without restore is not sound.
     pub fn launch(python: &str, shim: &Path, root: &Path) -> Result<Self> {
         Ok(Self {
             wellspring: Wellspring::launch(python, shim, root)?,
             deadline_ms: 5_000,
             optimistic_no_fork: false,
+            trusted: HashSet::new(),
+        })
+    }
+
+    /// Launch with snapshot/restore on AND the optimistic in-process ladder enabled.
+    ///
+    /// The two go together or not at all. `with_optimistic_no_fork(true)` on a plain
+    /// [`launch`](ForkWorker::launch) leaves the shim with no snapshot and no COW copy, so a test
+    /// taking the no-fork path leaks its mutations into every later test on that module — and the
+    /// shim's `must_fork` restorability check is itself gated on restore, so an unrestorable module
+    /// would run in-process too. Pairing them here makes that combination unconstructible.
+    pub fn launch_optimistic(python: &str, shim: &Path, root: &Path) -> Result<Self> {
+        Ok(Self {
+            wellspring: Wellspring::launch_with(python, shim, root, true)?,
+            deadline_ms: 5_000,
+            optimistic_no_fork: true,
             trusted: HashSet::new(),
         })
     }

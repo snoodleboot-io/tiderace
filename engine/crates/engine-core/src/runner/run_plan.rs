@@ -27,6 +27,11 @@ pub struct RunPlan {
     /// Per-test deadline in milliseconds.
     pub deadline_ms: u64,
     /// Whether the fork tier may take the optimistic in-process ladder for pure tests.
+    ///
+    /// **Off by default.** The ladder's safety net is snapshot/restore, and restore currently rebinds
+    /// module globals rather than restoring them in place (TID-22), so a test whose state something
+    /// else holds a reference to sees the two diverge. Until that lands, forking every test is the
+    /// configuration that is actually correct, and speed is not worth a wrong green.
     pub optimistic_no_fork: bool,
     /// Node ids recorded pure, eligible for the bare no-fork tier (TID-1).
     pub trusted_pure: HashSet<String>,
@@ -39,7 +44,7 @@ impl Default for RunPlan {
             scheduler: SchedulerKind::default(),
             workers: default_workers(),
             deadline_ms: DEFAULT_DEADLINE_MS,
-            optimistic_no_fork: true,
+            optimistic_no_fork: false,
             trusted_pure: HashSet::new(),
         }
     }
@@ -63,8 +68,8 @@ impl RunPlan {
                 self.strategy.fallback()
             ));
         }
-        if !self.optimistic_no_fork {
-            s.push_str(" force-fork");
+        if self.optimistic_no_fork {
+            s.push_str(" optimistic-no-fork");
         }
         s
     }
@@ -127,12 +132,15 @@ mod tests {
     }
 
     #[test]
-    fn force_fork_is_visible_in_the_header() {
+    fn the_optimistic_ladder_is_off_by_default_and_visible_when_on() {
+        // Off by default while TID-22 is open: restore rebinds rather than restores in place, so the
+        // ladder's safety net is not sound yet.
+        assert!(!RunPlan::default().optimistic_no_fork);
         let plan = RunPlan {
-            optimistic_no_fork: false,
+            optimistic_no_fork: true,
             ..RunPlan::default()
         };
-        assert!(plan.header().contains("force-fork"));
+        assert!(plan.header().contains("optimistic-no-fork"));
     }
 
     #[test]
