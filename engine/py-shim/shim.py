@@ -148,7 +148,22 @@ def _is_ancestor_dir(loc: str, test_dir: str) -> bool:
     """True if directory `loc` is `test_dir` or an ancestor of it (''=root, ancestor of all)."""
     if loc == "":
         return True
+    if loc.startswith(".."):
+        return True  # above the run root (TID-19) ⇒ ancestor of every test inside it
     return test_dir == loc or test_dir.startswith(loc + "/")
+
+
+def _location_depth(loc: str) -> int:
+    """How specific a conftest directory is — deeper wins in `Registry.resolve`.
+
+    The run root is 0 and directories under it count their segments. A conftest ABOVE the run root
+    (TID-19) is expressed as a `..`-relative path and scores NEGATIVE, one step per level up, so the
+    total order stays `../.. < .. < run root < tests < tests/sessions`. That is what keeps a nearer
+    conftest overriding a farther one in both directions."""
+    if not loc:
+        return 0
+    depth = len(loc.split("/"))
+    return -depth if loc.startswith("..") else depth
 
 
 # --------------------------------------------------------------------------- fixture model
@@ -297,17 +312,17 @@ class Registry:
         (a same-file module def beats a conftest; a deeper conftest beats a shallower one)."""
         test_dir = _test_dir(module_key)
         best: FixtureDef | None = None
-        best_spec = -1
+        best_spec = None
         for d in self.by_name.get(name, ()):
             if d.location.endswith(".py"):  # module fixture: visible only in its own module
                 if d.location != module_key:
                     continue
                 spec = 10_000  # most specific
             elif _is_ancestor_dir(d.location, test_dir):
-                spec = len(d.location.split("/")) if d.location else 0  # deeper dir = more specific
+                spec = _location_depth(d.location)  # deeper dir = more specific; above root = negative
             else:
                 continue
-            if spec > best_spec:
+            if best_spec is None or spec > best_spec:
                 best, best_spec = d, spec
         return best
 
@@ -328,9 +343,81 @@ class Registry:
         return out
 
 
+# Files that mark a project root, in pytest's rootdir sense. The nearest ancestor holding one bounds
+# how far up `conftest.py` collection reaches (pytest's confcutdir defaults to rootdir).
+_ROOTDIR_MARKERS = ("pyproject.toml", "setup.cfg", "tox.ini", "setup.py")
+
+# Ancestor conftests, memoised per run root. They must be *executed once*: a conftest's whole job is
+# side effects (env defaults, warning filters, sys.path surgery), and running it twice would apply
+# them twice. `serve()` warms this before `_preimport`; `_discover` then reads it back.
+_ANCESTOR_CONFTESTS: dict[str, list] = {}
+
+
+def _rootdir(root: str) -> str | None:
+    """The nearest ancestor of `root` holding a project marker, or None if there is none.
+
+    This is the ceiling for ancestor-conftest collection. Returning None when nothing is found keeps
+    a rootless tree behaving exactly as it did before ancestor collection existed, rather than
+    walking to `/` and importing whatever happens to be up there."""
+    cur = os.path.abspath(root)
+    while True:
+        parent = os.path.dirname(cur)
+        if parent == cur:  # hit the filesystem root without finding a marker
+            return None
+        if any(os.path.exists(os.path.join(parent, m)) for m in _ROOTDIR_MARKERS):
+            return parent
+        cur = parent
+
+
+def _load_ancestor_conftests(root: str) -> list:
+    """Import every `conftest.py` between rootdir and the run root, shallowest first (TID-19).
+
+    `os.walk(root)` only ever sees the tree at or below the run root, so a `conftest.py` beside
+    `pyproject.toml` — the conventional home for suite-wide setup — was silently skipped. pytest
+    collects conftests from rootdir down, and suites rely on it: env defaults, warning filters,
+    `sys.path` surgery, plugin registration. Skipping it does not degrade gracefully; it surfaces
+    later as a failure whose stated cause points nowhere near conftest discovery.
+
+    Returns `[(module, location)]` where location is a `..`-relative dir (see `_location_depth`)."""
+    key = os.path.abspath(root)
+    cached = _ANCESTOR_CONFTESTS.get(key)
+    if cached is not None:
+        return cached
+
+    out: list = []
+    ceiling = _rootdir(root)
+    if ceiling is not None:
+        # rootdir → run root, shallowest first, so a nearer conftest's side effects win by running last.
+        chain, cur = [], key
+        while cur != ceiling and os.path.dirname(cur) != cur:
+            cur = os.path.dirname(cur)
+            chain.append(cur)
+            if cur == ceiling:
+                break
+        for directory in reversed(chain):
+            path = os.path.join(directory, "conftest.py")
+            if not os.path.exists(path):
+                continue
+            location = os.path.relpath(directory, key).replace(os.sep, "/")
+            module = _import_conftest(path, location)
+            if module is not None:
+                out.append((module, location))
+
+    _ANCESTOR_CONFTESTS[key] = out
+    return out
+
+
 def _discover(root: str) -> Registry:
     reg = Registry()
     native: list[tuple] = []  # (provider obj, location) — resolved in a second pass (see below)
+    # Ancestor conftests first: their fixtures are the widest in the tree, and `serve()` has already
+    # executed them ahead of `_preimport` so their side effects precede every test-module import.
+    for module, location in _load_ancestor_conftests(root):
+        for obj in vars(module).values():
+            if _is_native_provider(obj):
+                native.append((obj, location))
+            elif _is_fixture(obj):
+                reg.add(_fixture_def(obj, location))
     for current, _dirs, files in sorted(os.walk(root)):
         rel_dir = os.path.relpath(current, root)
         rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
@@ -382,14 +469,21 @@ def _register_builtins(reg: Registry) -> None:
 
 
 def _import_conftest(path: str, rel_dir: str):
-    mod_name = "_fx_conftest_" + (rel_dir.replace("/", "_") or "root")
+    # Ancestor dirs (TID-19) arrive as `..`, `../..`, … — dotted, non-identifier, and indistinguishable
+    # from each other once punctuation is stripped. Name them by how far up they sit instead.
+    suffix = f"up{len(rel_dir.split('/'))}" if rel_dir.startswith("..") else rel_dir.replace("/", "_")
+    mod_name = "_fx_conftest_" + (suffix or "root")
     try:
         spec = importlib.util.spec_from_file_location(mod_name, path)
         module = importlib.util.module_from_spec(spec)
         sys.modules[mod_name] = module
         spec.loader.exec_module(module)
         return module
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — a broken conftest costs its fixtures, not the run
+        # Say so. A conftest that fails to import takes its fixtures and its side effects with it, and
+        # the tests below it then fail for reasons that name something else entirely — the exact
+        # confusion TID-19 was filed about.
+        print(f"tiderace: could not import {path}: {exc!r}", file=sys.stderr, flush=True)
         return None
 
 
@@ -1581,6 +1675,10 @@ def serve() -> int:
     purity = "--purity" in sys.argv[2:] or os.environ.get("TIDERACE_PURITY") == "1"
     restore = "--restore" in sys.argv[2:] or os.environ.get("TIDERACE_RESTORE") == "1"
     sys.path.insert(0, root)
+    # Ancestor conftests before `_preimport` (TID-19): a root conftest exists to set things up that
+    # must already be true when test modules import — env defaults, warning filters, `sys.path`. pytest
+    # loads conftests first for the same reason. `_discover` reads the memoised result back.
+    _load_ancestor_conftests(root)
     _preimport(root)
     reg = _discover(root)
     engine = Engine(reg, no_fork=no_fork, root=root, coverage=coverage, purity_guard=purity,
