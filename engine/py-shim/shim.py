@@ -214,6 +214,114 @@ class _Request:
         self.param = param
 
 
+# Command-line options declared by conftests via `pytest_addoption`, as `dest -> default` (TID-14).
+# Only defaults live here: tiderace has no way to *pass* a custom flag yet (that is TID-17), so a
+# declared option always reads as its default — which is exactly what an opt-in guard like
+# `if not request.config.getoption("--real"): pytest.skip(...)` needs to resolve correctly.
+_CLI_OPTIONS: dict[str, object] = {}
+
+_NOTSET = object()
+
+
+class _OptionRecorder:
+    """Stands in for pytest's argument parser while a conftest's `pytest_addoption` hook runs.
+
+    The hook expects to be handed a parser and to call `addoption` on it (or on a group). Rather
+    than model argparse, record just what `getoption` needs: the destination name and the default
+    the option would have carried."""
+
+    def __init__(self, options: dict):
+        self._options = options
+
+    def addoption(self, *names, **kw) -> None:
+        dest = kw.get("dest")
+        if dest is None:
+            flag = next((n for n in names if n.startswith("--")), names[0] if names else None)
+            if flag is None:
+                return
+            dest = flag.lstrip("-").replace("-", "_")
+        if "default" in kw:
+            default = kw["default"]
+        else:  # mirror argparse's implicit defaults for the actions conftests actually use
+            action = kw.get("action")
+            default = {"store_true": False, "store_false": True, "count": 0, "append": []}.get(action)
+        self._options[dest] = default
+
+    def getgroup(self, *_a, **_kw):
+        return self  # groups expose the same `addoption`, so the recorder can be its own group
+
+    def addini(self, *_a, **_kw) -> None:
+        pass  # ini declarations carry no option value; nothing to record
+
+
+def _collect_addoption(module) -> None:
+    """Run a conftest's `pytest_addoption` hook against the recorder, if it has one."""
+    hook = getattr(module, "pytest_addoption", None)
+    if hook is None:
+        return
+    try:
+        hook(_OptionRecorder(_CLI_OPTIONS))
+    except Exception as exc:  # noqa: BLE001 — a hook we can't model must not abort discovery
+        print(f"tiderace: pytest_addoption in {getattr(module, '__file__', '?')} "
+              f"could not be recorded: {exc!r}", file=sys.stderr, flush=True)
+
+
+class _Config:
+    """The slice of pytest's `config` that tests reach for through `request.config`."""
+
+    __slots__ = ()
+
+    def getoption(self, name: str, default=_NOTSET, skip: bool = False):
+        key = name.lstrip("-").replace("-", "_")
+        if key in _CLI_OPTIONS:
+            value = _CLI_OPTIONS[key]
+        elif default is not _NOTSET:
+            value = default
+        else:
+            # pytest raises for an option nobody declared; matching that beats inventing a value,
+            # which would silently flip an opt-in guard the wrong way.
+            raise ValueError(f"no option named {name!r}")
+        if skip and value is None:
+            raise _SKIP_EXCEPTIONS[0](f"no value for option {name!r}")
+        return value
+
+    def getini(self, name: str):
+        return None  # ini values are not modelled yet; `None` reads as "unset" at every call site
+
+
+class _TestRequest:
+    """The `request` a TEST function sees — pytest's `FixtureRequest`, minus the fixture plumbing.
+
+    Distinct from `_Request` (what a *parametrized fixture* sees, which is only `.param`). A test
+    asking for `request` overwhelmingly wants `request.config.getoption(...)` to decide whether to
+    run, so `config` is the part that has to be real; the identity attributes are cheap and come
+    along for free."""
+
+    __slots__ = ("config", "node", "function", "cls", "instance", "param", "fixturenames")
+
+    def __init__(self, node_id: str, func, instance=None):
+        self.config = _Config()
+        self.node = node_id
+        self.function = func
+        self.instance = instance
+        self.cls = type(instance) if instance is not None else None
+        self.param = None  # only a parametrized *fixture* has one; a test's request never does
+        self.fixturenames = [p for p in inspect.signature(func).parameters
+                             if p not in ("self", "cls")]
+
+
+def _with_request(func, args: dict, node_id: str, instance=None) -> dict:
+    """Add a `request` argument when the test asks for one (TID-14).
+
+    `_bind_by_type` deliberately skips the name `request`, so it never resolves as a provider and
+    the test was simply called without it — a `TypeError` about a missing positional argument. It
+    is injected here instead of registered as a provider because it needs the node context that
+    only the call site has."""
+    if "request" in args or "request" not in inspect.signature(func).parameters:
+        return args
+    return {**args, "request": _TestRequest(node_id, func, instance)}
+
+
 def _is_fixture(obj) -> bool:
     return hasattr(obj, "_fixture_function_marker") and hasattr(obj, "_fixture_function")
 
@@ -401,6 +509,7 @@ def _load_ancestor_conftests(root: str) -> list:
             location = os.path.relpath(directory, key).replace(os.sep, "/")
             module = _import_conftest(path, location)
             if module is not None:
+                _collect_addoption(module)
                 out.append((module, location))
 
     _ANCESTOR_CONFTESTS[key] = out
@@ -427,6 +536,8 @@ def _discover(root: str) -> Registry:
             path = os.path.join(current, name)
             if name == "conftest.py":
                 module, location = _import_conftest(path, rel_dir), rel_dir
+                if module is not None:
+                    _collect_addoption(module)
             elif name.startswith("test_") or name.endswith("_test.py"):
                 rel = os.path.relpath(path, root)[:-3].replace(os.sep, ".")
                 try:
@@ -783,9 +894,12 @@ async def _invoke_async(node_id: str, style: str, args: dict) -> tuple[str, str]
     try:
         if style == "class_method":
             cls_name, method = _class_method(node_id)
-            result = getattr(getattr(module, cls_name)(), method)(**args)
+            instance = getattr(module, cls_name)()
+            bound = getattr(instance, method)
+            result = bound(**_with_request(bound, args, node_id, instance))
         else:
-            result = getattr(module, node_id.partition("::")[2])(**args)
+            func = getattr(module, node_id.partition("::")[2])
+            result = func(**_with_request(func, args, node_id))
         if inspect.iscoroutine(result):
             await result
         return "passed", ""
@@ -1350,9 +1464,11 @@ def _invoke(node_id: str, style: str, args: dict) -> tuple[str, str]:
         if style == "class_method":
             cls_name, method = _class_method(node_id)
             instance = getattr(module, cls_name)()
-            _maybe_await(getattr(instance, method)(**args))
+            bound = getattr(instance, method)
+            _maybe_await(bound(**_with_request(bound, args, node_id, instance)))
             return "passed", ""
-        _maybe_await(getattr(module, node_id.partition("::")[2])(**args))
+        func = getattr(module, node_id.partition("::")[2])
+        _maybe_await(func(**_with_request(func, args, node_id)))
         return "passed", ""
     except AssertionError as exc:
         plain = "".join(traceback.format_exception_only(type(exc), exc))
