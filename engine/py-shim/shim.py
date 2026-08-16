@@ -289,6 +289,165 @@ class _Config:
         return None  # ini values are not modelled yet; `None` reads as "unset" at every call site
 
 
+# Node ids a collection hook (or a direct `@pytest.mark.skip`) decided to skip, as `node_id -> reason`
+# (TID-20). Computed once during discovery, consulted per node in `Engine.run`.
+_MARKER_SKIPS: dict[str, str] = {}
+
+
+def _own_markers(*owners) -> list:
+    """The `@pytest.mark.*` marks on a chain of owners, widest first (module → class → function).
+
+    pytest stores them as a `pytestmark` list on whatever they decorate, so gathering them is just
+    reading that attribute at each level. `__tiderace_marks__` is the native analogue and is read
+    separately by `_marks`; this is the pytest-compat side."""
+    out = []
+    for owner in owners:
+        if owner is None:
+            continue
+        marks = getattr(owner, "pytestmark", None)
+        if marks:
+            out.extend(marks)
+    return out
+
+
+class _HookItem:
+    """The `item` a `pytest_collection_modifyitems` hook is handed (TID-20).
+
+    Only the surface real conftests use: `nodeid` / `name` to identify it, `keywords` and
+    `own_markers` / `iter_markers` / `get_closest_marker` to inspect it, and `add_marker` to change
+    it. The overwhelmingly common shape — the one this ticket was filed for — is
+
+        for item in items:
+            if "needs_kuzu" in item.keywords:
+                item.add_marker(pytest.mark.skip(reason="pass --real to run Kuzu tests"))
+
+    which needs exactly `keywords` and `add_marker`."""
+
+    __slots__ = ("nodeid", "name", "own_markers", "keywords")
+
+    def __init__(self, nodeid: str, name: str, markers: list):
+        self.nodeid = nodeid
+        self.name = name
+        self.own_markers = list(markers)
+        # pytest's `keywords` is a mapping that answers `in` for mark names, the node name, and the
+        # module. Membership is what conftests actually use it for.
+        self.keywords = {getattr(m, "name", str(m)): m for m in self.own_markers}
+        self.keywords[name] = True
+        self.keywords[nodeid] = True
+
+    def add_marker(self, marker, append: bool = True) -> None:
+        if append:
+            self.own_markers.append(marker)
+        else:
+            self.own_markers.insert(0, marker)
+        self.keywords[getattr(marker, "name", str(marker))] = marker
+
+    def iter_markers(self, name: str | None = None):
+        for m in reversed(self.own_markers):
+            if name is None or getattr(m, "name", None) == name:
+                yield m
+
+    def get_closest_marker(self, name: str, default=None):
+        return next(self.iter_markers(name), default)
+
+    def __repr__(self) -> str:  # a hook that logs its items should print something useful
+        return f"<Item {self.nodeid}>"
+
+
+def _marker_skip_reason(markers: list):
+    """The skip reason implied by a pytest marker set, or None.
+
+    `skipif`'s condition may be a bool or a string expression; only the bool form is evaluated. A
+    string condition is treated as *not* skipping, because guessing at an unevaluated expression
+    could silently skip a test that should have run — the failure that cannot be seen."""
+    for m in reversed(markers):
+        name = getattr(m, "name", None)
+        if name not in ("skip", "skipif"):
+            continue
+        kwargs = getattr(m, "kwargs", {}) or {}
+        args = getattr(m, "args", ()) or ()
+        if name == "skipif":
+            condition = args[0] if args else kwargs.get("condition")
+            if not isinstance(condition, bool) or not condition:
+                continue
+            return kwargs.get("reason") or "skipif"
+        return kwargs.get("reason") or (args[0] if args and isinstance(args[0], str) else "skip")
+    return None
+
+
+def _enumerate_items(test_modules: list) -> list:
+    """The collected items, for the collection hooks to inspect (TID-20).
+
+    Mirrors `RegexCollector`'s rules by **introspection** rather than by re-scanning source: module
+    functions named `test*`, and methods named `test*` on `unittest.TestCase` subclasses (any name)
+    or `Test*` classes.
+
+    The Rust collector remains authoritative for what actually *runs*; this list only feeds the
+    hooks. So a divergence can cost a skip that should have been applied, never a test that should
+    not have run."""
+    items = []
+    for module, rel in test_modules:
+        module_marks = _own_markers(module)
+        for name, obj in vars(module).items():
+            if name.startswith("test") and inspect.isfunction(obj):
+                items.append(_HookItem(f"{rel}::{name}", name, module_marks + _own_markers(obj)))
+            elif inspect.isclass(obj) and (
+                name.startswith("Test") or issubclass(obj, unittest.TestCase)
+            ):
+                class_marks = module_marks + _own_markers(obj)
+                for mname, meth in vars(obj).items():
+                    if mname.startswith("test") and callable(meth):
+                        items.append(
+                            _HookItem(
+                                f"{rel}::{name}::{mname}",
+                                mname,
+                                class_marks + _own_markers(meth),
+                            )
+                        )
+    return items
+
+
+def _run_collection_hooks(conftests: list, test_modules: list) -> None:
+    """Run every conftest's `pytest_collection_modifyitems`, then record the skips it produced.
+
+    Suites gate optional backends here — `needs_postgres`, `needs_kuzu` — so without it those tests
+    run anyway and die on a missing import. pytest reports them as skips; tiderace reported a red run
+    for a dependency the suite deliberately made optional.
+
+    Marks applied *directly* (`@pytest.mark.skip`) are folded into the same pass, so there is one
+    place that decides a marker-driven skip rather than two that can disagree."""
+    hooks = [
+        (m, getattr(m, "pytest_collection_modifyitems", None))
+        for m in conftests
+    ]
+    hooks = [(m, h) for m, h in hooks if h is not None]
+
+    items = _enumerate_items(test_modules)
+    config = _Config()
+    for module, hook in hooks:
+        try:
+            hook(config=config, items=items)
+        except TypeError:
+            # Hooks may declare any subset of (session, config, items) — pytest matches by name.
+            try:
+                hook(config, items)
+            except Exception as exc:  # noqa: BLE001
+                _warn_hook_failed(module, exc)
+        except Exception as exc:  # noqa: BLE001 — a hook we can't run must not abort discovery
+            _warn_hook_failed(module, exc)
+
+    for item in items:
+        reason = _marker_skip_reason(item.own_markers)
+        if reason is not None:
+            _MARKER_SKIPS[item.nodeid] = reason
+
+
+def _warn_hook_failed(module, exc: BaseException) -> None:
+    print(f"tiderace: pytest_collection_modifyitems in "
+          f"{getattr(module, '__file__', '?')} failed: {exc!r} — its skips will not be applied",
+          file=sys.stderr, flush=True)
+
+
 class _TestRequest:
     """The `request` a TEST function sees — pytest's `FixtureRequest`, minus the fixture plumbing.
 
@@ -519,9 +678,12 @@ def _load_ancestor_conftests(root: str) -> list:
 def _discover(root: str) -> Registry:
     reg = Registry()
     native: list[tuple] = []  # (provider obj, location) — resolved in a second pass (see below)
+    conftests: list = []  # every conftest module, for the collection hooks (TID-20)
+    test_modules: list = []  # (module, rel path) — the items those hooks inspect
     # Ancestor conftests first: their fixtures are the widest in the tree, and `serve()` has already
     # executed them ahead of `_preimport` so their side effects precede every test-module import.
     for module, location in _load_ancestor_conftests(root):
+        conftests.append(module)
         for obj in vars(module).values():
             if _is_native_provider(obj):
                 native.append((obj, location))
@@ -538,6 +700,7 @@ def _discover(root: str) -> Registry:
                 module, location = _import_conftest(path, rel_dir), rel_dir
                 if module is not None:
                     _collect_addoption(module)
+                    conftests.append(module)
             elif name.startswith("test_") or name.endswith("_test.py"):
                 rel = os.path.relpath(path, root)[:-3].replace(os.sep, ".")
                 try:
@@ -545,6 +708,7 @@ def _discover(root: str) -> Registry:
                 except Exception:  # noqa: BLE001 — a bad module surfaces per-test, not at discovery
                     continue
                 location = os.path.relpath(path, root).replace(os.sep, "/")
+                test_modules.append((module, location))
             else:
                 continue
             if module is None:
@@ -554,6 +718,10 @@ def _discover(root: str) -> Registry:
                     native.append((obj, location))
                 elif _is_fixture(obj):
                     reg.add(_fixture_def(obj, location))
+
+    # After every conftest is loaded and every test module imported — the hooks need both, and the
+    # marks they inspect only exist once the decorators have run.
+    _run_collection_hooks(conftests, test_modules)
 
     # Native providers wire by type, so provider→provider deps need the FULL type set first: build the
     # type index, then build the defs (a two-pass the name-DI pytest path doesn't need).
@@ -1042,8 +1210,11 @@ class Engine:
             return {"node_id": node_id, "outcome": "error",
                     "detail": "".join(traceback.format_exception_only(type(exc), exc))}
 
-        skip_reason = _skip_decision(marks)
-        if skip_reason is not None:  # short-circuit BEFORE any fixture setup
+        # Native marks first, then anything a `@pytest.mark.skip` or a collection hook decided
+        # (TID-20). Both short-circuit BEFORE any fixture setup — a test skipped for a missing
+        # backend must not pay to build one.
+        skip_reason = _skip_decision(marks) or _MARKER_SKIPS.get(node_id)
+        if skip_reason is not None:
             return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason}
 
         # Split requested params: fixtures (resolved by the graph) vs. bare params filled positionally
