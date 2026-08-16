@@ -1076,10 +1076,26 @@ def _restore_in_place(live, old) -> bool:
             ):
                 setattr(live, name, copy.deepcopy(getattr(old, name)))
         return True
-    # Anything left (deque, array, and other C containers) still rebinds below — no worse than before
-    # this fix, but the identity hazard remains for them. Widening `_restorable` to force a fork
-    # instead is the sound answer and is a separate call: it would turn some currently-passing
-    # no-fork runs into hard errors, which on Windows is the only tier there is.
+    # Everything else — deque, array.array, numpy arrays, custom C containers — via the two shapes
+    # that preserve identity (TID-23). Slice assignment is tried first because it is the closer to
+    # atomic: `clear()` followed by a failing `extend()` would leave the container empty, which is
+    # worse than either restoring it or rebinding it.
+    #
+    # Widening `_restorable` to force a fork for these instead is the other sound answer, and was
+    # rejected: Windows has no fork, so `--no-fork` would turn a module-level numpy array — entirely
+    # ordinary — into a hard error. `_restorable` stays the backstop for genuinely opaque values.
+    try:
+        live[:] = copy.deepcopy(old)
+        return True
+    except Exception:  # noqa: BLE001 — not a sliceable sequence; try the other shape
+        pass
+    try:
+        restored = copy.deepcopy(old)
+        live.clear()
+        live.extend(restored)
+        return True
+    except Exception:  # noqa: BLE001 — not a clear/extend container either; rebinding is the fallback
+        pass
     return False
 
 
