@@ -23,6 +23,7 @@ from typing import Iterator
 import tiderace
 
 from ._capture import Capfd, Capsys, CaptureResult
+from ._logging import CapLog
 from ._monkeypatch import MonkeyPatch
 from ._paths import TmpPath
 
@@ -31,11 +32,13 @@ __all__ = [
     "TmpPath",
     "Capsys",
     "Capfd",
+    "CapLog",
     "CaptureResult",
     "monkeypatch",
     "tmp_path",
     "capsys",
     "capfd",
+    "caplog",
     "providers",
 ]
 
@@ -75,6 +78,15 @@ def capfd() -> Iterator[Capfd]:
     cap._stop()
 
 
+@tiderace.provides
+def caplog() -> Iterator[CapLog]:
+    """Function-scoped log capture; the handler is removed and levels restored at teardown."""
+    cap = CapLog()
+    cap._start()
+    yield cap
+    cap._stop()
+
+
 def providers() -> list:
     """The builtin provider callables, for the shim to register globally (always-available)."""
-    return [monkeypatch, tmp_path, capsys, capfd]
+    return [monkeypatch, tmp_path, capsys, capfd, caplog]
