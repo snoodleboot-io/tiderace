@@ -49,9 +49,14 @@ fn any_python() -> Option<String> {
 /// Every shape that can hold a reference across a restore. Each `_b` test runs after its `_a`
 /// sibling (alphabetical within the module) and fails if the restore rebound instead of restoring.
 const CORPUS: &str = "\
+import array
+from collections import deque
+
 CALLS = {}
 ITEMS = []
 SEEN = set()
+EVENTS = deque()
+NUMS = array.array(\"i\", [])
 
 
 class _Recorder:
@@ -71,9 +76,24 @@ class _Slotted:
         self.bucket = bucket
 
 
+class _Queue:
+    \"\"\"Holds containers that are neither a builtin collection nor an object (TID-23).\"\"\"
+
+    def __init__(self, events, nums):
+        self.events = events
+        self.nums = nums
+
+
 REC = _Recorder(CALLS)
 SLOTTED = _Slotted(ITEMS)
-ID_AT_IMPORT = {\"calls\": id(CALLS), \"items\": id(ITEMS), \"seen\": id(SEEN)}
+QUEUE = _Queue(EVENTS, NUMS)
+ID_AT_IMPORT = {
+    \"calls\": id(CALLS),
+    \"items\": id(ITEMS),
+    \"seen\": id(SEEN),
+    \"events\": id(EVENTS),
+    \"nums\": id(NUMS),
+}
 
 
 def test_dict_a_mutates():
@@ -109,13 +129,37 @@ def test_set_b_is_reset_in_place():
     assert SEEN == {\"b\"}
 
 
+def test_deque_a_appends():
+    QUEUE.events.append(\"a\")
+    assert list(EVENTS) == [\"a\"]
+
+
+def test_deque_b_sees_its_own_write():
+    QUEUE.events.append(\"b\")
+    assert list(EVENTS) == [\"b\"], f\"EVENTS={list(EVENTS)!r} QUEUE.events={list(QUEUE.events)!r}\"
+
+
+def test_array_a_appends():
+    QUEUE.nums.append(1)
+    assert list(NUMS) == [1]
+
+
+def test_array_b_sees_its_own_write():
+    QUEUE.nums.append(2)
+    assert list(NUMS) == [2], f\"NUMS={list(NUMS)!r} QUEUE.nums={list(QUEUE.nums)!r}\"
+
+
 def test_identity_survived_every_restore():
     # The strongest statement: the objects the module started with are still the objects it has.
     assert id(CALLS) == ID_AT_IMPORT[\"calls\"], \"CALLS was rebound\"
     assert id(ITEMS) == ID_AT_IMPORT[\"items\"], \"ITEMS was rebound\"
     assert id(SEEN) == ID_AT_IMPORT[\"seen\"], \"SEEN was rebound\"
+    assert id(EVENTS) == ID_AT_IMPORT[\"events\"], \"EVENTS was rebound\"
+    assert id(NUMS) == ID_AT_IMPORT[\"nums\"], \"NUMS was rebound\"
     assert REC.sink is CALLS, \"REC.sink no longer aliases CALLS\"
     assert SLOTTED.bucket is ITEMS, \"SLOTTED.bucket no longer aliases ITEMS\"
+    assert QUEUE.events is EVENTS, \"QUEUE.events no longer aliases EVENTS\"
+    assert QUEUE.nums is NUMS, \"QUEUE.nums no longer aliases NUMS\"
 ";
 
 fn write_corpus(tag: &str) -> PathBuf {
@@ -153,11 +197,11 @@ fn restore_preserves_identity_on_the_no_fork_tier() {
     };
     let dir = write_corpus("nofork");
     let items = RegexCollector::new().collect(&dir).expect("collection");
-    assert_eq!(items.len(), 7, "7 tests in the corpus");
+    assert_eq!(items.len(), 11, "11 tests in the corpus");
 
     let mut worker = SubprocessWorker::new(10_000, 1).with_target(python, &shim(), &dir);
     let results = worker.run(&items).expect("batch runs against real Python");
-    assert_eq!(results.len(), 7, "one result per test");
+    assert_eq!(results.len(), 11, "one result per test");
     assert_all_passed(&results, "subprocess");
     let _ = std::fs::remove_dir_all(&dir);
 }
