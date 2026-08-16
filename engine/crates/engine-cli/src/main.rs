@@ -91,7 +91,8 @@ fn cmd_run(root: &Path) -> ExitCode {
         // The shim computes a `detail` for every non-pass outcome; printing only
         // the label discarded it, leaving a failing run with no way to say what
         // broke. Indented under its node so the pass/fail column stays scannable.
-        if !matches!(result.outcome, Outcome::Passed | Outcome::Skipped) && !result.detail.is_empty()
+        if !matches!(result.outcome, Outcome::Passed | Outcome::Skipped)
+            && !result.detail.is_empty()
         {
             for line in result.detail.lines() {
                 println!("    {line}");
