@@ -39,6 +39,7 @@ import signal
 import struct
 import sys
 import textwrap
+import time
 import traceback
 import typing
 import unittest
@@ -1300,10 +1301,13 @@ class Engine:
         case_params = [p for p in requested if p not in fixture_requested]
         # `@tiderace.cases` yields positional variants; `@pytest.mark.parametrize`
         # yields name→value maps (argnames need not follow the signature order).
+        raw_cases = self._cases(node_id, style)
         case_kwargs_list = [
             c if isinstance(c, dict) else dict(zip(case_params, c.values))
-            for c in self._cases(node_id, style)
+            for c, _ in raw_cases
         ] or [{}]
+        # Author-supplied ids, aligned with `case_kwargs_list`; `None` ⇒ generate one.
+        case_ids = [cid for _, cid in raw_cases] or [None]
 
         # Soundness gate for BOTH in-process paths. A module whose shared state we can't snapshot/restore
         # (opaque globals — an open file, a generator, a live socket) must fork: running it in-process
@@ -1338,12 +1342,38 @@ class Engine:
         coverage: dict[str, set] = {}  # union of touched lines across all variants of this node
         impurity = None  # first impurity reason across variants (any impure ⇒ the node is impure)
         node_pure = None  # tri-state across variants: None (unmeasured), True (all measured pure), False
+        # Per-variant results, reported alongside the aggregate (TID-25). Each case already gets its
+        # own `_fork_run`, so collapsing them to one outcome discarded results that had already been
+        # paid for — the tally lost the passes, and a node with several failures kept one detail.
+        parametrized_node = bool(combos != [{}] or case_kwargs_list != [{}])
+        variants: list[dict] = []
+        seen_ids: dict[str, int] = {}
+        variant_index = 0
         for combo in combos:
             self._sync_wider(closure, node_id)
-            for case_kwargs in case_kwargs_list:
+            for case_pos, case_kwargs in enumerate(case_kwargs_list):
+                started = time.perf_counter()
                 oc, detail, cov, purity = self._fork_run(
                     node_id, style, fixture_requested, closure, combo, deadline_ms, case_kwargs,
                     force_no_fork, trusted_pure, must_fork)
+                if parametrized_node:
+                    variant = {
+                        "node_id": _variant_id(
+                            node_id, combo, case_kwargs, variant_index, seen_ids,
+                            case_ids[case_pos],
+                        ),
+                        "outcome": oc,
+                        "detail": detail,
+                        "duration_ms": int((time.perf_counter() - started) * 1000),
+                    }
+                    if cov:
+                        variant["coverage"] = {p: sorted(l) for p, l in cov.items()}
+                    if purity is None:
+                        variant["pure"] = True
+                    elif purity is not _UNKNOWN_PURITY:
+                        variant["pure"] = False
+                    variants.append(variant)
+                variant_index += 1
                 outcomes.append((oc, detail))
                 for path, lines in cov.items():
                     coverage.setdefault(path, set()).update(lines)
@@ -1359,6 +1389,9 @@ class Engine:
         outcome, detail = _aggregate(outcomes)
         outcome, detail = _apply_xfail(marks, outcome, detail)
         resp = {"node_id": node_id, "outcome": outcome, "detail": detail}
+        # Additive and omitted for an unparametrized node, so its frame stays byte-identical.
+        if variants:
+            resp["variants"] = variants
         if coverage:  # additive field (Phase-3 CONTRACT §6); omitted when capture is off/empty
             resp["coverage"] = {path: sorted(lines) for path, lines in coverage.items()}
         if node_pure is not None:  # additive: purity was measured (guard or restore) — record the verdict
@@ -1638,7 +1671,9 @@ class Engine:
         else:
             func = getattr(module, node_id.partition("::")[2])
         native = list(getattr(func, "__tiderace_cases__", ()))
-        return native or _parametrize_cases(func)
+        if native:
+            return [(c, None) for c in native]  # native cases carry no author-supplied id
+        return _parametrize_cases(func)
 
     def teardown_all(self) -> None:
         while self.active:
@@ -1657,38 +1692,66 @@ def _parametrize_cases(func) -> list[dict]:
     Values are returned as name→value maps rather than positionally, because
     `parametrize`'s argnames need not match the signature order.
 
-    Stacked marks multiply, as in pytest. Ids are not modelled: this engine
-    reports one result per node, aggregating its variants.
+    Stacked marks multiply, as in pytest. Each case carries its **explicit id** when the author gave
+    one — `ids=[...]`, `ids=callable`, or `pytest.param(..., id=...)` — because those ids are
+    selectors, and a generated `[size1]` where pytest prints `[decimal]` cannot be pasted from one
+    runner into the other. Returns `(kwargs, explicit_id_or_None)` per case.
+
+    Stacked marks with ids on only *some* axes fall back to generated ids for the whole case rather
+    than splicing the two schemes, which would produce an id matching neither runner.
     """
     marks = [m for m in getattr(func, "pytestmark", ()) if getattr(m, "name", "") == "parametrize"]
     if not marks:
         return []
-    axes: list[list[dict]] = []
+    axes: list[list[tuple]] = []
     for mark in marks:
         names = mark.args[0]
         names = (
             [n.strip() for n in names.split(",") if n.strip()] if isinstance(names, str)
             else list(names)
         )
-        axis: list[dict] = []
-        for entry in mark.args[1]:
+        ids_kw = (getattr(mark, "kwargs", None) or {}).get("ids")
+        axis: list[tuple] = []
+        for position, entry in enumerate(mark.args[1]):
             # `pytest.param(...)` carries `.values`/`.marks`; both are checked so a
             # plain dict argvalue (which has a `.values` *method*) is not mistaken for one.
+            explicit = None
             if hasattr(entry, "values") and hasattr(entry, "marks"):
                 raw = tuple(entry.values)
+                explicit = getattr(entry, "id", None)
             elif len(names) == 1:
                 raw = (entry,)
             else:
                 raw = tuple(entry)
-            axis.append(dict(zip(names, raw)))
+            if explicit is None and ids_kw is not None:
+                explicit = _explicit_id(ids_kw, raw, position)
+            axis.append((dict(zip(names, raw)), None if explicit is None else str(explicit)))
         axes.append(axis)
-    cases: list[dict] = []
+    cases: list[tuple] = []
     for combo in itertools.product(*axes):
         merged: dict = {}
-        for piece in combo:
+        ids = []
+        for piece, piece_id in combo:
             merged.update(piece)
-        cases.append(merged)
+            ids.append(piece_id)
+        case_id = "-".join(ids) if ids and all(i is not None for i in ids) else None
+        cases.append((merged, case_id))
     return cases
+
+
+def _explicit_id(ids_kw, values: tuple, position: int):
+    """The author-supplied id for one case, from `ids=[...]` or `ids=callable`.
+
+    A callable is applied per value and joined, as pytest does; a callable that returns `None` for a
+    value means "generate this part", and since the parts cannot be mixed here that degrades the
+    whole case to a generated id rather than a half-built one."""
+    try:
+        if callable(ids_kw):
+            produced = [ids_kw(v) for v in values]
+            return None if any(p is None for p in produced) else "-".join(str(p) for p in produced)
+        return ids_kw[position]
+    except Exception:  # noqa: BLE001 — a malformed `ids` must not take the test down
+        return None
 
 
 def _skip_decision(marks: list):
@@ -1924,6 +1987,50 @@ def _value_diff(left, right) -> list[str]:
                 break
         return out
     return []
+
+
+# --------------------------------------------------------------------------- parametrization ids
+def _id_part(value, argname: str, index: int) -> str:
+    """One parameter's contribution to a pytest-style `[...]` id, matching pytest's own spelling.
+
+    Parity matters here rather than being cosmetic: these ids are selectors. Someone who copies
+    `test_rejected[(SELECT 1)]` out of a pytest run and pastes it into tiderace has to hit the same
+    test, so this follows `_pytest.python._idval` rather than inventing a scheme:
+
+    * strings keep printable ASCII verbatim (spaces, quotes, brackets and all) and escape the rest,
+      which is exactly `ascii_escaped` — `"таблица"` becomes `\\u0442\\u0430\\u0431\\u043b\\u0438\\u0446\\u0430`;
+    * scalars print as themselves (`3`, `True`, `None`, `1.5`);
+    * anything else is `argname` + its index, because a `repr` would embed addresses and stop being
+      stable between runs.
+    """
+    if isinstance(value, str):
+        return value.encode("unicode_escape").decode("ascii")
+    if value is None or isinstance(value, (bool, int, float)):
+        return str(value)
+    name = getattr(value, "__name__", None)  # classes and functions id by name in pytest
+    if isinstance(name, str):
+        return name
+    return f"{argname}{index}"
+
+
+def _variant_id(node_id: str, combo: dict, case_kwargs: dict, index: int, seen: dict,
+                explicit: str | None = None) -> str:
+    """`node_id[params]` for one variant, unique within the node (TID-25).
+
+    Parametrized-fixture values come first, then the test's own `parametrize` values, each in
+    declaration order. Duplicate ids (two cases whose values print alike) get an index suffix, as
+    pytest does — an id that collides is worse than an ugly one, because it cannot select."""
+    parts = [_id_part(v, k, index) for k, v in combo.items()]
+    if explicit is not None:
+        parts.append(explicit)  # the author named this case; theirs wins over anything generated
+    else:
+        parts += [_id_part(v, k, index) for k, v in case_kwargs.items()]
+    if not parts:
+        return node_id
+    base = f"{node_id}[{'-'.join(parts)}]"
+    n = seen.get(base, 0)
+    seen[base] = n + 1
+    return base if n == 0 else f"{base}{n}"
 
 
 def _aggregate(outcomes: list[tuple[str, str]]) -> tuple[str, str]:
