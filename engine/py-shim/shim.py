@@ -1025,6 +1025,64 @@ def _purity_verdict(module, before: dict, env_before: dict):
     return None
 
 
+def _restore_in_place(live, old) -> bool:
+    """Restore `live`'s CONTENTS from `old`, preserving its identity. True if it was handled (TID-22).
+
+    Rebinding the module attribute instead — `d[k] = deepcopy(old)` — restores the *name* but not the
+    *object*, so anything holding a direct reference to the original (a registered stub, a callback, a
+    fixture that captured the sink, a class attribute) keeps writing into the old object while the
+    module attribute points at a fresh copy. The two silently diverge, and the resulting failure
+    surfaces arbitrarily far from the cause.
+
+    A plain module-level function is unaffected either way — it resolves globals by name at call time.
+    The bug needs something that captured the object itself, which is exactly what test doubles do."""
+    if live is old or type(live) is not type(old):
+        return False
+    if isinstance(live, dict):
+        live.clear()
+        live.update(copy.deepcopy(old))
+        return True
+    if isinstance(live, list):
+        live[:] = copy.deepcopy(old)
+        return True
+    if isinstance(live, set):
+        live.clear()
+        live.update(copy.deepcopy(old))
+        return True
+    if isinstance(live, bytearray):
+        live[:] = old
+        return True
+    # A user object is the other common sink: a stub or recorder held by reference, whose attributes
+    # the test mutates. Restore its attributes RECURSIVELY rather than replacing its `__dict__`
+    # wholesale — the object's own attributes are frequently the very containers other globals alias,
+    # and swapping them for copies breaks exactly the identity this function exists to preserve.
+    inst = getattr(live, "__dict__", None)
+    if isinstance(inst, dict):
+        old_vars = vars(old)
+        for name in set(inst) | set(old_vars):
+            if name not in old_vars:
+                del inst[name]
+            elif name not in inst or not _restore_in_place(inst[name], old_vars[name]):
+                inst[name] = copy.deepcopy(old_vars[name])
+        return True
+    slots = [s for cls in type(live).__mro__ for s in getattr(cls, "__slots__", ())]
+    if slots:
+        for name in slots:
+            if not hasattr(old, name):
+                if hasattr(live, name):
+                    delattr(live, name)
+            elif not hasattr(live, name) or not _restore_in_place(
+                getattr(live, name), getattr(old, name)
+            ):
+                setattr(live, name, copy.deepcopy(getattr(old, name)))
+        return True
+    # Anything left (deque, array, and other C containers) still rebinds below — no worse than before
+    # this fix, but the identity hazard remains for them. Widening `_restorable` to force a fork
+    # instead is the sound answer and is a separate call: it would turn some currently-passing
+    # no-fork runs into hard errors, which on Windows is the only tier there is.
+    return False
+
+
 def _restore_shared(module, before: dict, env_before: dict) -> None:
     """Undo a (bounded) test's mutations from the pre-body snapshot — fork-free isolation. Restores the
     module's snapshotted globals (re-setting changed ones, removing added ones) and `os.environ`. Sound
@@ -1039,7 +1097,10 @@ def _restore_shared(module, before: dict, env_before: dict) -> None:
         if old is _MISSING:
             d.pop(k, None)  # the test added this global → remove it
         elif d.get(k, _MISSING) != old:
-            d[k] = copy.deepcopy(old)  # the test changed it → put the old value back
+            # Contents first, identity preserved (TID-22); rebinding is the fallback for immutables
+            # (int/str/tuple), where identity cannot be observed through mutation anyway.
+            if not _restore_in_place(d.get(k, _MISSING), old):
+                d[k] = copy.deepcopy(old)
     if dict(os.environ) != env_before:
         os.environ.clear()
         os.environ.update(env_before)
