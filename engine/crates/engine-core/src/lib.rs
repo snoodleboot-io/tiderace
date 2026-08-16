@@ -18,6 +18,7 @@ pub mod fixtures;
 pub mod hooks;
 pub mod impact;
 pub mod reporter;
+pub mod runner;
 pub mod scheduler;
 pub mod shim_locate;
 pub mod testing;

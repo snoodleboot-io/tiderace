@@ -8,7 +8,7 @@ use std::io::BufReader;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use engine_core::exec::{read_frame, write_frame};
+use crate::exec::{read_frame, write_frame};
 use serde_json::{json, Value};
 
 /// Classify each module (rel path, e.g. `pkg/test_x.py`) by driving `python <shim> <root> --probe`.
@@ -56,7 +56,7 @@ pub fn probe_modules(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_core::testing::skip_live;
+    use crate::testing::skip_live;
     use std::path::PathBuf;
 
     fn repo_root() -> PathBuf {

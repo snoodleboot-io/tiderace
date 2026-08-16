@@ -7,10 +7,10 @@ use engine_core::domain::{Outcome, TestItem, TestResult};
 use engine_core::exec::{ForkWorker, SubInterpWorker, Worker};
 
 use crate::persist::{changed_files, plan, PersistedState, SafeModule, TestRecord};
-use crate::probe::probe_modules;
 use crate::rpc_method::{RpcRequest, RpcResponse, RpcResult};
 use crate::rpc_server::RpcHandler;
 use crate::watch::content_hash;
+use engine_core::exec::probe_modules;
 
 /// Summary of an impact-aware run: which tests actually executed vs. were served from warm state.
 #[derive(Debug)]

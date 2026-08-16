@@ -1,22 +1,19 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
-use std::thread;
 
 use engine_core::domain::{TestItem, TestResult};
-#[cfg(unix)]
-use engine_core::exec::ForkWorker;
-#[cfg(not(unix))]
-use engine_core::exec::SubprocessWorker;
-use engine_core::exec::Worker;
-use engine_core::scheduler::{LocalityScheduler, ScheduleInput, ScheduledTest, Scheduler};
+use engine_core::runner::{run_parallel as core_run_parallel, RunPlan, WorkerStrategy};
 
-/// Run `items` across a **pool of `workers` in parallel** (the fix for sequential execution —
-/// design 06 / ADR-E010). The [`LocalityScheduler`] groups tests by module (scope locality) and
-/// LPT-balances the groups across workers; each worker runs its batch on its own thread. The
-/// per-batch isolation backend is platform-specific (see [`run_batch`]): fork-per-test on Unix, the
-/// no-fork SubprocessWorker (snapshot/restore) on Windows. Coverage rides along if the wellsprings
-/// inherit `TIDERACE_COVERAGE` (the caller's env), so impact footprints are still captured.
-#[allow(clippy::too_many_arguments)]
+/// Run `items` across a **pool of `workers` in parallel** (design 06 / ADR-E010).
+///
+/// The implementation moved to [`engine_core::runner`] (TID-17) so the CLI could reach the tiers and
+/// schedulers this had hardwired; two copies of the scheduling + threading logic would drift. This
+/// keeps the daemon's long-standing signature and its platform-default behaviour: locality packing,
+/// fork-per-test on Unix, the no-fork `SubprocessWorker` on Windows.
+///
+/// Coverage rides along if the wellsprings inherit `TIDERACE_COVERAGE` (the caller's env), so impact
+/// footprints are still captured.
+#[allow(clippy::too_many_arguments)] // long-standing daemon signature, kept for compatibility
 pub fn run_parallel(
     python: &str,
     shim: &Path,
@@ -27,130 +24,25 @@ pub fn run_parallel(
     optimistic_no_fork: bool,
     trusted: &HashSet<String>,
 ) -> Result<Vec<TestResult>, String> {
-    if items.is_empty() {
-        return Ok(Vec::new());
-    }
-    let workers = workers.max(1).min(items.len());
-
-    // node id -> item (to rebuild each batch's TestItems from the scheduler's NodeId batches).
-    let mut by_node: HashMap<String, TestItem> = items
-        .iter()
-        .map(|i| (i.node_id.to_string(), i.clone()))
-        .collect();
-    // Cold run ⇒ no timing history; weight each test equally and group by module for locality.
-    let scheduled: Vec<ScheduledTest> = items
-        .iter()
-        .map(|i| ScheduledTest::new(i.node_id.clone(), locality_key(i.node_id.as_str()), 1))
-        .collect();
-    let batches = LocalityScheduler::default().plan(&ScheduleInput::new(scheduled, workers));
-
-    let mut handles = Vec::new();
-    for batch in batches {
-        let batch_items: Vec<TestItem> = batch
-            .items()
-            .iter()
-            .filter_map(|n| by_node.remove(n.as_str()))
-            .collect();
-        if batch_items.is_empty() {
-            continue;
-        }
-        let (py, sh, rt) = (python.to_string(), shim.to_path_buf(), root.to_path_buf());
-        // Only this batch's trusted-pure node ids (the shim only sees this batch).
-        let batch_trusted: HashSet<String> = batch_items
-            .iter()
-            .filter(|it| trusted.contains(it.node_id.as_str()))
-            .map(|it| it.node_id.to_string())
-            .collect();
-        handles.push(thread::spawn(move || -> Result<Vec<TestResult>, String> {
-            run_batch(
-                &py,
-                &sh,
-                &rt,
-                &batch_items,
-                deadline_ms,
-                optimistic_no_fork,
-                batch_trusted,
-            )
-        }));
-    }
-
-    let mut all = Vec::new();
-    for handle in handles {
-        all.extend(
-            handle
-                .join()
-                .map_err(|_| "worker thread panicked".to_string())??,
-        );
-    }
-    Ok(all)
-}
-
-/// Run one scheduler batch on this thread, using the platform's isolation backend. This is the one
-/// place the pool is platform-aware; everything above (scheduling, batching, threading, join) is
-/// shared.
-///
-/// * **Unix** — [`ForkWorker`]: one warm wellspring, fork-per-test (COW isolation, ADR-E003). The
-///   optimistic-no-fork ladder + trusted-pure fast path apply here.
-/// * **Non-Unix (Windows)** — no `fork()`, so [`SubprocessWorker`] (`--no-fork`) runs the batch
-///   in-process with snapshot/restore between tests and refuses opaque modules (sound as of the
-///   no-fork isolation fix). One process per batch; parallelism still comes from N batches on N
-///   threads, exactly as the fork pool. This is what lets `run --all` / the sub-interpreter tier's
-///   fork partition actually run on Windows instead of crashing on `os.fork()`.
-#[cfg(unix)]
-fn run_batch(
-    py: &str,
-    sh: &Path,
-    rt: &Path,
-    batch_items: &[TestItem],
-    deadline_ms: u64,
-    optimistic_no_fork: bool,
-    batch_trusted: std::collections::HashSet<String>,
-) -> Result<Vec<TestResult>, String> {
-    let mut worker = ForkWorker::launch(py, sh, rt)
-        .map_err(|e| format!("failed to launch wellspring: {e}"))?
-        .with_deadline_ms(deadline_ms)
-        .with_optimistic_no_fork(optimistic_no_fork)
-        .with_trusted_pure(batch_trusted);
-    worker
-        .run(batch_items)
-        .map_err(|e| format!("execution failed: {e}"))
-}
-
-#[cfg(not(unix))]
-fn run_batch(
-    py: &str,
-    sh: &Path,
-    rt: &Path,
-    batch_items: &[TestItem],
-    deadline_ms: u64,
-    _optimistic_no_fork: bool,
-    _batch_trusted: std::collections::HashSet<String>,
-) -> Result<Vec<TestResult>, String> {
-    // The no-fork path always snapshots/restores (its only isolation without COW); the fork-only knobs
-    // (optimistic ladder, trusted-pure bare no-fork) don't apply. One process per batch, pool_size 1.
-    let mut worker = SubprocessWorker::new(deadline_ms, 1).with_target(py, sh, rt);
-    worker
-        .run(batch_items)
-        .map_err(|e| format!("execution failed: {e}"))
-}
-
-/// A test's locality key for scheduling — its module (the file part of the node id), so a module's
-/// tests co-locate on one worker and reuse its module/session snapshot.
-fn locality_key(node_id: &str) -> String {
-    node_id.split("::").next().unwrap_or(node_id).to_string()
+    let plan = RunPlan {
+        strategy: WorkerStrategy::platform_default(),
+        workers,
+        deadline_ms,
+        optimistic_no_fork,
+        trusted_pure: trusted.clone(),
+        ..RunPlan::default()
+    };
+    core_run_parallel(python, shim, root, items, &plan)
 }
 
 /// A sensible default worker count: the machine's parallelism, falling back to 4.
-pub fn default_workers() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-}
+pub use engine_core::runner::default_workers;
 
 #[cfg(test)]
 mod tests {
-    use super::{default_workers, locality_key, run_parallel};
+    use super::{default_workers, run_parallel};
     use engine_core::domain::{NodeId, ScopePath, TestItem, TestStyle};
+    use engine_core::runner::locality_key;
     use engine_core::testing::skip_live;
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
