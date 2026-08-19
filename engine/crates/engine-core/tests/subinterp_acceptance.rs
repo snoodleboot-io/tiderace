@@ -69,7 +69,9 @@ class TestGroup:
 fn expected(node_id: &str) -> Outcome {
     let leaf = node_id.rsplit("::").next().unwrap_or(node_id);
     if leaf.contains("error") {
-        Outcome::Error
+        // A body that raises is a FAILURE, as pytest reports it (TID-30); `error` is for a test
+        // that could not be attempted at all.
+        Outcome::Failed
     } else if leaf.contains("fail") {
         Outcome::Failed
     } else {
