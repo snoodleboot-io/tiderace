@@ -27,6 +27,7 @@ import ast
 import asyncio
 import copy
 import difflib
+import enum
 import importlib
 import importlib.util
 import inspect
@@ -1281,6 +1282,9 @@ class Engine:
         # `force_no_fork`: run THIS test in-process (no fork) — the pure-test fast path (~90× cheaper).
         # The caller asserts it's pure (purity guard); the guard re-checks and flags any escapee.
         module_key = _module_key(node_id)
+        if style in ("inherited_methods", "unresolved_class"):
+            return self._run_inherited(node_id, deadline_ms, force_no_fork, trusted_pure,
+                                       own_too=style == "unresolved_class")
         try:
             requested = self._requested(node_id, style)
             marks = self._marks(node_id, style)
@@ -1399,6 +1403,70 @@ class Engine:
             if impurity is not None:
                 resp["impurity"] = impurity
         return resp
+
+    def _run_inherited(self, node_id: str, deadline_ms: int, force_no_fork: bool,
+                       trusted_pure: bool, own_too: bool = False) -> dict:
+        """Run the test methods a class INHERITS rather than defines (TID-26).
+
+        Collection scans source text, so `class TestKuzuConformance(GraphStoreConformance)` looks
+        like a class with no tests — on a real corpus that silently dropped 129 tests, every backend
+        conformance suite among them, and the run stayed green. Only something holding the live class
+        can see through to the base, so the shim resolves it here and reports one result per method.
+
+        Methods defined in the class's OWN body are excluded by default: the source scan already
+        collected those, and running them here too would double-count them. `own_too` inverts that
+        for a class the scan did not recognise at all (`unresolved_class`), where it collected
+        nothing and this is the only report of the class's tests."""
+        module_key = _module_key(node_id)
+        cls_name = node_id.partition("::")[2]
+        try:
+            module = importlib.import_module(_module_name(module_key))
+            cls = getattr(module, cls_name)
+        except Exception as exc:  # noqa: BLE001 — a class we can't resolve contributes nothing
+            return {"node_id": node_id, "outcome": "error", "expanded": True, "variants": [],
+                    "detail": "".join(traceback.format_exception_only(type(exc), exc))}
+
+        # pytest's rule: a `Test*` class, or any `unittest.TestCase` subclass whatever its name.
+        # `PackOverridesBuiltinTests` is the second kind, which is why the name scan missed it.
+        if own_too and not (
+            cls.__name__.startswith("Test") or issubclass(cls, unittest.TestCase)
+        ):
+            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
+
+        own = set() if own_too else set(vars(cls))
+        inherited = sorted(
+            name for name in dir(cls)
+            if name.startswith("test") and name not in own and callable(getattr(cls, name, None))
+        )
+        # `expanded` says "these variants are the whole answer", so an empty list means this class
+        # contributes nothing — distinct from a node that simply isn't parametrized.
+        if not inherited:
+            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
+
+        style = "unittest_method" if issubclass(cls, unittest.TestCase) else "class_method"
+        variants = []
+        for name in inherited:
+            child = f"{module_key}::{cls_name}::{name}"
+            started = time.perf_counter()
+            res = self.run(child, style, deadline_ms, force_no_fork, trusted_pure)
+            # A parametrized inherited method expands again; splice its cases in rather than nesting.
+            if res.get("variants"):
+                variants.extend(res["variants"])
+                continue
+            variant = {
+                "node_id": child,
+                "outcome": res["outcome"],
+                "detail": res.get("detail", ""),
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+            }
+            if res.get("coverage"):
+                variant["coverage"] = res["coverage"]
+            if "pure" in res:
+                variant["pure"] = res["pure"]
+            variants.append(variant)
+        worst = _aggregate([(v["outcome"], v.get("detail", "")) for v in variants])
+        return {"node_id": node_id, "outcome": worst[0], "detail": worst[1],
+                "expanded": True, "variants": variants}
 
     def _fork_run(self, node_id, style, requested, closure, combo, deadline_ms, case_kwargs=None,
                   force_no_fork=False, trusted_pure=False, must_fork=False) -> tuple:
@@ -2003,6 +2071,8 @@ def _id_part(value, argname: str, index: int) -> str:
     * anything else is `argname` + its index, because a `repr` would embed addresses and stop being
       stable between runs.
     """
+    if isinstance(value, enum.Enum):
+        return str(value)  # `OpaquePolicy.REPR_CONTENT`; before the int branch, since IntEnum is one
     if isinstance(value, str):
         return value.encode("unicode_escape").decode("ascii")
     if value is None or isinstance(value, (bool, int, float)):
