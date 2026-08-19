@@ -162,6 +162,9 @@ impl ShimTransport for InProcessTransport {
                 detail,
                 coverage,
                 pure,
+                // This transport speaks the one-request-one-result protocol and does not expand
+                // parametrization, so a node reports itself (TID-25).
+                variants: Vec::new(),
             })
         })
         .map_err(|e| EngineError::Exec(format!("in-process exchange failed: {e}")))

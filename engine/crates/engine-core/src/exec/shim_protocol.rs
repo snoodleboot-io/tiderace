@@ -83,6 +83,30 @@ pub struct ExecResponse {
     /// measured (forked / async / trusted-pure). Recordable verdicts drive the bare-no-fork fast path.
     #[serde(default)]
     pub pure: Option<bool>,
+    /// One entry per parametrization case, when the node has any (TID-25).
+    ///
+    /// The shim already runs — and forks — each case separately, so these results are produced
+    /// whether or not anyone reports them; collapsing to the node's worst outcome simply discarded
+    /// work already done. Omitted entirely for an unparametrized node, which keeps its frame
+    /// byte-identical to before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<VariantResult>,
+}
+
+/// One parametrization case's result — a pytest-style `node_id[params]` and its own outcome.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VariantResult {
+    pub node_id: String,
+    /// Wire outcome token; parse with [`crate::domain::Outcome::from_wire`].
+    pub outcome: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub coverage: std::collections::BTreeMap<String, Vec<u32>>,
+    #[serde(default)]
+    pub pure: Option<bool>,
 }
 
 /// Write a length-prefixed (u32 LE) JSON frame.

@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use serde_json::Value;
 
-use crate::domain::{Outcome, TestItem, TestResult};
+use crate::domain::{NodeId, Outcome, TestItem, TestResult};
 use crate::error::{EngineError, Result};
 use crate::exec::shim_protocol::{read_frame, write_frame, ExecRequest, ExecResponse};
 
@@ -67,6 +67,22 @@ pub(crate) fn run_batch<T: ShimTransport + ?Sized>(
         let start = Instant::now();
         let resp = transport.exchange(&req)?;
         let duration_ms = start.elapsed().as_millis() as u64;
+        // A parametrized node reports one result per case (TID-25). The cases already ran and forked
+        // individually, so this reports what was executed rather than the worst of it.
+        if !resp.variants.is_empty() {
+            results.extend(resp.variants.into_iter().map(|v| {
+                let touched = v.coverage.keys().cloned().collect();
+                TestResult::new(
+                    NodeId::new(v.node_id),
+                    Outcome::from_wire(&v.outcome),
+                    v.duration_ms,
+                    v.detail,
+                )
+                .with_touched(touched)
+                .with_pure(v.pure)
+            }));
+            continue;
+        }
         let touched = resp.coverage.keys().cloned().collect();
         results.push(
             TestResult::new(
@@ -200,6 +216,7 @@ mod tests {
                 detail,
                 coverage: Default::default(),
                 pure: None,
+                variants: Vec::new(),
             })
         }
     }
