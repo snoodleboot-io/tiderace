@@ -10,7 +10,25 @@ pub fn default_workers() -> usize {
 }
 
 /// The default per-test deadline, in milliseconds.
-pub const DEFAULT_DEADLINE_MS: u64 = 5_000;
+///
+/// A deadline exists to catch a **hang**, not to enforce speed, and 5s was doing the latter: pytest
+/// ships no per-test timeout at all (`pytest-timeout` is opt-in), and suites that do set one
+/// conventionally pick 60s — `pirn-agents` runs its own CI with `pytest --timeout=60`. At 5s a test
+/// that legitimately shells out to a fresh interpreter failed here and passed under pytest, which is
+/// a wrong red arriving through configuration rather than logic (TID-28).
+///
+/// The trade is asymmetric. A looser default costs one worker sitting on a genuine hang for 60s
+/// instead of 5; a tighter one costs false errors on every suite that spawns a subprocess, which is
+/// many. `--timeout` overrides either way.
+pub const DEFAULT_DEADLINE_MS: u64 = 60_000;
+
+/// Compile-time floor on the above. Tuning stays possible, but lowering it back into the seconds
+/// range has to confront the reasoning: a subprocess-spawning test on a large-import corpus needs an
+/// interpreter start plus the project import (~2.6s measured) before it does any work.
+const _: () = assert!(
+    DEFAULT_DEADLINE_MS >= 30_000,
+    "the default deadline must not be tight enough to fail slow-but-valid tests (TID-28)"
+);
 
 /// Everything a run needs to know about *how* to execute, separate from *what* to execute (TID-17).
 ///
