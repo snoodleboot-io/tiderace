@@ -29,7 +29,7 @@ Options for `run`:
       --strategy <TIER>   isolation tier: fork | subinterp | subprocess
                           (default: fork on Unix, subprocess elsewhere)
       --scheduler <KIND>  batch packing: locality | round-robin (default: locality)
-      --timeout <MS>      per-test deadline in milliseconds (default: 5000)
+      --timeout <MS>      per-test deadline in milliseconds (default: 60000)
       --no-fork           alias for --strategy subprocess
       --optimistic        let restorable tests skip the fork (~2.4x; see the note below)
   -q, --quiet             suppress the per-test lines; print only the tally
