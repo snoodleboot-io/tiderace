@@ -1124,6 +1124,28 @@ def _restore_shared(module, before: dict, env_before: dict) -> None:
         os.environ.update(env_before)
 
 
+def _restore_modules(before: dict) -> list:
+    """Put back any module a test REPLACED in `sys.modules`; returns the names it swapped (TID-27).
+
+    `_snapshot_shared` covers one module's globals, so it cannot see a test that evicts a *library*
+    module and re-imports it — which leaves two copies of every class that module defines. A test
+    holding the original then sets state the library, now bound to the replacement, cannot see. The
+    failure lands in an unrelated test with nothing pointing back at the cause.
+
+    The snapshot is a **shallow** `dict(sys.modules)`: identities only, ~1600 references, so it costs
+    microseconds rather than the deep copy `_snapshot_shared` pays. That is what makes covering the
+    whole interpreter affordable here when snapshotting every module's *contents* would not be.
+
+    Modules the test merely **added** are left alone. Those are a warmed import cache, not damage,
+    and evicting them would only make the next test pay to import them again."""
+    replaced = []
+    for name, module in before.items():
+        if sys.modules.get(name) is not module:
+            sys.modules[name] = module
+            replaced.append(name)
+    return replaced
+
+
 def _restorable(module) -> bool:
     """Whether a module's shared state is fully snapshot/restorable (no opaque mutable globals). A test
     in a non-restorable module can't use the no-fork restore path — it must fork for isolation."""
@@ -1644,10 +1666,23 @@ class Engine:
             mod = importlib.import_module(_module_name(module_key)) if need_snap else None
             before = _snapshot_shared(mod) if mod is not None else None
             env_before = dict(os.environ) if mod is not None else None
+            # Tracked independently of the per-module snapshot: `sys.modules` is interpreter-global,
+            # and a test can swap a library module without touching a single global of its own
+            # (TID-27). Cheap enough to do unconditionally on the in-process path.
+            modules_before = dict(sys.modules) if (self.restore and in_process) else None
             outcome, detail = _invoke(node_id, style, test_args)
             purity = _purity_verdict(mod, before, env_before) if mod is not None else _UNKNOWN_PURITY
             if self.restore and in_process and mod is not None and purity is not None:
                 _restore_shared(mod, before, env_before)  # undo the mutation → next test isolated
+            if modules_before is not None:
+                replaced = _restore_modules(modules_before)
+                if replaced:
+                    # Impure whatever the globals said: `_purity_verdict` cannot see this, and a test
+                    # recorded pure would later take the BARE no-fork tier, which skips the snapshot
+                    # entirely and would leave the swap in place for good (TID-1).
+                    shown = ", ".join(sorted(replaced)[:3])
+                    more = f" (+{len(replaced) - 3} more)" if len(replaced) > 3 else ""
+                    purity = f"replaced modules in sys.modules: {shown}{more}"
             return outcome, detail, cov.stop(), purity
         finally:
             cov.stop()  # idempotent — frees the monitoring tool id even if setup raised
