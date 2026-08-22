@@ -180,13 +180,17 @@ class FixtureDef:
 
     __slots__ = (
         "name", "scope", "params", "autouse", "func", "location", "deps", "is_yield",
-        "bindings", "provides_type",
+        "bindings", "provides_type", "param_ids",
     )
 
-    def __init__(self, name, scope, params, autouse, func, location, bindings=None, provides_type=None):
+    def __init__(self, name, scope, params, autouse, func, location, bindings=None, provides_type=None,
+                 param_ids=None):
         self.name = name
         self.scope = scope if isinstance(scope, str) else "function"
         self.params = list(params) if params else None
+        # `@pytest.fixture(params=[...], ids=[...])` — a list, or a callable applied per value.
+        # Carried so a parametrized fixture's cases id the way pytest spells them (TID-25).
+        self.param_ids = param_ids
         self.autouse = bool(autouse)
         self.func = func
         self.location = location  # module key ('tests/m.py') for module fixtures, or dir for conftest
@@ -552,6 +556,7 @@ def _fixture_def(obj, location: str) -> FixtureDef:
         autouse=getattr(marker, "autouse", False),
         func=obj._fixture_function,
         location=location,
+        param_ids=getattr(marker, "ids", None),
     )
 
 
@@ -1364,10 +1369,17 @@ class Engine:
         closure = _closure(self.reg, module_key, fixture_requested, uses)
         parametrized = [d for d in closure if d.params]
         if parametrized:
-            axes = [[(d.name, p) for p in d.params] for d in parametrized]
-            combos = [dict(c) for c in itertools.product(*axes)]
+            axes = [
+                [(d.name, p, _fixture_param_id(d, i, p)) for i, p in enumerate(d.params)]
+                for d in parametrized
+            ]
+            product = list(itertools.product(*axes))
+            combos = [{n: v for n, v, _ in c} for c in product]
+            # Aligned with `combos`: the author's id per axis, or None where one must be generated.
+            combo_id_maps = [{n: i for n, _, i in c} for c in product]
         else:
             combos = [{}]
+            combo_id_maps = [{}]
 
         outcomes: list[tuple[str, str]] = []
         coverage: dict[str, set] = {}  # union of touched lines across all variants of this node
@@ -1378,9 +1390,25 @@ class Engine:
         # paid for — the tally lost the passes, and a node with several failures kept one detail.
         parametrized_node = bool(combos != [{}] or case_kwargs_list != [{}])
         variants: list[dict] = []
-        seen_ids: dict[str, int] = {}
+        # Ids are computed for the WHOLE node up front: pytest indexes every member of a colliding
+        # group, which cannot be decided while walking the variants one at a time.
+        specs = [
+            (combo, combo_ids, case_pos, case_kwargs)
+            for combo, combo_ids in zip(combos, combo_id_maps)
+            for case_pos, case_kwargs in enumerate(case_kwargs_list)
+        ]
+        variant_ids = [
+            # Brackets whenever the node IS parametrized, even when the id text is empty: a case
+            # whose only value is `""` is `test_x[]` in pytest, which is not the same as an
+            # unparametrized `test_x`.
+            f"{node_id}[{text}]" if parametrized_node else node_id
+            for text in _disambiguate([
+                _variant_parts(combo, combo_ids, case_kwargs, i, case_ids[case_pos])
+                for i, (combo, combo_ids, case_pos, case_kwargs) in enumerate(specs)
+            ])
+        ]
         variant_index = 0
-        for combo in combos:
+        for combo, combo_ids in zip(combos, combo_id_maps):
             self._sync_wider(closure, node_id)
             for case_pos, case_kwargs in enumerate(case_kwargs_list):
                 started = time.perf_counter()
@@ -1389,10 +1417,7 @@ class Engine:
                     force_no_fork, trusted_pure, must_fork)
                 if parametrized_node:
                     variant = {
-                        "node_id": _variant_id(
-                            node_id, combo, case_kwargs, variant_index, seen_ids,
-                            case_ids[case_pos],
-                        ),
+                        "node_id": variant_ids[variant_index],
                         "outcome": oc,
                         "detail": detail,
                         "duration_ms": int((time.perf_counter() - started) * 1000),
@@ -2153,24 +2178,58 @@ def _id_part(value, argname: str, index: int) -> str:
     return f"{argname}{index}"
 
 
-def _variant_id(node_id: str, combo: dict, case_kwargs: dict, index: int, seen: dict,
-                explicit: str | None = None) -> str:
-    """`node_id[params]` for one variant, unique within the node (TID-25).
+def _fixture_param_id(fdef, index: int, value):
+    """The author-supplied id for one parametrized-FIXTURE case, or None to generate one.
+
+    `@pytest.fixture(params=[...], ids=[...])` takes the same shapes `parametrize` does, so this
+    mirrors `_explicit_id`. Kept separate because a fixture's ids live on its definition rather than
+    on a mark, and the two are resolved at different points."""
+    ids = getattr(fdef, "param_ids", None)
+    if ids is None:
+        return None
+    try:
+        produced = ids(value) if callable(ids) else ids[index]
+    except Exception:  # noqa: BLE001 — a malformed `ids` must not take the test down
+        return None
+    return None if produced is None else str(produced)
+
+
+def _variant_parts(combo: dict, combo_ids: dict, case_kwargs: dict, index: int,
+                   explicit: str | None = None) -> str:
+    """The inside of a variant's `[...]`, before duplicates are disambiguated.
 
     Parametrized-fixture values come first, then the test's own `parametrize` values, each in
-    declaration order. Duplicate ids (two cases whose values print alike) get an index suffix, as
-    pytest does — an id that collides is worse than an ugly one, because it cannot select."""
-    parts = [_id_part(v, k, index) for k, v in combo.items()]
+    declaration order, and an author-supplied id wins over anything generated."""
+    parts = [
+        combo_ids.get(k) if combo_ids.get(k) is not None else _id_part(v, k, index)
+        for k, v in combo.items()
+    ]
     if explicit is not None:
-        parts.append(explicit)  # the author named this case; theirs wins over anything generated
+        parts.append(explicit)
     else:
         parts += [_id_part(v, k, index) for k, v in case_kwargs.items()]
-    if not parts:
-        return node_id
-    base = f"{node_id}[{'-'.join(parts)}]"
-    n = seen.get(base, 0)
-    seen[base] = n + 1
-    return base if n == 0 else f"{base}{n}"
+    return "-".join(parts)
+
+
+def _disambiguate(parts: list) -> list:
+    """Suffix colliding ids the way pytest does — **every** member of a clash, indexed from 0.
+
+    Two cases whose values print alike produce the same text, and an id that collides cannot select.
+    pytest turns `as_tool, as_tool` into `as_tool0, as_tool1`; suffixing only the second (leaving the
+    first bare) is the obvious alternative and does not match, so a copied id would miss."""
+    seen: dict[str, int] = {}
+    counts: dict[str, int] = {}
+    for text in parts:
+        counts[text] = counts.get(text, 0) + 1
+    out = []
+    for text in parts:
+        if counts[text] == 1:
+            out.append(text)
+            continue
+        n = seen.get(text, 0)
+        seen[text] = n + 1
+        out.append(f"{text}{n}")
+    return out
 
 
 def _aggregate(outcomes: list[tuple[str, str]]) -> tuple[str, str]:
