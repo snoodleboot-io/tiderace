@@ -1564,21 +1564,43 @@ class Engine:
             os._exit(0)
 
         os.close(write_fd)
-        ready, _, _ = select.select([read_fd], [], [], deadline_ms / 1000.0)
-        if not ready:
+        # The deadline covers the WHOLE exchange, not just the first byte (TID-31). `select` used to
+        # guard only the initial wait; a child that wrote part of its frame and then hung satisfied
+        # it, and the parent blocked in `os.read` forever — taking the worker, and every remaining
+        # test in its batch, with it, silently. A frame larger than the 64 KB pipe buffer (a long
+        # traceback, a rich diff, a wide coverage map) is written across several `write` calls, so
+        # this is reachable rather than theoretical.
+        deadline_at = time.monotonic() + deadline_ms / 1000.0
+        data = b""
+        timed_out = False
+        while True:
+            remaining = deadline_at - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            ready, _, _ = select.select([read_fd], [], [], remaining)
+            if not ready:
+                timed_out = True
+                break
+            chunk = os.read(read_fd, 65536)
+            if not chunk:
+                break  # EOF: the child closed the pipe, so the frame is whatever we have
+            data += chunk
+        if timed_out:
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             os.waitpid(pid, 0)
             os.close(read_fd)
+            if data:
+                # Distinct from a silent timeout on purpose: a child that produced half a frame is a
+                # different fault from one that produced nothing, and saying which is the whole
+                # point of TID-15.
+                return ("error",
+                        f"timeout after writing {len(data)} bytes of a partial result frame — the "
+                        f"child began reporting and then stopped", {}, _UNKNOWN_PURITY)
             return "error", "timeout", {}, _UNKNOWN_PURITY
-        data = b""
-        while True:
-            chunk = os.read(read_fd, 65536)
-            if not chunk:
-                break
-            data += chunk
         os.close(read_fd)
         _, status = os.waitpid(pid, 0)
         if not data:
