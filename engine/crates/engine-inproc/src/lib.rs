@@ -162,6 +162,12 @@ impl ShimTransport for InProcessTransport {
                 detail,
                 coverage,
                 pure,
+                // This transport speaks the one-request-one-result protocol and does not expand
+                // parametrization or resolve inherited methods, so a node reports itself
+                // (TID-25/TID-26). `expanded: false` keeps the empty `variants` meaning "not
+                // expanded" rather than "this class contributes nothing".
+                variants: Vec::new(),
+                expanded: false,
             })
         })
         .map_err(|e| EngineError::Exec(format!("in-process exchange failed: {e}")))

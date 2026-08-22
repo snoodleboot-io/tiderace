@@ -104,7 +104,9 @@ class TestSkipFromSetUp(unittest.TestCase):
 fn expected(node_id: &str) -> Outcome {
     let leaf = node_id.rsplit("::").next().unwrap_or(node_id);
     if leaf.contains("error") {
-        Outcome::Error
+        // A body that raises is a FAILURE, as pytest reports it (TID-30). The guard this corpus
+        // exists for is unchanged: a raising body must not be swallowed into "skipped".
+        Outcome::Failed
     } else if leaf.contains("failure") {
         Outcome::Failed
     } else {
