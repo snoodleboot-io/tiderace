@@ -90,7 +90,7 @@ fn daemon_discovers_runs_and_stays_warm_over_a_real_wellspring() {
             RpcRequest::Run { node_ids: vec![] }, // all
             RpcRequest::Health,                   // warm after the first Run
             RpcRequest::Run {
-                node_ids: vec![format!("test_sample.py::test_pass")],
+                node_ids: vec!["test_sample.py::test_pass".to_string()],
             }, // reuse the wellspring
             RpcRequest::Shutdown,
         ])),
