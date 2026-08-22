@@ -627,6 +627,96 @@ _ROOTDIR_MARKERS = ("pyproject.toml", "setup.cfg", "tox.ini", "setup.py")
 _ANCESTOR_CONFTESTS: dict[str, list] = {}
 
 
+# The `-m` expression from the project's pytest config, or None when there is none (TID-32).
+# Populated once during discovery; consulted per node in `Engine.run`.
+_MARKER_EXPR = None
+
+
+def _read_addopts(start: str) -> str:
+    """`addopts` from the nearest pytest config at or above `start`, or "" if there is none.
+
+    Searched in pytest's own precedence order, and stopping at the first file that *carries* a
+    pytest section rather than the first file that exists — a `pyproject.toml` with no
+    `[tool.pytest.ini_options]` does not mean the project has no pytest config."""
+    directory = os.path.abspath(start)
+    while True:
+        for name in ("pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"):
+            path = os.path.join(directory, name)
+            if not os.path.exists(path):
+                continue
+            try:
+                if name == "pyproject.toml":
+                    import tomllib
+                    with open(path, "rb") as fh:
+                        section = tomllib.load(fh).get("tool", {}).get("pytest", {})
+                        section = section.get("ini_options", {}) if section else {}
+                else:
+                    import configparser
+                    parser = configparser.ConfigParser()
+                    parser.read(path)
+                    header = "tool:pytest" if name == "setup.cfg" else "pytest"
+                    section = dict(parser[header]) if parser.has_section(header) else {}
+            except Exception:  # noqa: BLE001 — an unreadable config must not stop the run
+                continue
+            if section:
+                return str(section.get("addopts", "") or "")
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return ""
+        directory = parent
+
+
+def _marker_expr_from(addopts: str):
+    """The `-m EXPR` value out of an `addopts` string, in the three spellings pytest accepts."""
+    if not addopts:
+        return None
+    try:
+        import shlex
+        argv = shlex.split(addopts)
+    except ValueError:  # noqa: BLE001 — unbalanced quotes; treat as no filter rather than guessing
+        return None
+    for i, arg in enumerate(argv):
+        if arg == "-m" and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("-m=") :
+            return arg[3:]
+        if arg.startswith("-m") and len(arg) > 2:
+            return arg[2:]
+    return None
+
+
+def _compile_marker_expr(expr: str):
+    """A predicate over a set of mark names for one pytest `-m` expression.
+
+    Evaluated over the parsed AST rather than with `eval`: the expression comes from a config file,
+    and the grammar pytest actually supports here is only names, `and`, `or`, `not` and parentheses.
+    An expression using anything else returns None — a filter we cannot read correctly must select
+    everything rather than silently deselect the wrong tests."""
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return None
+
+    def evaluate(node, marks: set) -> bool:
+        if isinstance(node, ast.BoolOp):
+            results = [evaluate(v, marks) for v in node.values]
+            return all(results) if isinstance(node.op, ast.And) else any(results)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return not evaluate(node.operand, marks)
+        if isinstance(node, ast.Name):
+            return node.id in marks
+        if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+            return node.value
+        raise ValueError(f"unsupported marker expression node: {type(node).__name__}")
+
+    try:  # reject the whole expression now rather than per node at run time
+        evaluate(tree.body, set())
+    except ValueError as exc:
+        print(f"tiderace: ignoring -m {expr!r}: {exc}", file=sys.stderr, flush=True)
+        return None
+    return lambda marks: evaluate(tree.body, marks)
+
+
 def _rootdir(root: str) -> str | None:
     """The nearest ancestor of `root` holding a project marker, or None if there is none.
 
@@ -729,6 +819,12 @@ def _discover(root: str) -> Registry:
     # After every conftest is loaded and every test module imported — the hooks need both, and the
     # marks they inspect only exist once the decorators have run.
     _run_collection_hooks(conftests, test_modules)
+
+    # The project's own `-m` filter (TID-32). Read here rather than at each node so a malformed
+    # expression is reported once.
+    global _MARKER_EXPR
+    expr = _marker_expr_from(_read_addopts(root))
+    _MARKER_EXPR = _compile_marker_expr(expr) if expr else None
 
     # Native providers wire by type, so provider→provider deps need the FULL type set first: build the
     # type index, then build the defs (a two-pass the name-DI pytest path doesn't need).
@@ -1317,6 +1413,11 @@ class Engine:
         if style in ("inherited_methods", "unresolved_class"):
             return self._run_inherited(node_id, deadline_ms, force_no_fork, trusted_pure,
                                        own_too=style == "unresolved_class")
+        # Deselected by the project's own `-m` filter (TID-32). Reported as an EMPTY expansion
+        # rather than a skip: pytest deselects these, so they must not appear in the tally at all —
+        # a skip would be a different, visible outcome.
+        if _MARKER_EXPR is not None and not _MARKER_EXPR(_pytest_mark_names(node_id, style)):
+            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
         try:
             requested = self._requested(node_id, style)
             marks = self._marks(node_id, style)
@@ -1907,6 +2008,23 @@ def _explicit_id(ids_kw, values: tuple, position: int):
         return ids_kw[position]
     except Exception:  # noqa: BLE001 — a malformed `ids` must not take the test down
         return None
+
+
+def _pytest_mark_names(node_id: str, style: str) -> set:
+    """The `@pytest.mark.*` names on a test, from its module, its class and the function itself."""
+    try:
+        module = importlib.import_module(_module_name(_module_key(node_id)))
+    except Exception:  # noqa: BLE001 — an unimportable module surfaces per node, not here
+        return set()
+    owners = [module]
+    if style in ("class_method", "unittest_method"):
+        cls_name, method = _class_method(node_id)
+        cls = getattr(module, cls_name, None)
+        owners.append(cls)
+        owners.append(getattr(cls, method, None) if cls is not None else None)
+    else:
+        owners.append(getattr(module, node_id.partition("::")[2], None))
+    return {getattr(m, "name", "") for m in _own_markers(*owners)}
 
 
 def _skip_decision(marks: list):

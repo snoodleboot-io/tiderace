@@ -1,3 +1,12 @@
 [project]
 name = "tiderace-differential-corpus"
 version = "0.0.0"
+
+# Exercises TID-32: tiderace must honour the project's own -m filter, so a marked test is
+# DESELECTED by both runners rather than run by one of them.
+[tool.pytest.ini_options]
+addopts = "-m 'not slow'"
+markers = [
+    "slow: excluded from an ordinary run",
+    "needs_backend: gated behind --real by the ancestor conftest",
+]

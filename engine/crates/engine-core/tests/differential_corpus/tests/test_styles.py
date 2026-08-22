@@ -71,3 +71,12 @@ class TestAsyncStyle(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_fails(self):
         assert False
+
+
+@pytest.mark.slow
+def test_deselected_by_addopts():
+    raise AssertionError("addopts says -m 'not slow'; this must never run")
+
+
+def test_not_deselected():
+    assert True
