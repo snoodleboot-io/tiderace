@@ -1166,8 +1166,13 @@ async def _invoke_async(node_id: str, style: str, args: dict) -> tuple[str, str]
         return "failed", (rich + plain) if rich else plain
     except _SKIP_EXCEPTIONS as exc:
         return "skipped", str(exc)
-    except Exception as exc:  # noqa: BLE001 — any test error maps to Outcome::Error
-        return "error", "".join(traceback.format_exception_only(type(exc), exc))
+    except Exception as exc:  # noqa: BLE001 — a body that raises FAILED; it ran and came out wrong
+        # pytest reserves `error` for a test it could not attempt — a fixture that raised, a module
+        # that would not import — and calls anything the body raises a failure, assertion or not
+        # (TID-30, verified against pytest directly). tiderace split on exception type instead, so
+        # `raise RuntimeError` reported `error` where pytest reports `failed`. Both are red, but the
+        # taxonomy leaked into the reporters and made the two runners impossible to reconcile.
+        return "failed", "".join(traceback.format_exception_only(type(exc), exc))
 
 
 class _Coverage:
@@ -1865,8 +1870,13 @@ def _invoke(node_id: str, style: str, args: dict) -> tuple[str, str]:
         return "failed", (rich + plain) if rich else plain
     except _SKIP_EXCEPTIONS as exc:
         return "skipped", str(exc)
-    except Exception as exc:  # noqa: BLE001 — any test error maps to Outcome::Error
-        return "error", "".join(traceback.format_exception_only(type(exc), exc))
+    except Exception as exc:  # noqa: BLE001 — a body that raises FAILED; it ran and came out wrong
+        # pytest reserves `error` for a test it could not attempt — a fixture that raised, a module
+        # that would not import — and calls anything the body raises a failure, assertion or not
+        # (TID-30, verified against pytest directly). tiderace split on exception type instead, so
+        # `raise RuntimeError` reported `error` where pytest reports `failed`. Both are red, but the
+        # taxonomy leaked into the reporters and made the two runners impossible to reconcile.
+        return "failed", "".join(traceback.format_exception_only(type(exc), exc))
 
 
 def _maybe_await(result):
@@ -1923,7 +1933,10 @@ def _invoke_unittest(module, node_id: str) -> tuple[str, str]:
                 pass
 
     if result.errors:
-        return "error", result.errors[0][1]
+        # unittest files body, setUp and tearDown exceptions all under `errors`, and pytest reports
+        # every one of those as FAILED — checked against pytest rather than assumed (TID-30). Only a
+        # fixture fault stays an error, and that path never reaches here.
+        return "failed", result.errors[0][1]
     if result.failures:  # includes subTest failures (each recorded with its sub-description)
         return "failed", result.failures[0][1]
     if getattr(result, "unexpectedSuccesses", None):

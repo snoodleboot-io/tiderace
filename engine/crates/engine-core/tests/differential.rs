@@ -35,10 +35,10 @@ use engine_core::testing::skip_live;
 /// allowlist that merely tolerates differences rots into a list of forgotten bugs; one that breaks
 /// when the bug is fixed cannot.
 ///
-/// * `test_function_errors` — a body that raises is `error` here and `failed` under pytest, which
-///   reserves `error` for tests it could not attempt. TID-30.
-const KNOWN_DIVERGENCES: &[(&str, &str, &str)] =
-    &[("test_styles.py::test_function_errors", "error", "failed")];
+/// Empty, and that is the goal state. TID-30's entry — a body that raises reporting `error` where
+/// pytest says `failed` — was removed when it was fixed, which is the mechanism working: the gate
+/// fails while a stale entry remains, so a fixed divergence cannot be left recorded as expected.
+const KNOWN_DIVERGENCES: &[(&str, &str, &str)] = &[];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
