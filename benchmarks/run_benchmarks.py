@@ -87,13 +87,14 @@ class ScenarioResult:
 # Fixture generation
 # --------------------------------------------------------------------------- #
 def regenerate_fixture(modules: int, tests_per_module: int, work_ms: int,
-                       python: str) -> int:
+                       python: str, eager_modules: int = 0) -> int:
     """Regenerate the fixture deterministically; return the total test count."""
     cmd = [
         python, str(GENERATE_PY),
         "--modules", str(modules),
         "--tests-per-module", str(tests_per_module),
         "--work-ms", str(work_ms),
+        "--eager-modules", str(eager_modules),
         "--out", str(FIXTURE_DIR),
     ]
     print(f"  regenerating fixture: {shlex.join(cmd)}")
@@ -284,6 +285,10 @@ def write_results(results: list[ScenarioResult], meta: dict) -> None:
     lines.append(f"- total tests: **{meta['total_tests']}**")
     lines.append(f"- per-test work: **{meta['work_ms']} ms** "
                  "(0 = pure-CPU; interpreter startup dominates)")
+    eager = meta.get("eager_modules", 0)
+    lines.append(f"- eagerly-imported package: **{eager} modules**"
+                 + (" (large-import shape — fork cost scales with parent footprint)"
+                    if eager else " (light parent; fork is cheap here)"))
     lines.append(f"- hyperfine runs: **{meta['runs']}** (warmup {meta['warmup']})")
     lines.append(f"- tiderace: `{meta['tiderace']}`")
     lines.append(f"- python: `{meta['python']}`")
@@ -386,6 +391,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="number of source modules / pytest test modules")
     ap.add_argument("--tests-per-module", type=int, default=10,
                     help="pytest tests per module (×2: compute + bounded)")
+    ap.add_argument("--eager-modules", type=int, default=0,
+                    help="add an eagerly-imported package of N modules, loaded by conftest so the "
+                         "wellspring is large before it forks. This is the shape fork-per-test is "
+                         "worst at, and the one a small fixture hides entirely (TID-18): measured "
+                         "on a real corpus, ~800 modules puts the parent near 66 MB, and every "
+                         "fork copies its page tables. Try 800.")
     ap.add_argument("--work-ms", type=int, default=0,
                     help="fixed sleep per test in ms (0 = pure CPU, default)")
     ap.add_argument("--runs", type=int, default=10,
@@ -404,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
     preflight(args.tiderace, args.python)
 
     total = regenerate_fixture(args.modules, args.tests_per_module,
-                               args.work_ms, args.python)
+                               args.work_ms, args.python, args.eager_modules)
     snapshot_pristine()
 
     json_dir = BENCH_DIR / ".hyperfine"
@@ -426,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
         "tests_per_module": args.tests_per_module,
         "total_tests": total,
         "work_ms": args.work_ms,
+        "eager_modules": args.eager_modules,
         "runs": args.runs,
         "warmup": args.warmup,
         "tiderace": args.tiderace,
