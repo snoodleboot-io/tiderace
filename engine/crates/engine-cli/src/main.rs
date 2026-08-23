@@ -33,6 +33,7 @@ Options for `run`:
       --no-fork           alias for --strategy subprocess
       --optimistic        let restorable tests skip the fork (the default; kept for scripts)
       --no-optimistic     fork every test, even the restorable ones (see the note below)
+      --shared-import     import the project once and fork the workers from it (saves CI CPU)
   -q, --quiet             suppress the per-test lines; print only the tally
   -h, --help              show this message
 
@@ -51,6 +52,12 @@ Notes:
   leaves running: it is caught and that test is demoted, but a neighbour counting threads still
   sees it. A forked child is a whole pristine process and has no such hole, so this is the setting
   to reach for when a suite disagrees with itself between the two.
+
+  `--shared-import` runs one Python parent that imports the project once and forks a worker from it
+  per core, instead of N independent parents that each import it. Wall clock barely moves — the
+  imports already overlap — but the CPU does: on a large-import project an 8-worker run stops paying
+  for eight imports. That is invisible on a laptop with spare cores and is the whole cost on a CI
+  runner billed for CPU. Opt-in while it earns its soak time; fork tier only.
 
   `--strategy subinterp` is a hybrid: a sub-interpreter cannot load a single-phase C extension
   (numpy is the canonical case), so modules are probed and only the safe subset runs on the pool;
@@ -180,6 +187,7 @@ impl Options {
                 // Accepted and inert: it is the default now, and it is in people's scripts.
                 "--optimistic" => plan.optimistic_no_fork = true,
                 "--no-optimistic" => plan.optimistic_no_fork = false,
+                "--shared-import" => plan.shared_import = true,
                 "-q" | "--quiet" => quiet = true,
                 other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
                 _ => {
@@ -367,6 +375,14 @@ mod tests {
         assert!(o.quiet);
         assert!(o.plan.optimistic_no_fork);
         assert!(o.plan.header().contains("optimistic-no-fork"));
+    }
+
+    #[test]
+    fn shared_import_is_opt_in() {
+        assert!(!parse(&["tests"]).expect("parses").plan.shared_import);
+        let o = parse(&["--shared-import", "tests"]).expect("parses");
+        assert!(o.plan.shared_import);
+        assert!(o.plan.header().contains("shared-import"));
     }
 
     #[test]

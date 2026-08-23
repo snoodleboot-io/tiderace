@@ -3,9 +3,9 @@ use std::path::Path;
 use std::thread;
 
 use crate::domain::{TestItem, TestResult};
-#[cfg(unix)]
-use crate::exec::ForkWorker;
 use crate::exec::{probe_modules, SubInterpWorker, SubprocessWorker, Worker};
+#[cfg(unix)]
+use crate::exec::{ForkWorker, PooledWorker, WellspringPool};
 use crate::runner::{RunPlan, WorkerStrategy};
 use crate::scheduler::{ScheduleInput, ScheduledTest};
 
@@ -55,6 +55,19 @@ fn run_batched(
     }
     let workers = plan.effective_workers(items.len());
 
+    // TID-4: one imported image, forked per worker. Stood up before the batch loop so the import is
+    // finished — and paid once — before any worker starts. Fork-tier only: the subprocess and
+    // sub-interpreter tiers have no wellspring to share, by construction.
+    #[cfg(unix)]
+    let mut pool = if plan.shared_import && matches!(strategy, WorkerStrategy::Fork) {
+        // Launched with restore unconditionally, exactly as `ForkWorker::launch_optimistic` does:
+        // it costs nothing when the ladder is off, and it makes the unsound combination — in-process
+        // execution with no snapshot — unreachable rather than merely unused.
+        Some(WellspringPool::launch(python, shim, root, true, workers).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+
     // node id -> item, to rebuild each batch's TestItems from the scheduler's NodeId batches.
     let mut by_node: HashMap<String, TestItem> = items
         .iter()
@@ -98,7 +111,27 @@ fn run_batched(
             deadline_ms: plan.deadline_ms,
             optimistic_no_fork: plan.optimistic_no_fork,
         };
+        // A pooled transport is owned outright, so it moves into the thread without borrowing the
+        // pool. The pool itself must outlive the threads — it is dropped after the joins below,
+        // because its parent process only exits once every worker connection has closed.
+        #[cfg(unix)]
+        let pooled = pool.as_mut().and_then(|p| p.take_worker());
+        #[cfg(not(unix))]
+        let pooled: Option<()> = None;
+
         handles.push(thread::spawn(move || -> Result<Vec<TestResult>, String> {
+            #[cfg(unix)]
+            if let Some(transport) = pooled {
+                let mut worker = PooledWorker::new(transport, exec.deadline_ms)
+                    .with_optimistic_no_fork(exec.optimistic_no_fork)
+                    .with_trusted_pure(batch_trusted)
+                    .with_must_fork(batch_must_fork);
+                return worker
+                    .run(&batch_items)
+                    .map_err(|e| format!("execution failed: {e}"));
+            }
+            #[cfg(not(unix))]
+            let _ = pooled;
             run_batch(
                 exec,
                 &py,
@@ -112,14 +145,27 @@ fn run_batched(
     }
 
     let mut all = Vec::new();
+    let mut first_err = None;
     for handle in handles {
-        all.extend(
-            handle
-                .join()
-                .map_err(|_| "worker thread panicked".to_string())??,
-        );
+        match handle.join() {
+            Ok(Ok(results)) => all.extend(results),
+            Ok(Err(e)) => {
+                first_err.get_or_insert(e);
+            }
+            Err(_) => {
+                first_err.get_or_insert_with(|| "worker thread panicked".to_string());
+            }
+        }
     }
-    Ok(all)
+    // Every worker connection is closed by now (the threads owned them), so the pool's parent can
+    // exit. Dropping it here rather than on the `?` path above is what keeps a failing run from
+    // leaving an orphaned parent behind holding the imported image.
+    #[cfg(unix)]
+    drop(pool.take());
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(all),
+    }
 }
 
 /// The sub-interpreter tier (ADR-E015 / TID-11): probe each module, run the **safe** subset on one
