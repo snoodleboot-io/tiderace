@@ -4,7 +4,7 @@ repository:
   mappings: {}
 spec:
   language: rust
-  runtime: '1.75'
+  runtime: '1.76'
   package_manager: Cargo
   test_framework: built-in
   linter:
@@ -12,6 +12,7 @@ spec:
   linters:
     - clippy
   formatter: rustfmt
+  abstract_class_style: interface
   coverage:
     line: 80
     branch: 70
@@ -20,10 +21,18 @@ spec:
     mutation: 80
     path: 60
   repo_type: single-language
-  version: '1.76'
-variant: minimal
+  layout_style: src
+  error_handling: Not specified
+project:
+  commit_style: ''
+  pr_size: ''
+  deploy_target: ''
+variant: verbose
 active_personas:
   - backend_software_engineer
+  - frontend_software_engineer
+  - fullstack_software_engineer
+  - software_engineer
   - architect
   - qa_tester
   - devops_engineer
