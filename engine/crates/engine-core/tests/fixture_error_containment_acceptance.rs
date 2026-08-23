@@ -38,7 +38,14 @@ fn shim() -> PathBuf {
     repo_root().join("engine/py-shim/shim.py")
 }
 
+/// The fx venv first: on CI the bare `actions/setup-python` interpreter has no pytest, and these
+/// corpora define real `@pytest.fixture`s, so picking `python3` there means the conftest fails to
+/// import and every fixture silently does not exist — which looks exactly like the bug under test.
 fn any_python() -> Option<String> {
+    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
+    if venv.exists() {
+        return Some(venv.to_string_lossy().into_owned());
+    }
     for cand in ["python3", "python"] {
         let ok = std::process::Command::new(cand)
             .arg("--version")
@@ -50,6 +57,18 @@ fn any_python() -> Option<String> {
         }
     }
     None
+}
+
+/// An interpreter that can `import pytest`. Without one these corpora cannot express what they are
+/// testing, so the tests self-skip rather than assert something they did not actually exercise.
+fn python_with_pytest() -> Option<String> {
+    let python = any_python()?;
+    let ok = std::process::Command::new(&python)
+        .args(["-c", "import pytest"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    ok.then_some(python)
 }
 
 fn scratch(tag: &str) -> PathBuf {
@@ -131,8 +150,8 @@ fn write_containment_corpus() -> PathBuf {
 /// `pytest.ini` bounds the ancestor-conftest walk, so a session fixture defined beside it resolves.
 #[test]
 fn pytest_ini_marks_the_rootdir_so_ancestor_conftests_load() {
-    let Some(python) = any_python() else {
-        skip_live("no Python interpreter available");
+    let Some(python) = python_with_pytest() else {
+        skip_live("no interpreter with pytest available");
         return;
     };
     let dir = write_rootdir_corpus();
@@ -154,8 +173,8 @@ fn pytest_ini_marks_the_rootdir_so_ancestor_conftests_load() {
 /// A fixture that raises errors *its* test. The rest of the batch still runs and still reports.
 #[test]
 fn a_failing_fixture_errors_its_test_without_taking_the_batch_down() {
-    let Some(python) = any_python() else {
-        skip_live("no Python interpreter available");
+    let Some(python) = python_with_pytest() else {
+        skip_live("no interpreter with pytest available");
         return;
     };
     let dir = write_containment_corpus();
