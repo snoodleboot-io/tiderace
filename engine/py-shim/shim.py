@@ -1490,6 +1490,98 @@ async def _invoke_async(node_id: str, style: str, args: dict) -> tuple[str, str]
         return "failed", "".join(traceback.format_exception_only(type(exc), exc))
 
 
+# Per-module static import closure: module_key -> {rel_path, …} (TID-40). Built lazily, memoised for
+# the process, and inherited by every forked child.
+_IMPORT_CLOSURE: dict[str, frozenset] = {}
+
+
+def _imported_names(path: str) -> list[tuple[str, int]]:
+    """Every module a file imports, as `(dotted_name, relative_level)`.
+
+    AST rather than execution, because that is the whole point: a module's `import` lines run *once*,
+    for whichever test happens to be first, so nothing that watches execution can see the imports of
+    the nineteen tests that follow. Parsing sees all of them, in any order, every time."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read(), filename=path)
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return []  # unparseable ⇒ no closure; the runtime footprint still applies
+    out: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out.extend((a.name, 0) for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            out.append((base, node.level))
+            # `from pkg import mod` may name a submodule rather than an attribute; both resolve
+            # harmlessly, and a miss just contributes nothing.
+            out.extend((f"{base}.{a.name}" if base else a.name, node.level) for a in node.names)
+    return out
+
+
+def _resolve_module_file(dotted: str, level: int, from_file: str, root: str) -> str | None:
+    """The file a dotted import resolves to **inside the suite**, or None if it is external.
+
+    Third-party and stdlib imports are deliberately dropped: a footprint exists to answer "did
+    anything this test depends on change in this tree", and site-packages does not change between
+    runs of the same checkout."""
+    if level:  # relative import: resolve against the importing file's package
+        base_dir = os.path.dirname(os.path.abspath(from_file))
+        for _ in range(level - 1):
+            base_dir = os.path.dirname(base_dir)
+        candidates = [os.path.join(base_dir, *dotted.split(".")) if dotted else base_dir]
+    else:
+        candidates = [os.path.join(p, *dotted.split(".")) for p in sys.path if p]
+    for stem in candidates:
+        for candidate in (stem + ".py", os.path.join(stem, "__init__.py")):
+            if os.path.isfile(candidate):
+                abs_path = os.path.abspath(candidate)
+                # Only what lives under the run root; anything else is not ours to invalidate on.
+                if abs_path.startswith(os.path.abspath(root) + os.sep):
+                    return abs_path
+                return None
+    return None
+
+
+def _import_closure(module_key: str, root: str) -> frozenset:
+    """Every in-tree file a module transitively imports, plus the conftests above it.
+
+    This is the half of a test's dependency footprint that runtime coverage cannot produce (TID-40).
+    Coverage sees a module's imports execute exactly once — for whichever test in it ran first — so
+    on a twenty-test module the source under test appeared in one footprint out of twenty, and
+    impact selection served the other nineteen from cache after that source changed. It reported a
+    green suite that a full run reported as twenty failures.
+
+    Conftests are included because a change to one alters fixtures for everything beneath it, and
+    nothing in the runtime footprint necessarily mentions the conftest at all."""
+    cached = _IMPORT_CLOSURE.get(module_key)
+    if cached is not None:
+        return cached
+    root_abs = os.path.abspath(root)
+    start = os.path.join(root_abs, module_key.replace("/", os.sep))
+    seen: set[str] = set()
+    queue = [start]
+    while queue:
+        current = queue.pop()
+        for dotted, level in _imported_names(current):
+            resolved = _resolve_module_file(dotted, level, current, root)
+            if resolved and resolved not in seen:
+                seen.add(resolved)
+                queue.append(resolved)
+    # Every conftest from the run root down to this module's directory.
+    directory = os.path.dirname(start)
+    while directory.startswith(root_abs):
+        conftest = os.path.join(directory, "conftest.py")
+        if os.path.isfile(conftest):
+            seen.add(os.path.abspath(conftest))
+        if directory == root_abs:
+            break
+        directory = os.path.dirname(directory)
+    closure = frozenset(os.path.relpath(p, root_abs).replace(os.sep, "/") for p in seen)
+    _IMPORT_CLOSURE[module_key] = closure
+    return closure
+
+
 class _Coverage:
     """Per-test executed-source capture inside the fork child (ADR-E006, design 11). Uses PEP 669
     `sys.monitoring` LINE events on CPython 3.12+ (disabling each location once seen, so overhead is
@@ -1551,6 +1643,25 @@ class _Coverage:
 
     def _report(self) -> dict:
         return {os.path.relpath(p, self.root): sorted(lines) for p, lines in self.touched.items()}
+
+    def report_with_imports(self, module_key: str) -> dict:
+        """The runtime footprint plus the module's static import closure (TID-40).
+
+        The two halves answer different questions and neither is sufficient alone. Coverage says
+        what this test *executed*, which is the only way to know it reached a particular branch. The
+        closure says what its module *depends on*, which is the only way to know about code that was
+        imported before this test ran — i.e. everything, for every test after the first one in the
+        module.
+
+        Closure entries carry no line numbers. A footprint's line detail exists to narrow
+        invalidation to the lines a test actually ran; for an import dependency there is nothing to
+        narrow, and an empty list correctly means "any change to this file counts"."""
+        report = self._report()
+        if not self.enabled:
+            return report
+        for rel in _import_closure(module_key, self.root):
+            report.setdefault(rel, [])
+        return report
 
 
 class Engine:
@@ -2030,7 +2141,11 @@ class Engine:
                 outcome, detail = asyncio.run(
                     self._child_exec_async(node_id, style, requested, closure, combo, case_kwargs)
                 )
-                return outcome, detail, cov.stop(), _UNKNOWN_PURITY  # async purity not measured
+                cov.stop()
+                # Closure merged in here, not inside `_Coverage`, so the capture object stays purely
+                # about what executed and the module attribution is visible at the call site.
+                return (outcome, detail, cov.report_with_imports(module_key),
+                        _UNKNOWN_PURITY)  # async purity not measured
             finally:
                 cov.stop()
         try:
@@ -2090,7 +2205,8 @@ class Engine:
                     # quietly wrong, and the first run is where CI goes red for no visible reason.
                     self._leaked = drift
                     purity = f"disturbed interpreter state: {drift}"
-            return outcome, detail, cov.stop(), purity
+            cov.stop()
+            return outcome, detail, cov.report_with_imports(module_key), purity
         finally:
             cov.stop()  # idempotent — frees the monitoring tool id even if setup raised
             for gen in reversed(gens):
