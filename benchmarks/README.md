@@ -63,6 +63,40 @@ regime favours parallel runners like `pytest-xdist` and tiderace's worker pool.
 Fixture size is controlled by `--modules N` and `--tests-per-module M`
 (pytest test count = `N × M × 2`, plus 5 baked-in unittest tests).
 
+### The large-import shape (`--eager-modules`)
+
+Test *count* is not the only axis that matters, and on a fork-per-test design it is
+not even the important one. `fork()` copies page tables, so its cost scales with how
+much the **parent** is holding — not with how much the test does. A fixture of small
+modules keeps the parent tiny and hides that cost completely.
+
+`--eager-modules N` adds a package whose `__init__` imports N submodules, loaded from
+`conftest.py` so the wellspring pays for it once at startup and every subsequent fork
+copies the result. That is the shape of any project with a plugin registry or a
+self-registering package `__init__` — a legitimate design, and the worst case for
+fork-per-test.
+
+```bash
+# The large-import regime. ~800 modules puts the parent near 66 MB.
+python benchmarks/run_benchmarks.py --eager-modules 800
+```
+
+Why it is worth a flag rather than a footnote — the same 405 tests, changing only
+what the parent holds, and reading `sys` (kernel) time rather than wall clock:
+
+| fixture | parent | `fork -n 1` sys | `--optimistic -n 1` sys |
+| -- | -- | -- | -- |
+| default | 9 MB / 35 modules | 1.86s | — |
+| `--eager-modules 800` | 66 MB / 837 modules | **3.35s** | **0.15s** |
+
+The fork tier's kernel time nearly doubles purely from the parent growing, and the
+in-process ladder — same tests, same fixture, no fork — drops it by 22×. That is the
+whole of TID-18 in one table, and the default fixture cannot show any of it.
+
+These numbers were reproduced independently on a real 4,514-test corpus
+(`pirn-agents`, 73 MB / 1,654 modules), which is what the flag is calibrated against:
+45 KB of module-level data per eager module is that corpus's measured ratio.
+
 ## Scenarios — what each one measures
 
 All scenarios run against the **same** freshly generated fixture, in the fixture
