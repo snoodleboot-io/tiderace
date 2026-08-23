@@ -622,7 +622,12 @@ class Registry:
 
 # Files that mark a project root, in pytest's rootdir sense. The nearest ancestor holding one bounds
 # how far up `conftest.py` collection reaches (pytest's confcutdir defaults to rootdir).
-_ROOTDIR_MARKERS = ("pyproject.toml", "setup.cfg", "tox.ini", "setup.py")
+# `pytest.ini` is FIRST because it is first in pytest's own precedence — an explicit pytest config
+# is the strongest statement about where a project's root is. Omitting it meant a suite laid out the
+# conventional way, with `pytest.ini` and a suite-wide `conftest.py` above the test directory, found
+# no rootdir at all: the ancestor walk stopped immediately and every session fixture in that conftest
+# silently did not exist. That is how the repo's own `fx_corpus` became unrunnable (TID-34).
+_ROOTDIR_MARKERS = ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "setup.py")
 
 # Ancestor conftests, memoised per run root. They must be *executed once*: a conftest's whole job is
 # side effects (env defaults, warning filters, sys.path surgery), and running it twice would apply
@@ -1596,7 +1601,16 @@ class Engine:
         ]
         variant_index = 0
         for combo, combo_ids in zip(combos, combo_id_maps):
-            self._sync_wider(closure, node_id)
+            try:
+                self._sync_wider(closure, node_id)
+            except BaseException as exc:  # noqa: BLE001
+                # A fixture that cannot be set up is an ordinary condition — pytest errors that test
+                # and carries on. Letting it escape here killed the whole worker: every *other* test
+                # on it was lost, and the run reported `shim closed mid-run`, naming the transport
+                # rather than the fixture (TID-34). Same lesson as TID-15, one level up.
+                return {"node_id": node_id, "outcome": "error",
+                        "detail": "error setting up fixtures: "
+                                  + "".join(traceback.format_exception_only(type(exc), exc))}
             for case_pos, case_kwargs in enumerate(case_kwargs_list):
                 started = time.perf_counter()
                 self._state_disturbed = False
