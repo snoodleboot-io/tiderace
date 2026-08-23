@@ -23,6 +23,7 @@ pub fn run_parallel(
     deadline_ms: u64,
     optimistic_no_fork: bool,
     trusted: &HashSet<String>,
+    must_fork: &HashSet<String>,
 ) -> Result<Vec<TestResult>, String> {
     let plan = RunPlan {
         strategy: WorkerStrategy::platform_default(),
@@ -30,6 +31,7 @@ pub fn run_parallel(
         deadline_ms,
         optimistic_no_fork,
         trusted_pure: trusted.clone(),
+        must_fork: must_fork.clone(),
         ..RunPlan::default()
     };
     core_run_parallel(python, shim, root, items, &plan)
@@ -109,6 +111,7 @@ mod tests {
             5000,
             false,
             &HashSet::new(),
+            &HashSet::new(),
         )
         .expect("empty batch is Ok");
         assert!(out.is_empty());
@@ -149,6 +152,7 @@ mod tests {
             2,
             5000,
             false,
+            &HashSet::new(),
             &HashSet::new(),
         )
         .expect("pool run succeeds");
@@ -207,6 +211,7 @@ mod tests {
             1,
             5000,
             false,
+            &HashSet::new(),
             &HashSet::new(),
         )
         .expect("pool run succeeds");

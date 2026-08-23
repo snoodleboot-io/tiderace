@@ -116,6 +116,9 @@ impl Worker for SubprocessWorker {
             self.deadline_ms,
             false,
             &std::collections::HashSet::new(),
+            // No ladder to gate: `force_no_fork` is already false, and this tier runs in-process by
+            // configuration rather than by optimistic guess (TID-33).
+            &std::collections::HashSet::new(),
         )
     }
 }

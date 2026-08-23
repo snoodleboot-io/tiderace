@@ -295,3 +295,68 @@ fn the_same_corpus_passes_under_fork() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Step 3: the offender is *remembered*, so a later run forks it from the start.
+///
+/// Detection plus re-run is correct but not cheap — every run pays a wasted in-process attempt and
+/// then a fork. Recording the verdict is what stops paying it. This drives the mechanism directly:
+/// the same corpus, run once to learn and once with what was learned.
+///
+/// The observable is the same pid trick, read the other way. `FORK_PROOF` fails in the wellspring
+/// and passes in a forked child, so with the node in `must_fork` it must pass **without** the shim
+/// printing a re-run notice — it never took the in-process path at all.
+#[cfg(unix)]
+#[test]
+fn a_recorded_offender_is_forked_from_the_start() {
+    use engine_core::exec::ForkWorker;
+    use std::collections::HashSet;
+
+    let Some(python) = any_python() else {
+        skip_live("no Python interpreter available");
+        return;
+    };
+    let dir = write_corpus("remember", FORK_PROOF, "test_rerun.py");
+    let items = RegexCollector::new().collect(&dir).expect("collection");
+    let node = items[0].node_id.to_string();
+
+    // First run: nothing is known, so the shim discovers the problem the expensive way and reports
+    // the node as one to fork in future.
+    let first = ForkWorker::launch_optimistic(&python, &shim(), &dir)
+        .expect("wellspring with restore")
+        .run(&items)
+        .expect("first batch runs");
+    assert_eq!(first[0].outcome, Outcome::Passed, "{}", first[0].detail);
+    assert!(
+        first[0].must_fork,
+        "TID-33: the first run must record the node as a state-disturber, or there is nothing to \
+         remember"
+    );
+
+    // Second run, told what the first learned. Same result, reached without the in-process attempt.
+    let learned: HashSet<String> = first
+        .iter()
+        .filter(|r| r.must_fork)
+        .map(|r| r.node_id.to_string())
+        .collect();
+    assert!(learned.contains(&node));
+
+    let second = ForkWorker::launch_optimistic(&python, &shim(), &dir)
+        .expect("wellspring with restore")
+        .with_must_fork(learned)
+        .run(&items)
+        .expect("second batch runs");
+    assert_eq!(
+        second[0].outcome,
+        Outcome::Passed,
+        "TID-33: a node in `must_fork` must be forked, so the pid check passes — {}",
+        second[0].detail
+    );
+    // It never ran in-process, so there was no drift to observe and nothing to re-record. That is
+    // the point: the flag is sticky in persisted state precisely because a forked run cannot
+    // re-earn it.
+    assert!(
+        !second[0].must_fork,
+        "a forked run cannot observe drift, so it must not report any"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

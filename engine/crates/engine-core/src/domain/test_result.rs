@@ -18,6 +18,14 @@ pub struct TestResult {
     /// A recorded `Some(true)` promotes an unchanged test to the bare-no-fork tier on the next run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pure: Option<bool>,
+    /// This test disturbed interpreter state nothing undid, so later runs must fork it from the
+    /// start rather than rediscover the problem (TID-33).
+    ///
+    /// Distinct from `pure == Some(false)`: most impure tests are impure in ways restore handles
+    /// completely, and forking all of them would cost the in-process ladder nearly everything it
+    /// buys. This marks only the ones whose damage survived the restore.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub must_fork: bool,
 }
 
 impl TestResult {
@@ -34,6 +42,7 @@ impl TestResult {
             detail: detail.into(),
             touched_files: Vec::new(),
             pure: None,
+            must_fork: false,
         }
     }
 
@@ -46,6 +55,12 @@ impl TestResult {
     /// Attach the purity verdict (builder style).
     pub fn with_pure(mut self, pure: Option<bool>) -> Self {
         self.pure = pure;
+        self
+    }
+
+    /// Mark the test as one that must be forked on later runs (builder style).
+    pub fn with_must_fork(mut self, must_fork: bool) -> Self {
+        self.must_fork = must_fork;
         self
     }
 }
