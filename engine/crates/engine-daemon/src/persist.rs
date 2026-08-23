@@ -37,6 +37,12 @@ pub struct TestRecord {
     /// re-run BARE no-fork next time. `#[serde(default)]` ⇒ old state files (no field) load as `None`.
     #[serde(default)]
     pub pure: Option<bool>,
+    /// This test disturbed interpreter state nothing undid (TID-33), so it is forked from the start
+    /// on later runs instead of being rediscovered — a wasted in-process run plus a fork each time.
+    /// Sticky until the test's own file changes, which is when `rebaseline`/`deps` re-verify it.
+    /// `#[serde(default)]` ⇒ old state files load as `false`.
+    #[serde(default)]
+    pub must_fork: bool,
 }
 
 impl PersistedState {
@@ -108,6 +114,7 @@ mod tests {
                 detail: String::new(),
                 deps: vec!["src.py".into()],
                 pure: Some(true),
+                must_fork: false,
             },
         );
         s.tests.insert(
@@ -117,6 +124,7 @@ mod tests {
                 detail: String::new(),
                 deps: vec!["other.py".into()],
                 pure: None,
+                must_fork: false,
             },
         );
         s

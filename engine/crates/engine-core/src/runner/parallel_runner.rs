@@ -87,13 +87,27 @@ fn run_batched(
             .filter(|it| plan.trusted_pure.contains(it.node_id.as_str()))
             .map(|it| it.node_id.to_string())
             .collect();
+        // Likewise only this batch's recorded offenders (TID-33).
+        let batch_must_fork: HashSet<String> = batch_items
+            .iter()
+            .filter(|it| plan.must_fork.contains(it.node_id.as_str()))
+            .map(|it| it.node_id.to_string())
+            .collect();
         let exec = BatchExec {
             strategy,
             deadline_ms: plan.deadline_ms,
             optimistic_no_fork: plan.optimistic_no_fork,
         };
         handles.push(thread::spawn(move || -> Result<Vec<TestResult>, String> {
-            run_batch(exec, &py, &sh, &rt, &batch_items, batch_trusted)
+            run_batch(
+                exec,
+                &py,
+                &sh,
+                &rt,
+                &batch_items,
+                batch_trusted,
+                batch_must_fork,
+            )
         }));
     }
 
@@ -185,6 +199,7 @@ fn run_batch(
     rt: &Path,
     batch_items: &[TestItem],
     batch_trusted: HashSet<String>,
+    batch_must_fork: HashSet<String>,
 ) -> Result<Vec<TestResult>, String> {
     let BatchExec {
         strategy,
@@ -205,7 +220,8 @@ fn run_batch(
                 let mut worker = launched
                     .map_err(|e| format!("failed to launch wellspring: {e}"))?
                     .with_deadline_ms(deadline_ms)
-                    .with_trusted_pure(batch_trusted);
+                    .with_trusted_pure(batch_trusted)
+                    .with_must_fork(batch_must_fork);
                 worker
                     .run(batch_items)
                     .map_err(|e| format!("execution failed: {e}"))
@@ -214,13 +230,15 @@ fn run_batch(
             {
                 // The optimistic ladder and the trusted-pure set are fork-only knobs; name them here
                 // so this arm consumes them on platforms where the fork branch is compiled out.
-                let _ = (optimistic_no_fork, batch_trusted);
+                let _ = (optimistic_no_fork, batch_trusted, batch_must_fork);
                 Err("fork is unavailable on this platform".to_string())
             }
         }
         // The no-fork path always snapshots/restores (its only isolation without COW); the fork-only
         // knobs (optimistic ladder, trusted-pure bare no-fork) do not apply. One process per batch.
         WorkerStrategy::Subprocess => {
+            // Nothing to demote to: this tier runs in-process by configuration, not by guess.
+            let _ = batch_must_fork;
             let mut worker = SubprocessWorker::new(deadline_ms, 1).with_target(py, sh, rt);
             worker
                 .run(batch_items)

@@ -13,6 +13,8 @@ pub struct ForkWorker {
     deadline_ms: u64,
     optimistic_no_fork: bool,
     trusted: HashSet<String>,
+    /// Node ids recorded as disturbing interpreter state — forked even under the ladder (TID-33).
+    must_fork: HashSet<String>,
 }
 
 impl ForkWorker {
@@ -27,6 +29,7 @@ impl ForkWorker {
             deadline_ms: 5_000,
             optimistic_no_fork: false,
             trusted: HashSet::new(),
+            must_fork: HashSet::new(),
         })
     }
 
@@ -43,6 +46,7 @@ impl ForkWorker {
             deadline_ms: 5_000,
             optimistic_no_fork: true,
             trusted: HashSet::new(),
+            must_fork: HashSet::new(),
         })
     }
 
@@ -67,6 +71,14 @@ impl ForkWorker {
         self
     }
 
+    /// Node ids recorded as disturbing interpreter state (TID-33): each is forked even under
+    /// `with_optimistic_no_fork(true)`. The shim catches a first offence on its own and re-runs it
+    /// forked; this is what stops paying for that discovery on every subsequent run.
+    pub fn with_must_fork(mut self, must_fork: HashSet<String>) -> Self {
+        self.must_fork = must_fork;
+        self
+    }
+
     /// The underlying Wellspring pid (for diagnostics/tests).
     pub fn wellspring_pid(&self) -> i64 {
         self.wellspring.pid()
@@ -83,6 +95,7 @@ impl Worker for ForkWorker {
             deadline_ms,
             nf,
             &self.trusted,
+            &self.must_fork,
         )
     }
 }

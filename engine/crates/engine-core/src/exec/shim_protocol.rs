@@ -91,6 +91,15 @@ pub struct ExecResponse {
     /// byte-identical to before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variants: Vec<VariantResult>,
+    /// This node disturbed interpreter state the in-process ladder cannot model, so it must be
+    /// forked from the start on later runs (TID-33).
+    ///
+    /// Deliberately separate from `pure`. Most impure tests are impure in ways restore handles
+    /// completely — they mutate their own module's globals — and demoting those to forking would
+    /// cost the ladder nearly everything it buys. This flag marks only the tests whose damage
+    /// nothing undid.
+    #[serde(default)]
+    pub must_fork: bool,
     /// `variants` is the complete answer for this request, even when empty (TID-26).
     ///
     /// Needed because an empty list is otherwise ambiguous: an unparametrized node also sends none.
@@ -114,6 +123,9 @@ pub struct VariantResult {
     pub coverage: std::collections::BTreeMap<String, Vec<u32>>,
     #[serde(default)]
     pub pure: Option<bool>,
+    /// See [`ExecResponse::must_fork`] — recorded per case, since only some cases may trip.
+    #[serde(default)]
+    pub must_fork: bool,
 }
 
 /// Write a length-prefixed (u32 LE) JSON frame.

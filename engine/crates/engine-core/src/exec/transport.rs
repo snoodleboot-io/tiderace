@@ -56,10 +56,15 @@ pub(crate) fn run_batch<T: ShimTransport + ?Sized>(
     deadline_ms: u64,
     force_no_fork: bool,
     trusted: &std::collections::HashSet<String>,
+    must_fork: &std::collections::HashSet<String>,
 ) -> Result<Vec<TestResult>> {
     let mut results = Vec::with_capacity(items.len());
     for item in items {
         let mut req = ExecRequest::bare(item.node_id.as_str(), item.style.wire(), deadline_ms);
+        // TID-33: a test recorded as disturbing interpreter state never takes the in-process ladder
+        // again. The shim still catches a first offence at runtime and re-runs it forked, but that
+        // costs a wasted in-process run every time; this is what stops paying it repeatedly.
+        let force_no_fork = force_no_fork && !must_fork.contains(item.node_id.as_str());
         req.force_no_fork = force_no_fork; // optimistic no-fork; the shim forks non-restorable modules
                                            // TID-1: a recorded-pure, unchanged test runs BARE no-fork (skip the snapshot). Only meaningful
                                            // on a no-fork request; the shim ignores it otherwise.
@@ -80,6 +85,7 @@ pub(crate) fn run_batch<T: ShimTransport + ?Sized>(
                 )
                 .with_touched(touched)
                 .with_pure(v.pure)
+                .with_must_fork(v.must_fork)
             }));
             continue;
         }
@@ -92,7 +98,8 @@ pub(crate) fn run_batch<T: ShimTransport + ?Sized>(
                 resp.detail,
             )
             .with_touched(touched)
-            .with_pure(resp.pure),
+            .with_pure(resp.pure)
+            .with_must_fork(resp.must_fork),
         );
     }
     Ok(results)
@@ -211,6 +218,7 @@ mod tests {
                 .cloned()
                 .unwrap_or((self.default_outcome.clone(), String::new()));
             Ok(ExecResponse {
+                must_fork: false,
                 node_id: req.node_id.to_string(),
                 outcome,
                 detail,
@@ -243,6 +251,7 @@ mod tests {
             5_000,
             false,
             &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
         )
         .expect("offline batch runs");
 
@@ -264,6 +273,7 @@ mod tests {
             5_000,
             false,
             &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
         )
         .unwrap();
         assert_eq!(results[0].outcome, Outcome::Error);
@@ -277,6 +287,7 @@ mod tests {
             &[item("m.py::a"), item("m.py::b")],
             5_000,
             false,
+            &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
         )
         .expect_err("a shim that closes mid-batch must error");
@@ -331,6 +342,7 @@ mod tests {
             &items,
             5_000,
             false,
+            &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
         )
         .expect("loopback batch");

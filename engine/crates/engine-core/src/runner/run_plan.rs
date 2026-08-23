@@ -60,6 +60,12 @@ pub struct RunPlan {
     pub optimistic_no_fork: bool,
     /// Node ids recorded pure, eligible for the bare no-fork tier (TID-1).
     pub trusted_pure: HashSet<String>,
+    /// Node ids recorded as disturbing interpreter state — forked even under the ladder (TID-33).
+    ///
+    /// The shim detects a first offence on its own and re-runs it forked, so correctness does not
+    /// depend on this set being populated. What it buys is not paying for that discovery — a wasted
+    /// in-process run plus a fork — on every subsequent run.
+    pub must_fork: HashSet<String>,
 }
 
 impl Default for RunPlan {
@@ -71,6 +77,7 @@ impl Default for RunPlan {
             deadline_ms: DEFAULT_DEADLINE_MS,
             optimistic_no_fork: false,
             trusted_pure: HashSet::new(),
+            must_fork: HashSet::new(),
         }
     }
 }

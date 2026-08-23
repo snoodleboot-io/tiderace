@@ -1454,6 +1454,8 @@ class Engine:
         self.root = root  # corpus root, for coverage path relativization
         self.coverage = coverage  # ADR-E006: capture per-test executed-source footprint
         self.purity_guard = purity_guard  # detect shared-state mutation per test (→ pure-test batching)
+        self._leaked = None          # this test's unmodelled state drift, if any (TID-33)
+        self._state_disturbed = False  # …and whether the node should be forked from now on
         self.restore = restore  # snapshot/restore shared state around no-fork tests (isolation w/o fork)
         self.active: list[_Active] = []  # in setup order (widest → narrowest)
 
@@ -1569,6 +1571,7 @@ class Engine:
         coverage: dict[str, set] = {}  # union of touched lines across all variants of this node
         impurity = None  # first impurity reason across variants (any impure ⇒ the node is impure)
         node_pure = None  # tri-state across variants: None (unmeasured), True (all measured pure), False
+        node_must_fork = False  # any case disturbed interpreter state ⇒ fork the whole node (TID-33)
         # Per-variant results, reported alongside the aggregate (TID-25). Each case already gets its
         # own `_fork_run`, so collapsing them to one outcome discarded results that had already been
         # paid for — the tally lost the passes, and a node with several failures kept one detail.
@@ -1596,9 +1599,13 @@ class Engine:
             self._sync_wider(closure, node_id)
             for case_pos, case_kwargs in enumerate(case_kwargs_list):
                 started = time.perf_counter()
+                self._state_disturbed = False
                 oc, detail, cov, purity = self._fork_run(
                     node_id, style, fixture_requested, closure, combo, deadline_ms, case_kwargs,
                     force_no_fork, trusted_pure, must_fork)
+                # Per case, because only some cases of a parametrized node may trip (TID-33).
+                disturbed = self._state_disturbed
+                node_must_fork = node_must_fork or disturbed
                 if parametrized_node:
                     variant = {
                         "node_id": variant_ids[variant_index],
@@ -1612,6 +1619,8 @@ class Engine:
                         variant["pure"] = True
                     elif purity is not _UNKNOWN_PURITY:
                         variant["pure"] = False
+                    if disturbed:
+                        variant["must_fork"] = True
                     variants.append(variant)
                 variant_index += 1
                 outcomes.append((oc, detail))
@@ -1638,6 +1647,8 @@ class Engine:
             resp["pure"] = node_pure
             if impurity is not None:
                 resp["impurity"] = impurity
+        if node_must_fork:  # additive; omitted for the overwhelming majority that never trip
+            resp["must_fork"] = True
         return resp
 
     def _run_inherited(self, node_id: str, deadline_ms: int, force_no_fork: bool,
@@ -1699,6 +1710,8 @@ class Engine:
                 variant["coverage"] = res["coverage"]
             if "pure" in res:
                 variant["pure"] = res["pure"]
+            if res.get("must_fork"):
+                variant["must_fork"] = True
             variants.append(variant)
         worst = _aggregate([(v["outcome"], v.get("detail", "")) for v in variants])
         return {"node_id": node_id, "outcome": worst[0], "detail": worst[1],
@@ -1742,6 +1755,12 @@ class Engine:
             # `--strategy subprocess`, where running in-process is the configured strategy rather
             # than this run's optimistic guess: there the restore above is the whole remedy.
             drift, self._leaked = self._leaked, None
+            if drift is not None:
+                # Recorded even on the tiers that cannot act on it now (`--strategy subprocess`,
+                # Windows): the fact is true about the test, and a later run under the ladder is
+                # exactly who needs it. Note this is NOT the `must_fork` parameter above, which says
+                # the test's *module* is unrestorable; this says the test disturbed the interpreter.
+                self._state_disturbed = True
             if drift is not None and _FORK_AVAILABLE and not must_fork and not self.no_fork:
                 print(f"tiderace: re-running {node_id} in a fork — it {drift}",
                       file=sys.stderr, flush=True)
