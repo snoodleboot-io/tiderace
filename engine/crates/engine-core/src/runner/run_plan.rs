@@ -79,15 +79,25 @@ pub struct RunPlan {
     /// Import the project **once** and fork the workers from that image, instead of running N
     /// independent wellsprings that each import it (TID-4).
     ///
-    /// **Opt-in for now.** The win is CPU, not wall clock — the imports already overlap across
-    /// workers, so nothing gets faster; what changes is that an 8-worker run stops paying for eight
-    /// imports. On a large-import corpus that is ~2.6s each, roughly 21s of the ~34s of CPU that
-    /// eight workers add over one. Invisible on a laptop with idle cores, and the entire cost on a
-    /// CI runner billed for CPU.
+    /// **On by default.** Shipped opt-in first, on the reasoning that it was a new fork topology in
+    /// the engine's most correctness-critical path and bought efficiency rather than latency — so
+    /// there was nothing to trade soak time against. Two of those three premises turned out to be
+    /// wrong, which is why the default moved:
     ///
-    /// Off by default because it is a new fork topology — the parent forks workers, and each worker
-    /// forks per test — and the thing it changes is the most correctness-critical path in the
-    /// engine. It buys no user-visible latency, so there is nothing to trade soak time against.
+    /// * It is not only an efficiency win. Wall clock improved 20% (19.1s → 15.2s on a 4,514-test
+    ///   corpus), because eight simultaneous imports occupy the same eight cores the tests want.
+    /// * The topology is less novel than it looked. Each worker is an ordinary `serve` loop that
+    ///   forks per test exactly as before; the only difference is that its interpreter arrived by
+    ///   `fork()` instead of by `exec()`. Every worker still builds its own `Engine` *after* the
+    ///   fork, so fixture state is per-worker exactly as it was with N separate wellsprings.
+    ///
+    /// What it removes is paying the project's import N times. On a large-import corpus that is
+    /// ~2.6s per worker against a 0.03s bare interpreter — user CPU 59.8s → 30.8s at eight workers.
+    /// Invisible on a laptop with idle cores; the whole bill on a CI runner charged per core-minute.
+    ///
+    /// Fork-tier only, and therefore inert on Windows, where `platform_default()` is the subprocess
+    /// tier. `--no-shared-import` (or `TIDERACE_NO_SHARED_IMPORT=1`) goes back to one wellspring
+    /// per worker.
     pub shared_import: bool,
     /// Node ids recorded as disturbing interpreter state — forked even under the ladder (TID-33).
     ///
@@ -105,7 +115,7 @@ impl Default for RunPlan {
             workers: default_workers(),
             deadline_ms: DEFAULT_DEADLINE_MS,
             optimistic_no_fork: true,
-            shared_import: false,
+            shared_import: true,
             trusted_pure: HashSet::new(),
             must_fork: HashSet::new(),
         }
@@ -138,9 +148,13 @@ impl RunPlan {
         } else {
             " fork-per-test"
         });
-        if self.shared_import {
-            s.push_str(" shared-import");
-        }
+        // Named in both directions, like the ladder: now that it is the default, its *absence* is
+        // the fact a pasted benchmark number needs.
+        s.push_str(if self.shared_import {
+            " shared-import"
+        } else {
+            " import-per-worker"
+        });
         s
     }
 

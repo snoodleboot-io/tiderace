@@ -33,7 +33,8 @@ Options for `run`:
       --no-fork           alias for --strategy subprocess
       --optimistic        let restorable tests skip the fork (the default; kept for scripts)
       --no-optimistic     fork every test, even the restorable ones (see the note below)
-      --shared-import     import the project once and fork the workers from it (saves CI CPU)
+      --shared-import     import the project once and fork the workers from it (the default)
+      --no-shared-import  give every worker its own interpreter, each importing the project
   -q, --quiet             suppress the per-test lines; print only the tally
   -h, --help              show this message
 
@@ -41,6 +42,7 @@ Environment:
   TIDERACE_SHIM           path to shim.py (required if no bundled shim is installed)
   TIDERACE_PYTHON         interpreter to drive (default: python3 / python)
   TIDERACE_FORCE_FORK=1   same as --no-optimistic (the daemon already honours this)
+  TIDERACE_NO_SHARED_IMPORT=1  same as --no-shared-import
 
 Notes:
   Restorable tests run in-process instead of forking, which is where most of the speed comes from:
@@ -53,11 +55,11 @@ Notes:
   sees it. A forked child is a whole pristine process and has no such hole, so this is the setting
   to reach for when a suite disagrees with itself between the two.
 
-  `--shared-import` runs one Python parent that imports the project once and forks a worker from it
-  per core, instead of N independent parents that each import it. Wall clock barely moves — the
-  imports already overlap — but the CPU does: on a large-import project an 8-worker run stops paying
-  for eight imports. That is invisible on a laptop with spare cores and is the whole cost on a CI
-  runner billed for CPU. Opt-in while it earns its soak time; fork tier only.
+  One Python parent imports the project once and forks a worker from it per core, rather than N
+  parents each importing it. On a large-import project that halves CPU — an 8-worker run stops
+  paying for eight imports — and takes ~20% off wall clock too, because simultaneous imports occupy
+  the cores the tests want. `--no-shared-import` gives every worker its own interpreter again.
+  Fork tier only, so it does nothing on Windows.
 
   `--strategy subinterp` is a hybrid: a sub-interpreter cannot load a single-phase C extension
   (numpy is the canonical case), so modules are probed and only the safe subset runs on the pool;
@@ -125,6 +127,9 @@ impl Options {
         if std::env::var("TIDERACE_FORCE_FORK").as_deref() == Ok("1") {
             plan.optimistic_no_fork = false;
         }
+        if std::env::var("TIDERACE_NO_SHARED_IMPORT").as_deref() == Ok("1") {
+            plan.shared_import = false;
+        }
         let mut quiet = false;
         let mut root: Option<PathBuf> = None;
         let mut strategy_set = false;
@@ -188,6 +193,7 @@ impl Options {
                 "--optimistic" => plan.optimistic_no_fork = true,
                 "--no-optimistic" => plan.optimistic_no_fork = false,
                 "--shared-import" => plan.shared_import = true,
+                "--no-shared-import" => plan.shared_import = false,
                 "-q" | "--quiet" => quiet = true,
                 other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
                 _ => {
@@ -378,11 +384,43 @@ mod tests {
     }
 
     #[test]
-    fn shared_import_is_opt_in() {
-        assert!(!parse(&["tests"]).expect("parses").plan.shared_import);
-        let o = parse(&["--shared-import", "tests"]).expect("parses");
-        assert!(o.plan.shared_import);
-        assert!(o.plan.header().contains("shared-import"));
+    fn shared_import_is_the_default_and_the_header_says_which() {
+        let d = parse(&["tests"]).expect("parses");
+        assert!(d.plan.shared_import);
+        assert!(d.plan.header().contains("shared-import"));
+
+        let off = parse(&["--no-shared-import", "tests"]).expect("parses");
+        assert!(!off.plan.shared_import);
+        let header = off.plan.header();
+        assert!(header.contains("import-per-worker"), "got: {header}");
+        assert!(!header.contains(" shared-import"), "got: {header}");
+    }
+
+    /// Kept parsing and inert, because it is in scripts written while it was opt-in.
+    #[test]
+    fn the_old_shared_import_flag_still_parses() {
+        assert!(
+            parse(&["--shared-import", "tests"])
+                .expect("the old flag still parses")
+                .plan
+                .shared_import
+        );
+    }
+
+    #[test]
+    fn the_last_shared_import_flag_wins() {
+        assert!(
+            !parse(&["--shared-import", "--no-shared-import", "tests"])
+                .expect("parses")
+                .plan
+                .shared_import
+        );
+        assert!(
+            parse(&["--no-shared-import", "--shared-import", "tests"])
+                .expect("parses")
+                .plan
+                .shared_import
+        );
     }
 
     #[test]
