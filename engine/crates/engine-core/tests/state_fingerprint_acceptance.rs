@@ -154,7 +154,11 @@ fn get<'a>(results: &'a [TestResult], leaf: &str) -> &'a TestResult {
 /// The neighbours pass (the restore undid the leak) and the leakers are marked impure (so they stop
 /// taking this path), while the pure test is left alone.
 fn assert_detected_and_restored(results: &[TestResult], tier: &str) {
-    for leaf in ["test_b_sys_path_is_clean", "test_d_no_handler_leaked", "test_f_log_level_restored"] {
+    for leaf in [
+        "test_b_sys_path_is_clean",
+        "test_d_no_handler_leaked",
+        "test_f_log_level_restored",
+    ] {
         let r = get(results, leaf);
         assert_eq!(
             r.outcome,
