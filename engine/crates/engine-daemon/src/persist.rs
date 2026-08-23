@@ -1,76 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+//! The daemon's impact planner, over the shared on-disk state.
+//!
+//! `PersistedState` / `TestRecord` / `changed_files` moved into `engine-core` so the CLI can *read*
+//! what the daemon learned without a second definition of the same JSON drifting from the writer's
+//! (see `engine_core::runner::VerdictStore`). What stays here is the part only the daemon does:
+//! deciding which tests to re-execute and which to serve from cache.
 
-use engine_core::exec::SafeModule;
-use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
-/// On-disk warm state for impact-aware one-shot `run`s. Persists each test's outcome + its dependency
-/// footprint (touched files, from
-/// coverage) and the content hash of every touched file, so a later `run` re-executes **only** the
-/// tests whose dependencies changed. Stored as JSON at `<root>/.tiderace-state.json`.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct PersistedState {
-    /// relative source path -> content hash (hex) at the time it was last run.
-    pub files: BTreeMap<String, String>,
-    /// node id -> last result + the files it touched.
-    pub tests: BTreeMap<String, TestRecord>,
-    /// module rel-path -> its cached sub-interpreter-safety verdict (ADR-E015 / TID-9 cache, consumed
-    /// by TID-11 routing). Re-probed only when the module's content hash changes. `#[serde(default)]`
-    /// so older state files load fine.
-    #[serde(default)]
-    /// Sub-interpreter safety verdicts. The type and the probing logic live in `engine-core` so the
-    /// CLI shares them (TID-35); the daemon keeps persisting them here, inside the state file it
-    /// already writes, rather than adding a second file beside it.
-    pub safe_modules: BTreeMap<String, SafeModule>,
-}
-
-/// One test's persisted result + dependency footprint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TestRecord {
-    pub outcome: String,
-    pub detail: String,
-    pub deps: Vec<String>,
-    /// Purity verdict (TID-1): `Some(true)` measured pure. A pure test whose deps are all unchanged is
-    /// re-run BARE no-fork next time. `#[serde(default)]` ⇒ old state files (no field) load as `None`.
-    #[serde(default)]
-    pub pure: Option<bool>,
-    /// This test disturbed interpreter state nothing undid (TID-33), so it is forked from the start
-    /// on later runs instead of being rediscovered — a wasted in-process run plus a fork each time.
-    /// Sticky until the test's own file changes, which is when `rebaseline`/`deps` re-verify it.
-    /// `#[serde(default)]` ⇒ old state files load as `false`.
-    #[serde(default)]
-    pub must_fork: bool,
-}
-
-impl PersistedState {
-    /// Load from `path`; a missing or unparseable file yields empty state (cold start).
-    pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
-    }
-
-    /// Persist to `path` (best-effort; errors are returned for the caller to log).
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        let json = serde_json::to_string(self).map_err(std::io::Error::other)?;
-        std::fs::write(path, json)
-    }
-}
-
-/// The files whose current hash differs from what was persisted (changed, or vanished). `current`
-/// holds the freshly-computed hashes for the paths we re-hashed (typically every path in `state.files`).
-pub fn changed_files(
-    state: &PersistedState,
-    current: &BTreeMap<String, String>,
-) -> BTreeSet<String> {
-    state
-        .files
-        .iter()
-        .filter(|(path, old)| current.get(*path).map(|c| c != *old).unwrap_or(true))
-        .map(|(path, _)| path.clone())
-        .collect()
-}
+pub use engine_core::runner::{changed_files, PersistedState, TestRecord, STATE_FILE};
 
 /// Partition `candidates` into (to_run, cached) given the changed-file set. A test runs if it has
 /// never been seen, or **any** of its recorded deps changed; otherwise its cached outcome stands.

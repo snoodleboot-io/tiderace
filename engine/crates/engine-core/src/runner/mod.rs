@@ -16,9 +16,13 @@
 mod parallel_runner;
 mod run_plan;
 mod scheduler_kind;
+mod verdicts;
 mod worker_strategy;
 
 pub use parallel_runner::{locality_key, run_parallel};
 pub use run_plan::{default_workers, RunPlan, DEFAULT_DEADLINE_MS};
 pub use scheduler_kind::SchedulerKind;
+pub use verdicts::{
+    changed_files, hash_file, PersistedState, TestRecord, VerdictStore, STATE_FILE,
+};
 pub use worker_strategy::WorkerStrategy;
