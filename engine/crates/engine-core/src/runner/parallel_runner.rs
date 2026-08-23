@@ -5,7 +5,7 @@ use std::thread;
 use crate::domain::{TestItem, TestResult};
 #[cfg(unix)]
 use crate::exec::ForkWorker;
-use crate::exec::{probe_modules, SubInterpWorker, SubprocessWorker, Worker};
+use crate::exec::{SafeSetCache, SubInterpWorker, SubprocessWorker, Worker};
 use crate::runner::{RunPlan, WorkerStrategy};
 use crate::scheduler::{ScheduleInput, ScheduledTest};
 
@@ -149,14 +149,18 @@ fn run_subinterp_hybrid(
     modules.sort();
     modules.dedup();
 
-    let verdicts = probe_modules(python, shim, root, &modules)?;
-    let (safe_items, rest): (Vec<TestItem>, Vec<TestItem>) = items.into_iter().partition(|it| {
-        verdicts
-            .get(&locality_key(it.node_id.as_str()))
-            .copied()
-            .flatten()
-            .unwrap_or(false)
-    });
+    // Probing means launching a fresh interpreter per module, so it is cached by content hash and
+    // only new or changed modules pay (TID-35). Without this the CLI re-probed the whole corpus on
+    // every invocation, which on a small module count is most of this tier's cost — and it hurt
+    // most on Windows, the one platform the tier exists for and the one with no daemon to lean on.
+    let mut cache = SafeSetCache::load(root);
+    let safe = cache.resolve(python, shim, root, &modules)?;
+    // Best-effort: an unwritable tree must still run, just without the speedup next time.
+    let _ = cache.save(root);
+
+    let (safe_items, rest): (Vec<TestItem>, Vec<TestItem>) = items
+        .into_iter()
+        .partition(|it| safe.contains(&locality_key(it.node_id.as_str())));
 
     let mut all = Vec::new();
     if !safe_items.is_empty() {

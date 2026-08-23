@@ -2,6 +2,7 @@
 
 # tiderace engine runtime state
 .tiderace-state.json
+.tiderace-subinterp.json
 .tiderace-coverage/
 
 # Conformance corpora: real third-party repos (anyio/click/flask/…) fetched locally for the
