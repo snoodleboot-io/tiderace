@@ -15,7 +15,7 @@ use std::process::ExitCode;
 
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, RunReport};
-use engine_core::runner::{run_parallel, RunPlan, SchedulerKind, WorkerStrategy};
+use engine_core::runner::{run_parallel, RunPlan, SchedulerKind, VerdictStore, WorkerStrategy};
 
 const USAGE: &str = "\
 usage: tiderace <command> [options] <path>
@@ -238,6 +238,41 @@ fn cmd_collect(root: &Path) -> ExitCode {
     }
 }
 
+/// The plan a run will actually execute, plus the suffix describing what it learned from disk.
+///
+/// Split out because the header and the run must describe the same object, and they did not: the
+/// header was built from a clamped copy while `run_parallel` received the unclamped original, so the
+/// worker count shown was never the worker count used. Returning both from one place makes the two
+/// impossible to disagree, and makes the whole decision unit-testable without a live run.
+fn effective_plan(plan: &RunPlan, item_count: usize, root: &Path) -> (RunPlan, String) {
+    // **`must_fork` only.** The two persisted verdicts fail in opposite directions, and only one is
+    // safe to take from a file this process did not write and cannot re-verify:
+    //
+    //   * `must_fork` only ever *removes* an optimisation. Acting on a stale one forks a test that
+    //     no longer needs it — a little time, never a wrong answer.
+    //   * `trusted_pure` promotes a test to the bare no-fork tier, which skips the snapshot
+    //     entirely. `VerdictStore::trusted_pure` guards it by re-hashing every recorded dependency,
+    //     but that guard is only as good as the footprints, and they are unsound today (TID-40): a
+    //     module's imports execute once, for whichever test runs first, so on a 20-tests-per-module
+    //     suite the source under test appears in one footprint out of twenty. The other nineteen
+    //     would keep a stale `pure` verdict through a change to the very code they exercise.
+    //
+    // So `trusted_pure` stays unwired until TID-40 lands. Waiting costs nothing measurable: on the
+    // reference fixture, reading it changed wall clock by 0.01s.
+    let must_fork = VerdictStore::load(root).must_fork();
+    let learned = if must_fork.is_empty() {
+        String::new()
+    } else {
+        format!(" learned={} forced-fork", must_fork.len())
+    };
+    let effective = RunPlan {
+        workers: plan.effective_workers(item_count),
+        must_fork,
+        ..plan.clone()
+    };
+    (effective, learned)
+}
+
 fn cmd_run(root: &Path, plan: &RunPlan, quiet: bool) -> ExitCode {
     let python = std::env::var("TIDERACE_PYTHON").unwrap_or_else(|_| engine_core::default_python());
     let shim = match std::env::var("TIDERACE_SHIM") {
@@ -262,15 +297,19 @@ fn cmd_run(root: &Path, plan: &RunPlan, quiet: bool) -> ExitCode {
         }
     };
 
-    // The header goes out BEFORE the run, so a run that later hangs or dies has still said what it
-    // was doing — which is exactly when you most want to know.
-    let effective = RunPlan {
-        workers: plan.effective_workers(items.len()),
-        ..plan.clone()
-    };
-    eprintln!("tiderace: {}", effective.header());
+    // Pick up what earlier runs learned. The daemon writes these verdicts; `run` reads them and
+    // writes nothing, so a one-shot command never mutates the tree and never needs coverage capture
+    // turned on — the dependency footprints that keep a purity verdict honest are already recorded,
+    // and checking them is a re-hash.
+    //
+    let (effective, learned) = effective_plan(plan, items.len(), root);
 
-    let results = match run_parallel(&python, &shim, root, items, plan) {
+    eprintln!("tiderace: {}{learned}", effective.header());
+
+    // `&effective`, not `plan`: the header and the run must describe the same thing. They did not,
+    // so the worker clamp shown in the header was never the clamp applied — and the verdicts read
+    // above would have been reported and then dropped on the floor.
+    let results = match run_parallel(&python, &shim, root, items, &effective) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
@@ -318,8 +357,8 @@ fn label(outcome: Outcome) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::Options;
-    use engine_core::runner::{SchedulerKind, WorkerStrategy, DEFAULT_DEADLINE_MS};
+    use super::{effective_plan, Options};
+    use engine_core::runner::{RunPlan, SchedulerKind, WorkerStrategy, DEFAULT_DEADLINE_MS};
 
     fn parse(args: &[&str]) -> Result<Options, String> {
         Options::parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -381,6 +420,82 @@ mod tests {
         assert!(o.quiet);
         assert!(o.plan.optimistic_no_fork);
         assert!(o.plan.header().contains("optimistic-no-fork"));
+    }
+
+    /// The header and the run describe the same plan.
+    ///
+    /// They used to not: the header was built from a clamped copy while `run_parallel` got the
+    /// unclamped original, so a run that announced `workers=3` could execute with 16. The verdicts
+    /// read from disk went the same way — reported in the header, then dropped.
+    #[test]
+    fn the_plan_that_is_reported_is_the_plan_that_runs() {
+        let dir = std::env::temp_dir().join(format!("tiderace_cli_plan_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let asked = RunPlan {
+            workers: 16,
+            ..RunPlan::default()
+        };
+        let (effective, _) = effective_plan(&asked, 3, &dir);
+        assert_eq!(
+            effective.workers, 3,
+            "a 3-test corpus clamps to 3 workers, and that is what must execute"
+        );
+        assert!(effective.header().contains("workers=3"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Recorded state-disturbers reach the plan; purity verdicts deliberately do not (TID-40).
+    #[test]
+    fn must_fork_is_read_from_disk_and_trusted_pure_is_not() {
+        use engine_core::runner::{PersistedState, TestRecord, STATE_FILE};
+
+        let dir = std::env::temp_dir().join(format!("tiderace_cli_verdict_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("src.py"),
+            "X = 1
+",
+        )
+        .unwrap();
+
+        let mut state = PersistedState::default();
+        state.files.insert(
+            "src.py".into(),
+            engine_core::runner::hash_file(&dir, "src.py"),
+        );
+        state.tests.insert(
+            "t.py::disturber".into(),
+            TestRecord {
+                outcome: "passed".into(),
+                detail: String::new(),
+                deps: vec!["src.py".into()],
+                pure: Some(false),
+                must_fork: true,
+            },
+        );
+        state.tests.insert(
+            "t.py::clean".into(),
+            TestRecord {
+                outcome: "passed".into(),
+                detail: String::new(),
+                deps: vec!["src.py".into()],
+                pure: Some(true),
+                must_fork: false,
+            },
+        );
+        state.save(&dir.join(STATE_FILE)).unwrap();
+
+        let (effective, learned) = effective_plan(&RunPlan::default(), 2, &dir);
+        assert!(effective.must_fork.contains("t.py::disturber"));
+        assert!(
+            effective.trusted_pure.is_empty(),
+            "purity verdicts stay unwired until TID-40 makes the footprints sound"
+        );
+        assert!(learned.contains("1 forced-fork"), "got: {learned:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

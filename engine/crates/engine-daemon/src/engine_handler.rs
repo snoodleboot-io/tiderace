@@ -6,7 +6,7 @@ use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestItem, TestResult};
 use engine_core::exec::{ForkWorker, SubInterpWorker, Worker};
 
-use crate::persist::{changed_files, plan, PersistedState, TestRecord};
+use crate::persist::{changed_files, plan, PersistedState, TestRecord, STATE_FILE};
 use crate::rpc_method::{RpcRequest, RpcResponse, RpcResult};
 use crate::rpc_server::RpcHandler;
 use crate::watch::content_hash;
@@ -128,7 +128,7 @@ impl EngineHandler {
     /// snapshot), re-verifies the rest under restore, and persists the updated verdicts + footprints.
     /// So the second `run --all` on an unchanged tree runs the pure suite at the bare-no-fork tier.
     pub fn run_full_parallel(&self) -> Result<Vec<RpcResult>, String> {
-        let state_path = self.root.join(".tiderace-state.json");
+        let state_path = self.root.join(STATE_FILE);
         let mut state = PersistedState::load(&state_path);
 
         // Trusted = recorded pure AND none of its recorded deps changed since it was last verified.
@@ -247,7 +247,7 @@ impl EngineHandler {
             .iter()
             .map(|i| i.node_id.to_string())
             .collect();
-        let state_path = self.root.join(".tiderace-state.json");
+        let state_path = self.root.join(STATE_FILE);
         let mut state = PersistedState::load(&state_path);
 
         let current = self.hash_known_files(&state);
