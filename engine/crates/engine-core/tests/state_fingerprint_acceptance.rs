@@ -119,6 +119,9 @@ def test_h_is_pure():
 /// from outside the process, that the offender was re-run in a fork rather than merely flagged.
 /// In-process the pid is the wellspring's and the body fails; in a forked child it differs and the
 /// body passes. Reported as passed ⇒ the re-run happened and its result is the one that was kept.
+///
+/// Unix only, with the test that uses it: there is no fork to be re-run into anywhere else.
+#[cfg(unix)]
 const FORK_PROOF: &str = "\
 import os
 import sys
