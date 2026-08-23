@@ -44,19 +44,35 @@ pub struct RunPlan {
     pub workers: usize,
     /// Per-test deadline in milliseconds.
     pub deadline_ms: u64,
-    /// Whether the fork tier may take the optimistic in-process ladder for pure tests.
+    /// Whether the fork tier may take the optimistic in-process ladder for restorable tests.
     ///
-    /// **Off by default.** Turned on in TID-23 on a measurement that looked clean, then turned back
-    /// off when TID-26 uncovered 129 previously-uncollected tests and four of them failed under the
-    /// ladder while passing under fork.
+    /// **On by default**, as of TID-33. It has been on before and was reverted, so the history is
+    /// worth stating plainly rather than trusting the current measurement on its own:
     ///
-    /// The cause is a real limit, not a bug to patch out: `_snapshot_shared` snapshots the **test
-    /// module's** globals only. A test that mutates state owned by a *library* module — registering
-    /// into a registry, installing a prompt pack — has nothing restored, and the next test sees it.
-    /// Fork has no such hole, because the child is a whole pristine process.
+    /// * TID-23 turned it on, on a corpus that looked clean.
+    /// * TID-26 turned it back off. It had uncovered 129 tests collection was silently dropping,
+    ///   and four of them failed under the ladder while passing under fork.
+    /// * TID-27 fixed the specific cause of those four: `_snapshot_shared` covers the **test
+    ///   module's** globals, so a test that swapped a *library* module had nothing restored.
     ///
-    /// Worth ~2.4x when it is safe (24.0s -> 10.2s on a real corpus), so it stays available behind
-    /// `--optimistic`; it is not sound enough to be the default.
+    /// What makes this time different is not a fourth patched category. Each of those fixes closed
+    /// one hole in a list nobody could show was complete, which is why the revert was right and why
+    /// re-flipping on "we fixed the last one" would have been wrong again. TID-33 replaced the list
+    /// with a fingerprint taken around every in-process test: a test that disturbs state nothing
+    /// undid is *detected* whether or not we modelled that category, re-run in a fork so the current
+    /// run reports the right answer, and recorded so later runs fork it from the start.
+    ///
+    /// So the ladder is no longer a bet that the list is complete. It is a bet that a cheap
+    /// fingerprint notices when the world moved, which is a much smaller thing to be wrong about.
+    ///
+    /// It is not free of limits, and one is worth naming here: a **thread** a test leaves running
+    /// cannot be unwound. That is detected and the node is demoted, but a neighbour that counts
+    /// threads will still see it. Fork has no such hole, because the child is a whole pristine
+    /// process — `--no-optimistic` (or `TIDERACE_FORCE_FORK=1`) is the way back to it.
+    ///
+    /// Measured on a 4,514-test corpus: outcomes identical to fork and to pytest, zero fingerprint
+    /// trips, 2.18x faster than pytest against fork-per-test's 1.12x — and, the part wall clock
+    /// hides, 69s of CPU against fork-per-test's 140s for the same work.
     pub optimistic_no_fork: bool,
     /// Node ids recorded pure, eligible for the bare no-fork tier (TID-1).
     pub trusted_pure: HashSet<String>,
@@ -75,7 +91,7 @@ impl Default for RunPlan {
             scheduler: SchedulerKind::default(),
             workers: default_workers(),
             deadline_ms: DEFAULT_DEADLINE_MS,
-            optimistic_no_fork: false,
+            optimistic_no_fork: true,
             trusted_pure: HashSet::new(),
             must_fork: HashSet::new(),
         }
@@ -100,9 +116,14 @@ impl RunPlan {
                 self.strategy.fallback()
             ));
         }
-        if self.optimistic_no_fork {
-            s.push_str(" optimistic-no-fork");
-        }
+        // Named in both directions. It used to be printed only when on, because it was the unusual
+        // choice; now that it is the default the *absence* of the ladder is the fact a pasted
+        // benchmark number needs, and a run that says nothing about it is uninterpretable either way.
+        s.push_str(if self.optimistic_no_fork {
+            " optimistic-no-fork"
+        } else {
+            " fork-per-test"
+        });
         s
     }
 
@@ -164,15 +185,22 @@ mod tests {
     }
 
     #[test]
-    fn the_optimistic_ladder_is_off_by_default_and_visible_when_on() {
-        // Off because restore only covers the test module's own globals, so a test that mutates a
-        // library module's state leaks into the next one (found via TID-26).
-        assert!(!RunPlan::default().optimistic_no_fork);
-        let plan = RunPlan {
-            optimistic_no_fork: true,
+    fn the_optimistic_ladder_is_on_by_default_and_the_header_says_which() {
+        // On since TID-33: a test that disturbs state the restore cannot model is detected by the
+        // fingerprint, re-run forked, and remembered — so the ladder no longer rests on our list of
+        // restorable categories being complete, which is what forced the TID-26 revert.
+        assert!(RunPlan::default().optimistic_no_fork);
+        assert!(RunPlan::default().header().contains("optimistic-no-fork"));
+
+        // And the header names the other direction too, so a benchmark taken with the ladder off is
+        // not silently indistinguishable from one taken with it on.
+        let forking = RunPlan {
+            optimistic_no_fork: false,
             ..RunPlan::default()
         };
-        assert!(plan.header().contains("optimistic-no-fork"));
+        let header = forking.header();
+        assert!(header.contains("fork-per-test"), "got: {header}");
+        assert!(!header.contains("optimistic-no-fork"), "got: {header}");
     }
 
     #[test]

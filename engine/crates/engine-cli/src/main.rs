@@ -31,19 +31,26 @@ Options for `run`:
       --scheduler <KIND>  batch packing: locality | round-robin (default: locality)
       --timeout <MS>      per-test deadline in milliseconds (default: 60000)
       --no-fork           alias for --strategy subprocess
-      --optimistic        let restorable tests skip the fork (~2.4x; see the note below)
+      --optimistic        let restorable tests skip the fork (the default; kept for scripts)
+      --no-optimistic     fork every test, even the restorable ones (see the note below)
   -q, --quiet             suppress the per-test lines; print only the tally
   -h, --help              show this message
 
 Environment:
   TIDERACE_SHIM           path to shim.py (required if no bundled shim is installed)
   TIDERACE_PYTHON         interpreter to drive (default: python3 / python)
+  TIDERACE_FORCE_FORK=1   same as --no-optimistic (the daemon already honours this)
 
 Notes:
-  `--optimistic` runs restorable tests in-process instead of forking (~2.4x on a large corpus), but
-  snapshot/restore only covers the TEST module's globals. A test that mutates a library module's
-  state — registering into a registry, installing a pack — leaks into the next test. Forking every
-  test has no such hole, so it is the default.
+  Restorable tests run in-process instead of forking, which is where most of the speed comes from:
+  a fork copies the parent's page tables, so on a large-import project it costs far more than the
+  test does. Anything the in-process path cannot restore is detected per test, re-run in a fork so
+  this run still reports the right answer, and remembered so later runs fork it from the start.
+
+  `--no-optimistic` forks every test. The one thing the detector cannot undo is a thread a test
+  leaves running: it is caught and that test is demoted, but a neighbour counting threads still
+  sees it. A forked child is a whole pristine process and has no such hole, so this is the setting
+  to reach for when a suite disagrees with itself between the two.
 
   `--strategy subinterp` is a hybrid: a sub-interpreter cannot load a single-phase C extension
   (numpy is the canonical case), so modules are probed and only the safe subset runs on the pool;
@@ -105,6 +112,12 @@ impl Options {
     /// the precise failure mode TID-17 exists to end.
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut plan = RunPlan::default();
+        // The daemon has honoured `TIDERACE_FORCE_FORK=1` since before the ladder was a default;
+        // read it here too so one setting covers both front ends. Applied before the flags, so an
+        // explicit `--optimistic` on the command line still wins over it.
+        if std::env::var("TIDERACE_FORCE_FORK").as_deref() == Ok("1") {
+            plan.optimistic_no_fork = false;
+        }
         let mut quiet = false;
         let mut root: Option<PathBuf> = None;
         let mut strategy_set = false;
@@ -164,7 +177,9 @@ impl Options {
                     plan.strategy = WorkerStrategy::Subprocess;
                     strategy_set = true;
                 }
+                // Accepted and inert: it is the default now, and it is in people's scripts.
                 "--optimistic" => plan.optimistic_no_fork = true,
+                "--no-optimistic" => plan.optimistic_no_fork = false,
                 "-q" | "--quiet" => quiet = true,
                 other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
                 _ => {
@@ -355,8 +370,41 @@ mod tests {
     }
 
     #[test]
-    fn forking_every_test_is_the_default() {
-        assert!(!parse(&["tests"]).expect("parses").plan.optimistic_no_fork);
+    fn the_optimistic_ladder_is_the_default() {
+        assert!(parse(&["tests"]).expect("parses").plan.optimistic_no_fork);
+    }
+
+    #[test]
+    fn no_optimistic_forks_every_test_and_the_header_says_so() {
+        let o = parse(&["--no-optimistic", "tests"]).expect("parses");
+        assert!(!o.plan.optimistic_no_fork);
+        assert!(o.plan.header().contains("fork-per-test"));
+    }
+
+    /// `--optimistic` is inert now, but it is in people's scripts and CI configs, so it has to keep
+    /// parsing rather than becoming `unknown option`.
+    #[test]
+    fn the_old_optimistic_flag_still_parses() {
+        let o = parse(&["--optimistic", "tests"]).expect("the old flag still parses");
+        assert!(o.plan.optimistic_no_fork);
+    }
+
+    /// Last flag wins, so a script that appends `--no-optimistic` to an existing `--optimistic`
+    /// invocation gets what it asked for.
+    #[test]
+    fn the_last_of_the_two_flags_wins() {
+        assert!(
+            !parse(&["--optimistic", "--no-optimistic", "tests"])
+                .expect("parses")
+                .plan
+                .optimistic_no_fork
+        );
+        assert!(
+            parse(&["--no-optimistic", "--optimistic", "tests"])
+                .expect("parses")
+                .plan
+                .optimistic_no_fork
+        );
     }
 
     /// A typo must stop the run. Falling through to the default would execute a different tier than
