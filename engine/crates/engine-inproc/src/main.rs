@@ -40,7 +40,9 @@ fn smart(args: &[String]) -> i32 {
     let mut pure = std::collections::HashSet::new();
     let mut passed = 0;
     for it in &items {
-        let (outcome, p) = t.run_node(it.node_id.as_str(), it.style.wire(), 5000, false).unwrap();
+        let (outcome, p) = t
+            .run_node(it.node_id.as_str(), it.style.wire(), 5000, false)
+            .unwrap();
         if outcome == "passed" {
             passed += 1;
         }
@@ -62,8 +64,12 @@ fn smart(args: &[String]) -> i32 {
     // Phase 2b — smart: pure→no-fork, impure→fork.
     let smart = time_run(&t, &items, |n| pure.contains(n));
     println!("[re-run] all-fork : {all_fork:.0} ms");
-    println!("[re-run] smart    : {smart:.0} ms   ({:.1}× faster, {} of {} tests no-fork)",
-        all_fork / smart.max(0.001), pure.len(), items.len());
+    println!(
+        "[re-run] smart    : {smart:.0} ms   ({:.1}× faster, {} of {} tests no-fork)",
+        all_fork / smart.max(0.001),
+        pure.len(),
+        items.len()
+    );
     0
 }
 
@@ -75,7 +81,8 @@ fn time_run(
     let started = Instant::now();
     for it in items {
         let nf = no_fork(it.node_id.as_str());
-        t.run_node(it.node_id.as_str(), it.style.wire(), 5000, nf).unwrap();
+        t.run_node(it.node_id.as_str(), it.style.wire(), 5000, nf)
+            .unwrap();
     }
     started.elapsed().as_secs_f64() * 1000.0
 }
@@ -83,7 +90,10 @@ fn time_run(
 /// Time `iters` full passes of a real corpus through the embedded interpreter (import-once + per-test
 /// fork-from-embedded), to compare against the subprocess `PipeTransport` baseline.
 fn bench(args: &[String]) -> i32 {
-    let corpus = PathBuf::from(args.get(2).expect("usage: inproc-probe bench <corpus> [iters]"));
+    let corpus = PathBuf::from(
+        args.get(2)
+            .expect("usage: inproc-probe bench <corpus> [iters]"),
+    );
     let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3);
     let engine_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -93,9 +103,12 @@ fn bench(args: &[String]) -> i32 {
     let items = RegexCollector::new().collect(&corpus).expect("collect");
 
     // Profile: same tests, fork-per-test (isolated) vs in-process (no fork) — isolates the fork cost.
-    for (label, no_fork) in [("fork-per-test (isolated)", false), ("no-fork (in-process)", true)] {
-        let mut transport =
-            InProcessTransport::new(&corpus, engine_py_paths(&engine_dir), false).with_no_fork(no_fork);
+    for (label, no_fork) in [
+        ("fork-per-test (isolated)", false),
+        ("no-fork (in-process)", true),
+    ] {
+        let mut transport = InProcessTransport::new(&corpus, engine_py_paths(&engine_dir), false)
+            .with_no_fork(no_fork);
         let boot = Instant::now();
         transport.ready().expect("ready");
         let boot_ms = boot.elapsed().as_secs_f64() * 1000.0;
@@ -106,7 +119,11 @@ fn bench(args: &[String]) -> i32 {
             passed = 0;
             for it in &items {
                 let resp = transport
-                    .exchange(&ExecRequest::bare(it.node_id.as_str(), it.style.wire(), 5000))
+                    .exchange(&ExecRequest::bare(
+                        it.node_id.as_str(),
+                        it.style.wire(),
+                        5000,
+                    ))
                     .expect("exchange");
                 if resp.outcome == "passed" {
                     passed += 1;
@@ -154,7 +171,7 @@ fn proof() {
         ("test_ok", "passed"),
         ("test_bad", "failed"),
         ("test_upper", "passed"),
-        ("test_mutate", "passed"),   // mutates a module global in its forked child
+        ("test_mutate", "passed"), // mutates a module global in its forked child
         ("test_isolated", "passed"), // sees a clean global ⇒ the mutation did NOT leak ⇒ fork isolated
     ];
     let mut ok = true;

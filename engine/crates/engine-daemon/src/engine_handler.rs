@@ -100,6 +100,7 @@ impl EngineHandler {
         &self,
         requested: &[String],
         trusted: &HashSet<String>,
+        must_fork: &HashSet<String>,
     ) -> Result<Vec<TestResult>, String> {
         let all = self.collect()?;
         let items: Vec<TestItem> = if requested.is_empty() {
@@ -118,6 +119,7 @@ impl EngineHandler {
             5000,
             optimistic_no_fork(), // no-fork + restore by default (TIDERACE_FORCE_FORK=1 to disable)
             trusted,
+            must_fork, // TID-33: recorded state-disturbers skip the in-process ladder entirely
         )
     }
 
@@ -138,6 +140,15 @@ impl EngineHandler {
             .filter(|(_, rec)| {
                 rec.pure == Some(true) && !rec.deps.iter().any(|d| changed.contains(d))
             })
+            .map(|(node, _)| node.clone())
+            .collect();
+        // TID-33: recorded state-disturbers are forked from the start. Separate from `trusted` and
+        // its inverse: most impure tests are impure in ways restore handles completely, and forking
+        // those would cost the ladder nearly everything it buys.
+        let must_fork: HashSet<String> = state
+            .tests
+            .iter()
+            .filter(|(_, rec)| rec.must_fork)
             .map(|(node, _)| node.clone())
             .collect();
 
@@ -171,11 +182,11 @@ impl EngineHandler {
             if !fork_items.is_empty() {
                 let fork_nodes: Vec<String> =
                     fork_items.iter().map(|it| it.node_id.to_string()).collect();
-                fresh.extend(self.run_items_parallel(&fork_nodes, &trusted)?);
+                fresh.extend(self.run_items_parallel(&fork_nodes, &trusted, &must_fork)?);
             }
             fresh
         } else {
-            self.run_items_parallel(&[], &trusted)?
+            self.run_items_parallel(&[], &trusted, &must_fork)?
         };
 
         self.persist_results(&mut state, &fresh);
@@ -242,6 +253,14 @@ impl EngineHandler {
                     detail: r.detail.clone(),
                     deps: r.touched_files.clone(),
                     pure: r.pure,
+                    // Sticky: a forked re-run cannot observe the drift that earned the flag, so
+                    // clearing it on a clean forked result would make the node oscillate between
+                    // tiers forever. It clears when the test's own source changes.
+                    must_fork: r.must_fork
+                        || state
+                            .tests
+                            .get(r.node_id.as_str())
+                            .is_some_and(|p| p.must_fork),
                 },
             );
         }
@@ -312,6 +331,7 @@ impl EngineHandler {
                     outcome: outcome_token(outcome.outcome()).to_string(),
                     duration_ms: 0,
                 });
+                let was_disturber = state.tests.get(&node).is_some_and(|p| p.must_fork);
                 state.tests.insert(
                     node,
                     TestRecord {
@@ -319,6 +339,9 @@ impl EngineHandler {
                         detail: outcome.detail().to_string(),
                         deps,
                         pure: Some(true),
+                        // A cache hit re-serves a previously *pure* result; it says nothing new
+                        // about state disturbance, so preserve whatever was recorded.
+                        must_fork: was_disturber,
                     },
                 );
             }
@@ -326,7 +349,13 @@ impl EngineHandler {
             // Run the cache misses (stale purity ⇒ no trusted-pure; restore re-measures the verdict).
             if !to_execute.is_empty() {
                 executed = to_execute.len();
-                let fresh = self.run_items_parallel(&to_execute, &HashSet::new())?;
+                let disturbers: HashSet<String> = state
+                    .tests
+                    .iter()
+                    .filter(|(_, rec)| rec.must_fork)
+                    .map(|(node, _)| node.clone())
+                    .collect();
+                let fresh = self.run_items_parallel(&to_execute, &HashSet::new(), &disturbers)?;
                 for r in &fresh {
                     results.push(to_rpc(r.clone()));
                 }

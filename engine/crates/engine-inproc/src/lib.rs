@@ -162,6 +162,11 @@ impl ShimTransport for InProcessTransport {
                 detail,
                 coverage,
                 pure,
+                must_fork: res
+                    .get_item("must_fork")
+                    .ok()
+                    .and_then(|m| m.extract::<bool>().ok())
+                    .unwrap_or(false),
                 // This transport speaks the one-request-one-result protocol and does not expand
                 // parametrization or resolve inherited methods, so a node reports itself
                 // (TID-25/TID-26). `expanded: false` keeps the empty `variants` meaning "not
