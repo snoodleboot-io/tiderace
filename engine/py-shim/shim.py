@@ -121,8 +121,22 @@ def _skip_exceptions() -> tuple[type[BaseException], ...]:
 _SKIP_EXCEPTIONS = _skip_exceptions()
 
 
-def _warn_if_root_shadows_stdlib(root: str) -> None:
-    """Say so when the run root puts stdlib names in the shadow (TID-37, partial).
+def _package_basedir(directory: str) -> str:
+    """The first ancestor of `directory` that is not itself a package.
+
+    pytest's basedir rule, and the only directory that belongs on `sys.path`: a *package* directory
+    placed there makes its own subpackages importable as bare top-level names."""
+    cur = os.path.abspath(directory)
+    while os.path.exists(os.path.join(cur, "__init__.py")):
+        parent = os.path.dirname(cur)
+        if parent == cur:  # filesystem root; nothing further to walk to
+            break
+        cur = parent
+    return cur
+
+
+def _insert_run_root(root: str) -> None:
+    """Put the run root's **basedir** on `sys.path`, and warn if it still shadows the stdlib (TID-37).
 
     The run root goes on `sys.path[0]`, so any directory or module inside it named like a standard
     library module wins over the real one. A suite laid out as `tests/` containing `tests/types/` or
@@ -135,20 +149,25 @@ def _warn_if_root_shadows_stdlib(root: str) -> None:
     re-resolves it. Only names first imported *during* the run are captured, so the same defect
     looks like a batch-size or ordering effect rather than a naming one.
 
-    **This warns; it does not fix.** The fix is to insert the package *basedir* the way pytest does
-    and the way `_module_name` already does for naming — but `_discover` names test modules relative
-    to the run root, so the root must currently stay importable. Reconciling those two spellings is
-    the rest of TID-37, and it is a bigger change than a warning: attempted together, it cost two
-    `caplog` resolutions on a 4,516-test corpus for reasons not yet understood."""
+    Inserting the basedir instead of the root only works because `_discover` now names test modules
+    through `_module_name`, which walks to the same place. While the two disagreed, the run root had
+    to stay importable and this could not be fixed.
+
+    The warning stays for the case the walk cannot help with: a basedir that is *not* a package but
+    still holds a directory named like a stdlib module. pytest has the same exposure there, and
+    naming it beats letting it surface as unrelated errors later."""
+    basedir = _package_basedir(root)
+    if basedir not in sys.path:
+        sys.path.insert(0, basedir)
     try:
-        entries = os.listdir(root)
+        entries = os.listdir(basedir)
     except OSError:
         return
     names = {e[:-3] if e.endswith(".py") else e for e in entries}
     shadowed = sorted(names & sys.stdlib_module_names)
     if shadowed:
         print(
-            f"tiderace: {os.path.abspath(root)} is on sys.path and contains "
+            f"tiderace: {basedir} is on sys.path and contains "
             f"{', '.join(shadowed)}, which shadow standard-library modules of the same name; "
             f"imports of those will resolve here, not to the stdlib",
             file=sys.stderr, flush=True,
@@ -886,10 +905,13 @@ def _discover(root: str) -> Registry:
                     _collect_addoption(module)
                     conftests.append(module)
             elif name.startswith("test_") or name.endswith("_test.py"):
-                # NOTE: named relative to the run root, while `_module_name` names the same file
-                # relative to its package basedir. The two disagree whenever the run root is inside a
-                # package, and reconciling them is the open half of TID-37 — see `_warn_if_root_shadows_stdlib`.
-                rel = os.path.relpath(path, root)[:-3].replace(os.sep, ".")
+                # Named through `_module_name`, exactly as execution names it (TID-37). The old
+                # spelling was relative to the run *root*, which forced the run root itself onto
+                # `sys.path` — and a run root that is a package is what shadowed the stdlib. It was
+                # also a latent double-import: when the two spellings disagreed, the same file was
+                # imported twice under two names, so a module-level fixture could register against
+                # one copy while the test ran against the other.
+                rel = _module_name(os.path.relpath(path, root).replace(os.sep, "/"))
                 try:
                     module = importlib.import_module(rel)
                 except Exception:  # noqa: BLE001 — a bad module surfaces per-test, not at discovery
@@ -2639,8 +2661,7 @@ def probe() -> int:
     root = sys.argv[1]
     global _ROOT
     _ROOT = root
-    sys.path.insert(0, root)
-    _warn_if_root_shadows_stdlib(root)
+    _insert_run_root(root)
     paths = list(sys.path)  # the sub-interpreter inherits the same import roots (root + site-packages + …)
     _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
     while True:
@@ -2687,8 +2708,7 @@ def subinterp() -> int:
     root = sys.argv[1]
     global _ROOT
     _ROOT = root
-    sys.path.insert(0, root)
-    _warn_if_root_shadows_stdlib(root)
+    _insert_run_root(root)
     paths = list(sys.path)
     workers = max(1, int(os.environ.get("TIDERACE_SUBINTERP_WORKERS") or (os.cpu_count() or 4)))
 
@@ -2787,8 +2807,7 @@ def serve() -> int:
     coverage = "--coverage" in sys.argv[2:] or os.environ.get("TIDERACE_COVERAGE") == "1"
     purity = "--purity" in sys.argv[2:] or os.environ.get("TIDERACE_PURITY") == "1"
     restore = "--restore" in sys.argv[2:] or os.environ.get("TIDERACE_RESTORE") == "1"
-    sys.path.insert(0, root)
-    _warn_if_root_shadows_stdlib(root)
+    _insert_run_root(root)
     # Ancestor conftests before `_preimport` (TID-19): a root conftest exists to set things up that
     # must already be true when test modules import — env defaults, warning filters, `sys.path`. pytest
     # loads conftests first for the same reason. `_discover` reads the memoised result back.
