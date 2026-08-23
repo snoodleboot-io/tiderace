@@ -6,11 +6,11 @@ use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestItem, TestResult};
 use engine_core::exec::{ForkWorker, SubInterpWorker, Worker};
 
-use crate::persist::{changed_files, plan, PersistedState, SafeModule, TestRecord};
+use crate::persist::{changed_files, plan, PersistedState, TestRecord};
 use crate::rpc_method::{RpcRequest, RpcResponse, RpcResult};
 use crate::rpc_server::RpcHandler;
 use crate::watch::content_hash;
-use engine_core::exec::probe_modules;
+use engine_core::exec::SafeSetCache;
 
 /// Summary of an impact-aware run: which tests actually executed vs. were served from warm state.
 #[derive(Debug)]
@@ -196,50 +196,20 @@ impl EngineHandler {
         Ok(fresh.into_iter().map(to_rpc).collect())
     }
 
-    /// The sub-interpreter-safe module set for `modules`, using the persisted verdicts where the module's
-    /// content is unchanged and **probing only the new/changed ones** (ADR-E015 TID-9 cache + TID-11).
-    /// Updates `state.safe_modules`. Undeterminable modules (probe unavailable, < 3.14) are treated as
-    /// unsafe → routed to fork (always sound).
+    /// The sub-interpreter-safe module set for `modules` (ADR-E015 TID-9 cache + TID-11).
+    ///
+    /// The classification and content-hash invalidation live in `engine_core`'s [`SafeSetCache`], so
+    /// the CLI gets the same behaviour instead of re-probing every run (TID-35). The daemon keeps
+    /// *persisting* the verdicts in its own state file, which it already writes.
     fn safe_set(
         &self,
         state: &mut PersistedState,
         modules: &[String],
     ) -> Result<HashSet<String>, String> {
-        let to_probe: Vec<String> = modules
-            .iter()
-            .filter(|m| {
-                state
-                    .safe_modules
-                    .get(*m)
-                    .map(|rec| rec.hash != self.hash_file(m))
-                    .unwrap_or(true)
-            })
-            .cloned()
-            .collect();
-        if !to_probe.is_empty() {
-            let verdicts = probe_modules(&self.python, &self.shim, &self.root, &to_probe)?;
-            for m in &to_probe {
-                match verdicts.get(m) {
-                    Some(Some(safe)) => {
-                        state.safe_modules.insert(
-                            m.clone(),
-                            SafeModule {
-                                hash: self.hash_file(m),
-                                safe: *safe,
-                            },
-                        );
-                    }
-                    _ => {
-                        state.safe_modules.remove(m); // undeterminable ⇒ don't cache; fall to fork
-                    }
-                }
-            }
-        }
-        Ok(modules
-            .iter()
-            .filter(|m| state.safe_modules.get(*m).map(|r| r.safe).unwrap_or(false))
-            .cloned()
-            .collect())
+        let mut cache = SafeSetCache::from_entries(std::mem::take(&mut state.safe_modules));
+        let safe = cache.resolve(&self.python, &self.shim, &self.root, modules);
+        state.safe_modules = cache.into_entries();
+        safe
     }
 
     /// Fold a batch of results into the persisted state (outcome + detail + deps + purity verdict) and

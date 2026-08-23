@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use engine_core::exec::SafeModule;
 use serde::{Deserialize, Serialize};
 
 /// On-disk warm state for impact-aware one-shot `run`s. Persists each test's outcome + its dependency
@@ -17,14 +18,10 @@ pub struct PersistedState {
     /// by TID-11 routing). Re-probed only when the module's content hash changes. `#[serde(default)]`
     /// so older state files load fine.
     #[serde(default)]
+    /// Sub-interpreter safety verdicts. The type and the probing logic live in `engine-core` so the
+    /// CLI shares them (TID-35); the daemon keeps persisting them here, inside the state file it
+    /// already writes, rather than adding a second file beside it.
     pub safe_modules: BTreeMap<String, SafeModule>,
-}
-
-/// A module's cached sub-interpreter-safety verdict, keyed by content so a change re-probes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SafeModule {
-    pub hash: String,
-    pub safe: bool,
 }
 
 /// One test's persisted result + dependency footprint.
