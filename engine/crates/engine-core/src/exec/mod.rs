@@ -22,6 +22,8 @@ mod transport;
 mod watermark;
 mod watermark_stack;
 mod wellspring;
+#[cfg(unix)]
+mod wellspring_pool;
 mod worker;
 mod worker_caps;
 
@@ -38,5 +40,7 @@ pub use transport::{PipeTransport, ReadyInfo, ShimTransport};
 pub use watermark::{Watermark, WatermarkId};
 pub use watermark_stack::WatermarkStack;
 pub use wellspring::Wellspring;
+#[cfg(unix)]
+pub use wellspring_pool::{PooledTransport, PooledWorker, WellspringPool};
 pub use worker::Worker;
 pub use worker_caps::WorkerCaps;

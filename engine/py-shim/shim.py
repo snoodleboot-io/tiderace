@@ -65,6 +65,18 @@ def _read_exactly(fd: int, n: int) -> bytes | None:
     return buf
 
 
+def _flag_value(name: str) -> str | None:
+    """The value of `--flag value` or `--flag=value` in argv, or None. Deliberately tiny: the shim
+    takes a handful of flags and pulling in argparse would cost more at startup than it saves."""
+    argv = sys.argv[2:]
+    for i, a in enumerate(argv):
+        if a == name and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith(name + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
 def _read_frame(fd: int) -> dict | None:
     header = _read_exactly(fd, 4)
     if header is None:
@@ -2640,6 +2652,61 @@ def subinterp() -> int:
             t.join(timeout=5)
 
 
+def _serve_pool(size: int, socket_path: str, engine_args: dict) -> int:
+    """Import once in this process, then fork `size` workers that each serve their own connection.
+
+    The pool exists because the per-worker *import* was being paid N times (TID-4). Every wellspring
+    in the old pool was an independent `python shim.py`, so an 8-worker run imported the project
+    eight times — on a large-import corpus that is ~2.6s of CPU each, ~21s of the ~34s that eight
+    workers add. Wall clock hid it, because the imports overlap; a CI runner billed for CPU does not.
+
+    The fix is the same primitive the engine already runs on. `_preimport`/`_discover` happen once,
+    *here*, and then `fork()` hands every worker a copy-on-write view of the result for free. Each
+    child runs the ordinary `serve` loop unchanged — the only difference is which fd it talks over.
+
+    Workers connect *back* to a listening socket rather than being handed inherited fds. That keeps
+    the whole thing dependency-free on both sides: no `SCM_RIGHTS`, no `dup2`, and nothing for the
+    Rust side to do beyond accepting `size` connections.
+    """
+    import socket
+
+    children = []
+    for _ in range(size):
+        pid = os.fork()
+        if pid == 0:
+            # Child: take a connection of our own and become an ordinary single worker. Anything the
+            # parent is holding is irrelevant to us and closing it keeps the parent's exit clean.
+            global _STDIN, _STDOUT
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(socket_path)
+            _STDIN = _STDOUT = sock.fileno()
+            engine = Engine(**engine_args)
+            _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
+            try:
+                while True:
+                    req = _read_frame(_STDIN)
+                    if req is None:
+                        return 0
+                    _write_frame(
+                        _STDOUT,
+                        engine.run(req["node_id"], req["style"], req.get("deadline_ms", 5000),
+                                   req.get("force_no_fork", False), req.get("trusted_pure", False)),
+                    )
+            finally:
+                engine.teardown_all()
+                os._exit(0)  # never unwind past the fork point in a child
+        children.append(pid)
+
+    # Parent: nothing to serve. Hold the imported image alive — the children are COW views of it —
+    # and reap them so no worker is orphaned if the run is cut short.
+    status = 0
+    for pid in children:
+        _, st = os.waitpid(pid, 0)
+        if os.WIFEXITED(st) and os.WEXITSTATUS(st) != 0:
+            status = os.WEXITSTATUS(st)
+    return status
+
+
 def serve() -> int:
     root = sys.argv[1]
     global _ROOT
@@ -2655,8 +2722,16 @@ def serve() -> int:
     _load_ancestor_conftests(root)
     _preimport(root)
     reg = _discover(root)
-    engine = Engine(reg, no_fork=no_fork, root=root, coverage=coverage, purity_guard=purity,
-                    restore=restore)
+    engine_args = dict(reg=reg, no_fork=no_fork, root=root, coverage=coverage,
+                       purity_guard=purity, restore=restore)
+    # Pool mode (TID-4): fork the workers from this one imported image instead of importing per
+    # worker. Every worker below is created *after* the fork, so its fixture state is its own and
+    # the semantics match N separate wellsprings exactly.
+    pool = _flag_value("--pool")
+    conn = _flag_value("--connect")
+    if pool and conn:
+        return _serve_pool(int(pool), conn, engine_args)
+    engine = Engine(**engine_args)
     _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
     try:
         while True:

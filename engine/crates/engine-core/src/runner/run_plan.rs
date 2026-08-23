@@ -76,6 +76,19 @@ pub struct RunPlan {
     pub optimistic_no_fork: bool,
     /// Node ids recorded pure, eligible for the bare no-fork tier (TID-1).
     pub trusted_pure: HashSet<String>,
+    /// Import the project **once** and fork the workers from that image, instead of running N
+    /// independent wellsprings that each import it (TID-4).
+    ///
+    /// **Opt-in for now.** The win is CPU, not wall clock — the imports already overlap across
+    /// workers, so nothing gets faster; what changes is that an 8-worker run stops paying for eight
+    /// imports. On a large-import corpus that is ~2.6s each, roughly 21s of the ~34s of CPU that
+    /// eight workers add over one. Invisible on a laptop with idle cores, and the entire cost on a
+    /// CI runner billed for CPU.
+    ///
+    /// Off by default because it is a new fork topology — the parent forks workers, and each worker
+    /// forks per test — and the thing it changes is the most correctness-critical path in the
+    /// engine. It buys no user-visible latency, so there is nothing to trade soak time against.
+    pub shared_import: bool,
     /// Node ids recorded as disturbing interpreter state — forked even under the ladder (TID-33).
     ///
     /// The shim detects a first offence on its own and re-runs it forked, so correctness does not
@@ -92,6 +105,7 @@ impl Default for RunPlan {
             workers: default_workers(),
             deadline_ms: DEFAULT_DEADLINE_MS,
             optimistic_no_fork: true,
+            shared_import: false,
             trusted_pure: HashSet::new(),
             must_fork: HashSet::new(),
         }
@@ -124,6 +138,9 @@ impl RunPlan {
         } else {
             " fork-per-test"
         });
+        if self.shared_import {
+            s.push_str(" shared-import");
+        }
         s
     }
 
