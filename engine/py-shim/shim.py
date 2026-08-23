@@ -121,6 +121,40 @@ def _skip_exceptions() -> tuple[type[BaseException], ...]:
 _SKIP_EXCEPTIONS = _skip_exceptions()
 
 
+def _warn_if_root_shadows_stdlib(root: str) -> None:
+    """Say so when the run root puts stdlib names in the shadow (TID-37, partial).
+
+    The run root goes on `sys.path[0]`, so any directory or module inside it named like a standard
+    library module wins over the real one. A suite laid out as `tests/` containing `tests/types/` or
+    `tests/statistics/` captures `types` / `statistics` for the whole run. Every module that touches
+    one — directly or transitively — breaks, and it surfaces as ordinary test errors with nothing
+    pointing at the cause. On one real suite that was 73 of them.
+
+    It bites unevenly, which is what makes it so hard to see: a stdlib module already in
+    `sys.modules` when the path is poisoned (`types`, `json`, `os`) keeps working, because nothing
+    re-resolves it. Only names first imported *during* the run are captured, so the same defect
+    looks like a batch-size or ordering effect rather than a naming one.
+
+    **This warns; it does not fix.** The fix is to insert the package *basedir* the way pytest does
+    and the way `_module_name` already does for naming — but `_discover` names test modules relative
+    to the run root, so the root must currently stay importable. Reconciling those two spellings is
+    the rest of TID-37, and it is a bigger change than a warning: attempted together, it cost two
+    `caplog` resolutions on a 4,516-test corpus for reasons not yet understood."""
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return
+    names = {e[:-3] if e.endswith(".py") else e for e in entries}
+    shadowed = sorted(names & sys.stdlib_module_names)
+    if shadowed:
+        print(
+            f"tiderace: {os.path.abspath(root)} is on sys.path and contains "
+            f"{', '.join(shadowed)}, which shadow standard-library modules of the same name; "
+            f"imports of those will resolve here, not to the stdlib",
+            file=sys.stderr, flush=True,
+        )
+
+
 def _module_name(module_key: str) -> str:
     """Importable dotted module name for a module key ('tests/m.py' -> 'tests.m').
 
@@ -326,8 +360,12 @@ def _own_markers(*owners) -> list:
         if owner is None:
             continue
         marks = getattr(owner, "pytestmark", None)
-        if marks:
-            out.extend(marks)
+        if not marks:
+            continue
+        # pytest accepts both spellings — `pytestmark = pytest.mark.slow` and
+        # `pytestmark = [pytest.mark.slow, ...]` — and a bare `MarkDecorator` is not iterable, so
+        # extending on it raises `TypeError` and takes the whole discovery pass down with it.
+        out.extend(marks if isinstance(marks, (list, tuple)) else [marks])
     return out
 
 
@@ -792,6 +830,35 @@ def _load_ancestor_conftests(root: str) -> list:
     return out
 
 
+# Directories never descended into during discovery. Mirrors `RegexCollector::SKIP_DIRS` — the two
+# walks must agree, or the shim reports fixtures for files collection never saw (and vice versa).
+_SKIP_DIRS = frozenset({
+    "__pycache__", ".git", ".venv", "venv", ".tox", ".nox", "site-packages",
+    ".tiderace-spike-venv", ".tiderace-bench-venv", ".tiderace-fx-venv",
+    ".pytest_cache", "node_modules", ".mypy_cache", ".ruff_cache",
+})
+
+
+def _walk_suite(root: str):
+    """`os.walk` over the suite, skipping what is not part of it, in a deterministic order.
+
+    Two things this gets right that the obvious spelling does not.
+
+    **The prune has to happen during the walk.** `sorted(os.walk(root))` reads the *entire* tree
+    before yielding anything, so assigning to `dirs` afterwards prunes nothing — the traversal has
+    already been to every directory. Sorting `dirs` in place instead gives the same deterministic
+    order and lets the prune actually take effect.
+
+    **`.venv` is not part of the suite.** Without a skip list the walk finds and imports the
+    *dependencies'* test suites: numpy ships its own, and `.venv/…/numpy/conftest.py` was imported on
+    every run of any project with numpy installed. Slow, wrong, and a source of foreign collection
+    state — a `pytestmark` from someone else's suite reaching our marker handling is how the scalar
+    `pytestmark` crash above was found."""
+    for current, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in _SKIP_DIRS)
+        yield current, dirs, files
+
+
 def _discover(root: str) -> Registry:
     reg = Registry()
     native: list[tuple] = []  # (provider obj, location) — resolved in a second pass (see below)
@@ -806,7 +873,7 @@ def _discover(root: str) -> Registry:
                 native.append((obj, location))
             elif _is_fixture(obj):
                 reg.add(_fixture_def(obj, location))
-    for current, _dirs, files in sorted(os.walk(root)):
+    for current, _dirs, files in _walk_suite(root):
         rel_dir = os.path.relpath(current, root)
         rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
         for name in sorted(files):
@@ -819,6 +886,9 @@ def _discover(root: str) -> Registry:
                     _collect_addoption(module)
                     conftests.append(module)
             elif name.startswith("test_") or name.endswith("_test.py"):
+                # NOTE: named relative to the run root, while `_module_name` names the same file
+                # relative to its package basedir. The two disagree whenever the run root is inside a
+                # package, and reconciling them is the open half of TID-37 — see `_warn_if_root_shadows_stdlib`.
                 rel = os.path.relpath(path, root)[:-3].replace(os.sep, ".")
                 try:
                     module = importlib.import_module(rel)
@@ -2526,7 +2596,7 @@ def _aggregate(outcomes: list[tuple[str, str]]) -> tuple[str, str]:
 
 # --------------------------------------------------------------------------- serve loop
 def _preimport(root: str) -> None:
-    for current, _dirs, files in os.walk(root):
+    for current, _dirs, files in _walk_suite(root):  # never warm a dependency's own suite
         for name in files:
             if name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py")):
                 rel = os.path.relpath(os.path.join(current, name), root)[:-3]
@@ -2570,6 +2640,7 @@ def probe() -> int:
     global _ROOT
     _ROOT = root
     sys.path.insert(0, root)
+    _warn_if_root_shadows_stdlib(root)
     paths = list(sys.path)  # the sub-interpreter inherits the same import roots (root + site-packages + …)
     _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
     while True:
@@ -2617,6 +2688,7 @@ def subinterp() -> int:
     global _ROOT
     _ROOT = root
     sys.path.insert(0, root)
+    _warn_if_root_shadows_stdlib(root)
     paths = list(sys.path)
     workers = max(1, int(os.environ.get("TIDERACE_SUBINTERP_WORKERS") or (os.cpu_count() or 4)))
 
@@ -2716,6 +2788,7 @@ def serve() -> int:
     purity = "--purity" in sys.argv[2:] or os.environ.get("TIDERACE_PURITY") == "1"
     restore = "--restore" in sys.argv[2:] or os.environ.get("TIDERACE_RESTORE") == "1"
     sys.path.insert(0, root)
+    _warn_if_root_shadows_stdlib(root)
     # Ancestor conftests before `_preimport` (TID-19): a root conftest exists to set things up that
     # must already be true when test modules import — env defaults, warning filters, `sys.path`. pytest
     # loads conftests first for the same reason. `_discover` reads the memoised result back.

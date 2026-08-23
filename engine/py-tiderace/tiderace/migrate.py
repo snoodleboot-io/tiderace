@@ -84,7 +84,11 @@ def _kwarg(call: ast.Call, name: str):
     return None
 
 
-def _is_generator(fn: ast.FunctionDef) -> bool:
+def _is_generator(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether `fn` yields — i.e. is a setup/teardown fixture rather than a plain one.
+
+    Async generators count: `async def db(): ... yield conn ... ` is the async spelling of exactly
+    the same fixture shape, and treating it as a plain provider drops its teardown (TID-36)."""
     for node in ast.walk(fn):
         if isinstance(node, (ast.Yield, ast.YieldFrom)) and node is not fn:
             return True
@@ -218,6 +222,22 @@ class _Migrator(ast.NodeTransformer):
         self.report = report
         self.used_builtins: set = set()  # tiderace.builtins type names that need importing
 
+
+    # The `pytest.<attr>` names tiderace can now stand behind directly (TID-38). Everything else —
+    # `pytest.mark`, `importorskip`, `MonkeyPatch`, … — is left alone, reported, and keeps its import.
+    _ASSERTION_ATTRS = ("raises", "approx")
+
+    def visit_Attribute(self, node: ast.Attribute):
+        self.generic_visit(node)
+        if (
+            isinstance(node.value, ast.Name)
+            and node.value.id == "pytest"
+            and node.attr in self._ASSERTION_ATTRS
+        ):
+            self.report.mapped(node.lineno, f"`pytest.{node.attr}` → `tiderace.{node.attr}`")
+            return ast.copy_location(_attr("tiderace", node.attr), node)
+        return node
+
     def visit_Import(self, node: ast.Import):
         names = []
         for alias in node.names:
@@ -246,6 +266,17 @@ class _Migrator(ast.NodeTransformer):
         if node.name.startswith("test_") or node.name.endswith("_test"):
             return self._test(node)
         return node
+
+    # `NodeTransformer` dispatches on the concrete node type, so without this every coroutine was
+    # walked straight past: an async test kept `@pytest.mark.parametrize`, an async fixture kept
+    # `@pytest.fixture` — while the module-level `import pytest → import tiderace` rewrite still
+    # fired, leaving the name unbound and every async test raising `NameError` at call time. The
+    # report claimed the file migrated cleanly, so the gap was invisible until the suite ran (TID-36).
+    #
+    # Aliasing is safe rather than merely convenient: `visit_FunctionDef` mutates its argument in
+    # place and returns that same node — it never constructs a fresh `ast.FunctionDef` — so the node
+    # stays an `AsyncFunctionDef` and only its decorators and annotations change.
+    visit_AsyncFunctionDef = visit_FunctionDef
 
     # ---- fixture → provider ----
     def _fixture(self, node: ast.FunctionDef):
@@ -405,8 +436,59 @@ def migrate_source(src: str) -> tuple[str, Report]:
     migrator = _Migrator(fixture_types, report)
     new_tree = migrator.visit(tree)
     _inject_builtins_import(new_tree, migrator.used_builtins)
+    _restore_pytest_import(new_tree, report)
     ast.fix_missing_locations(new_tree)
     return ast.unparse(new_tree), report
+
+
+def _residual_pytest_attrs(tree: ast.Module) -> set[str]:
+    """The `pytest.<attr>` names still present **after** the rewrite.
+
+    Scanned on the finished tree rather than recorded during the walk, because the walk sees nodes
+    that are then replaced: `pytest.mark.skipif` is observed on the way down and disappears when the
+    decorator handler swaps in `tiderace.skip_if`. Counting it mid-walk keeps an import the module no
+    longer needs, which is the mirror of the bug being fixed."""
+    attrs: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id == "pytest":
+                attrs.add(node.attr)
+        elif isinstance(node, ast.Name) and node.id == "pytest" and isinstance(node.ctx, ast.Load):
+            attrs.add("")  # a bare `pytest` reference, e.g. passed as a value
+    return attrs
+
+
+def _restore_pytest_import(tree: ast.Module, report: Report) -> None:
+    """Put `import pytest` back when the rewritten module still references the name (TID-38).
+
+    `import pytest` becomes `import tiderace` unconditionally, but only decorators, fixtures and the
+    two assertion helpers get remapped. Anything left — `pytest.mark.skipif`, `importorskip`,
+    `MonkeyPatch` — would name `pytest` with nothing bound to it, so every test in the module raises
+    `NameError` at call time. The migration report showed the file as fully mapped, which made the
+    breakage invisible until the suite ran; on one real suite that was 86 of 542 modules.
+
+    Restoring the import is the honest floor: the module *works*, and the finding says plainly that
+    the suite still depends on pytest here and why. Silently emitting code that looks migrated and is
+    broken is the one behaviour worse than every alternative."""
+    found = _residual_pytest_attrs(tree)
+    if not found:
+        return
+    named = sorted(a for a in found if a)
+    shown = ", ".join(f"pytest.{a}" for a in named[:4]) or "the bare name `pytest`"
+    more = f" (+{len(named) - 4} more)" if len(named) > 4 else ""
+    report.cant(
+        0,
+        f"module still uses {shown}{more} — no tiderace equivalent, so `import pytest` is kept "
+        f"alongside `import tiderace`; this module keeps pytest as a dependency",
+    )
+    # After the `__future__` imports and the docstring, matching `_inject_builtins_import`.
+    idx = 0
+    body = tree.body
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        idx = 1
+    while idx < len(body) and isinstance(body[idx], ast.ImportFrom) and body[idx].module == "__future__":
+        idx += 1
+    body.insert(idx, ast.Import(names=[ast.alias(name="pytest", asname=None)]))
 
 
 def _inject_builtins_import(tree: ast.Module, used: set) -> None:

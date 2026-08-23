@@ -26,12 +26,17 @@ from __future__ import annotations
 import inspect
 import itertools
 
+from ._assertions import Approx, RaisesContext, approx, raises
 from ._errors import TideraceDefinitionError, TideraceError, TideraceResolutionError
 from ._resolve import build_type_index, provided_type, resolve_params
 from ._spec import SCOPES, Case, Mark, ProviderSpec
 
 __all__ = [
     "provides",
+    "raises",
+    "approx",
+    "RaisesContext",
+    "Approx",
     "cases",
     "uses",
     "skip",
