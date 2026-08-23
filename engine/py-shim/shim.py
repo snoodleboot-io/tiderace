@@ -34,16 +34,19 @@ import inspect
 import itertools
 import json
 import linecache
+import logging
 import os
 import select
 import signal
 import struct
 import sys
 import textwrap
+import threading
 import time
 import traceback
 import typing
 import unittest
+import warnings
 
 _STDIN = 0
 _STDOUT = 1
@@ -1225,6 +1228,86 @@ def _restore_shared(module, before: dict, env_before: dict) -> None:
         os.environ.update(env_before)
 
 
+def _state_fingerprint() -> dict:
+    """A cheap snapshot of the interpreter state a test could disturb (TID-33).
+
+    Identities, keys and counts only — never a deep copy — so this is affordable to take around
+    every in-process test. It is not trying to describe the world, only to notice that the world
+    moved.
+
+    The point is catching the categories we have NOT modelled. Restore covers the test module's
+    globals, `os.environ` and `sys.modules`, and each of those was added after an incident; there is
+    no reason to believe the list is finished. A fingerprint that shifts means the test reached
+    somewhere we do not know how to undo, which is exactly when it should have forked.
+
+    `sys.modules` is deliberately absent, even though it is the obvious thing to watch. It is
+    already handled better upstream: `_restore_modules` runs before this comparison and puts back
+    everything a test removed or replaced, so the only delta left to see here is modules the test
+    *added* — and those are a warmed import cache that `_restore_modules` keeps on purpose. Flagging
+    them would fork the test without undoing anything, since the import stays in the wellspring
+    either way. Measured on a 4,514-test corpus that was 17 of the 18 trips, every one an ordinary
+    lazy import."""
+    root = logging.getLogger()
+    return {
+        "sys.path": list(sys.path),
+        "environ": frozenset(os.environ),
+        "warnings.filters": len(warnings.filters),
+        "logging.handlers": tuple(id(h) for h in root.handlers),
+        "logging.level": root.level,
+        "threads": threading.active_count(),
+    }
+
+
+def _restore_state(before: dict) -> None:
+    """Put back the interpreter state the fingerprint can restore, in place.
+
+    The fingerprint exists to notice categories nobody modelled, but several of the things it
+    watches are trivially restorable once you know they moved — so knowing is most of the work.
+    `sys.path`, the warnings filters and the root logger's handlers are all just lists; they are
+    restored by content so anything holding a reference keeps seeing the right object, for the same
+    reason `_restore_in_place` exists (TID-22).
+
+    What cannot be undone here is a thread the test left running. That is reported rather than
+    fixed, and the node is still demoted to forking."""
+    sys.path[:] = before["sys.path"]
+    if len(warnings.filters) != before["warnings.filters"]:
+        del warnings.filters[: len(warnings.filters) - before["warnings.filters"]]
+    root = logging.getLogger()
+    if tuple(id(h) for h in root.handlers) != before["logging.handlers"]:
+        keep = {i: h for i, h in ((id(h), h) for h in root.handlers)}
+        root.handlers[:] = [keep[i] for i in before["logging.handlers"] if i in keep]
+    root.setLevel(before["logging.level"])
+
+
+def _fingerprint_delta(before: dict, after: dict) -> str | None:
+    """A human-readable description of what moved between two fingerprints, or None if nothing did.
+
+    Named per key rather than reported as a bare "state changed", because the whole value of this
+    signal is telling an author *what* their test touched."""
+    # A thread *finishing* is not this test's doing — it is some earlier test's background worker
+    # exiting, and reporting it as a leak both flags an innocent test and prints "left -1 threads".
+    # Only growth is a disturbance. Every other key is compared for inequality in both directions:
+    # a removed environment variable or warnings filter is as much a change as an added one.
+    changed = [
+        k for k in before
+        if (after.get(k, 0) > before[k] if k == "threads" else before[k] != after.get(k))
+    ]
+    if not changed:
+        return None
+    parts = []
+    for key in changed:
+        if key == "threads":
+            parts.append(f"left {after[key] - before[key]} thread(s) running")
+        elif key == "environ":
+            added = sorted(after[key] - before[key])
+            removed = sorted(before[key] - after[key])
+            detail = ", ".join(added + [f"-{r}" for r in removed][:3])
+            parts.append(f"changed os.environ ({detail})")
+        else:
+            parts.append(f"changed {key}")
+    return "; ".join(parts)
+
+
 def _restore_modules(before: dict) -> list:
     """Put back any module a test REPLACED in `sys.modules`; returns the names it swapped (TID-27).
 
@@ -1645,11 +1728,30 @@ class Engine:
             # No-COW fallback: run the test in THIS process (no isolation, but the same fixture
             # engine → result-identical outcomes; §8 boundary 3). Function fixtures are set up and
             # torn down per test in-process; wider scopes still live once in the parent.
+            self._leaked = None
             try:
-                return self._child_exec(node_id, style, requested, closure, combo, case_kwargs,
-                                        in_process=True, trusted_pure=trusted_pure)
+                result = self._child_exec(node_id, style, requested, closure, combo, case_kwargs,
+                                          in_process=True, trusted_pure=trusted_pure)
             except BaseException as exc:  # noqa: BLE001 — any in-process test error → Outcome::Error
                 return "error", "".join(traceback.format_exception_only(type(exc), exc)), {}, _UNKNOWN_PURITY
+            # `_child_exec` sets this when the fingerprint moved in a way nothing undid (TID-33), so
+            # the in-process result cannot be trusted and neither can this process. Re-run the test
+            # in a fork — a pristine copy — and report THAT, which fixes the current run rather than
+            # only teaching the next one. `_FORK_AVAILABLE` is false on Windows, where there is
+            # nothing better to fall back to, so the in-process answer stands there. Neither is
+            # `--strategy subprocess`, where running in-process is the configured strategy rather
+            # than this run's optimistic guess: there the restore above is the whole remedy.
+            drift, self._leaked = self._leaked, None
+            if drift is not None and _FORK_AVAILABLE and not must_fork and not self.no_fork:
+                print(f"tiderace: re-running {node_id} in a fork — it {drift}",
+                      file=sys.stderr, flush=True)
+                oc, detail, cov, _ = self._fork_run(
+                    node_id, style, requested, closure, combo, deadline_ms, case_kwargs,
+                    force_no_fork=False, trusted_pure=False, must_fork=True)
+                # Keep the impurity verdict: the point is that this node must not take the
+                # in-process path again, and the forked run cannot observe what the first one did.
+                return oc, detail, cov, f"disturbed interpreter state: {drift}"
+            return result
 
         read_fd, write_fd = os.pipe()
         pid = os.fork()
@@ -1818,6 +1920,10 @@ class Engine:
             # and a test can swap a library module without touching a single global of its own
             # (TID-27). Cheap enough to do unconditionally on the in-process path.
             modules_before = dict(sys.modules) if (self.restore and in_process) else None
+            # Everything restore does NOT model (TID-33). Identities and counts only, so it is
+            # affordable per test, and it is the only thing here that can notice a category nobody
+            # has thought of yet.
+            state_before = _state_fingerprint() if (self.restore and in_process) else None
             outcome, detail = _invoke(node_id, style, test_args)
             purity = _purity_verdict(mod, before, env_before) if mod is not None else _UNKNOWN_PURITY
             if self.restore and in_process and mod is not None and purity is not None:
@@ -1831,6 +1937,22 @@ class Engine:
                     shown = ", ".join(sorted(replaced)[:3])
                     more = f" (+{len(replaced) - 3} more)" if len(replaced) > 3 else ""
                     purity = f"replaced modules in sys.modules: {shown}{more}"
+            if state_before is not None:
+                drift = _fingerprint_delta(state_before, _state_fingerprint())
+                if drift is not None:
+                    # Put back what is restorable before anything else runs in this process. The
+                    # offender's own result is still discarded below — it ran against a world it had
+                    # already changed — but its neighbours must not inherit the damage.
+                    _restore_state(state_before)
+                    residue = _fingerprint_delta(state_before, _state_fingerprint())
+                    if residue is not None:
+                        drift = f"{drift} (unrestorable: {residue})"
+                    # The world moved in a way nothing above undid, so this test should never have
+                    # run in-process. `_leaked` tells the caller to discard this result and re-run it
+                    # forked — detection that only fixed the NEXT run would leave the first one
+                    # quietly wrong, and the first run is where CI goes red for no visible reason.
+                    self._leaked = drift
+                    purity = f"disturbed interpreter state: {drift}"
             return outcome, detail, cov.stop(), purity
         finally:
             cov.stop()  # idempotent — frees the monitoring tool id even if setup raised
