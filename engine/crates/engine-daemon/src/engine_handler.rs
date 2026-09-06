@@ -216,21 +216,42 @@ impl EngineHandler {
     /// rebaseline the content hashes of every touched file. Shared by the impact-aware + full runs.
     fn persist_results(&self, state: &mut PersistedState, results: &[TestResult]) {
         for r in results {
+            let prior = state.tests.get(r.node_id.as_str());
             state.tests.insert(
                 r.node_id.to_string(),
                 TestRecord {
                     outcome: outcome_token(r.outcome).to_string(),
                     detail: r.detail.clone(),
-                    deps: r.touched_files.clone(),
-                    pure: r.pure,
+                    // An empty footprint means capture was off, not that the test depends on
+                    // nothing — every test touches at least its own file. Overwriting a real
+                    // footprint with "no data" would silently disarm the staleness guards that
+                    // read it.
+                    deps: if r.touched_files.is_empty() {
+                        prior.map(|p| p.deps.clone()).unwrap_or_default()
+                    } else {
+                        r.touched_files.clone()
+                    },
+                    // Sticky for the same reason `must_fork` is, and missing it made the bare
+                    // no-fork tier erase the verdict that grants it. `pure: None` means *this run
+                    // did not measure* — because the test was forked, was async, or was trusted
+                    // pure and therefore skipped the snapshot. In none of those did we learn the
+                    // test became impure, so overwriting a recorded verdict with "unknown" throws
+                    // away a fact for no reason.
+                    //
+                    // The effect was a perfect oscillation: run 1 measures pure, run 2 trusts it
+                    // and goes bare (measuring nothing), run 3 finds no verdict and pays the full
+                    // snapshot again. The tier could never apply twice in a row, so half its value
+                    // was discarded. Measured on a snapshot-heavy corpus: 1.31s / 0.45s / 1.61s /
+                    // 0.45s across four identical runs.
+                    //
+                    // Staleness is still handled where it belongs — `trusted` requires the
+                    // recorded deps to be unchanged, and TID-40 made those footprints sound. A
+                    // measured verdict (`Some`) always wins over the prior one.
+                    pure: r.pure.or_else(|| prior.and_then(|p| p.pure)),
                     // Sticky: a forked re-run cannot observe the drift that earned the flag, so
                     // clearing it on a clean forked result would make the node oscillate between
                     // tiers forever. It clears when the test's own source changes.
-                    must_fork: r.must_fork
-                        || state
-                            .tests
-                            .get(r.node_id.as_str())
-                            .is_some_and(|p| p.must_fork),
+                    must_fork: r.must_fork || prior.is_some_and(|p| p.must_fork),
                 },
             );
         }
@@ -520,7 +541,93 @@ fn outcome_token(outcome: Outcome) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::domain::{NodeId, Outcome};
     use engine_core::testing::skip_live;
+
+    fn handler_for(dir: &std::path::Path) -> EngineHandler {
+        EngineHandler::new("python3", PathBuf::from("shim.py"), dir.to_path_buf())
+    }
+
+    fn result(node: &str, pure: Option<bool>, deps: &[&str]) -> TestResult {
+        TestResult::new(NodeId::new(node), Outcome::Passed, 1, "")
+            .with_touched(deps.iter().map(|d| (*d).to_string()).collect())
+            .with_pure(pure)
+    }
+
+    /// A run that did not measure purity must not erase the verdict a previous run recorded.
+    ///
+    /// `pure: None` means *this run did not measure* — the test was forked, was async, or was
+    /// trusted pure and so skipped the snapshot. None of those learned that the test became impure.
+    ///
+    /// Missing this made the bare no-fork tier erase the very verdict that grants it, in a perfect
+    /// oscillation: measure pure, trust it and go bare (measuring nothing), find no verdict, pay the
+    /// full snapshot again. On a snapshot-heavy corpus that alternated 1.31s / 0.45s / 1.61s / 0.45s
+    /// across four identical runs — the tier could never apply twice in a row.
+    #[test]
+    fn an_unmeasured_run_keeps_the_recorded_purity_verdict() {
+        let dir = std::env::temp_dir().join(format!("tiderace_sticky_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let handler = handler_for(&dir);
+        let mut state = PersistedState::default();
+
+        handler.persist_results(&mut state, &[result("t.py::a", Some(true), &["t.py"])]);
+        assert_eq!(state.tests["t.py::a"].pure, Some(true));
+
+        // The bare run: nothing measured.
+        handler.persist_results(&mut state, &[result("t.py::a", None, &["t.py"])]);
+        assert_eq!(
+            state.tests["t.py::a"].pure,
+            Some(true),
+            "an unmeasured run must not downgrade a recorded verdict to unknown"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A *measured* verdict always wins, in both directions — stickiness must not mean deafness.
+    #[test]
+    fn a_measured_verdict_overwrites_the_recorded_one() {
+        let dir = std::env::temp_dir().join(format!("tiderace_measured_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let handler = handler_for(&dir);
+        let mut state = PersistedState::default();
+
+        handler.persist_results(&mut state, &[result("t.py::a", Some(true), &["t.py"])]);
+        handler.persist_results(&mut state, &[result("t.py::a", Some(false), &["t.py"])]);
+        assert_eq!(
+            state.tests["t.py::a"].pure,
+            Some(false),
+            "a test measured impure must lose its pure verdict"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An empty footprint means capture was off, not that the test depends on nothing.
+    ///
+    /// Every test touches at least its own file, so an empty `deps` is missing data. Writing it over
+    /// a real footprint would silently disarm the staleness guards that read it — including the one
+    /// protecting the tier that skips isolation.
+    #[test]
+    fn an_empty_footprint_does_not_erase_a_recorded_one() {
+        let dir = std::env::temp_dir().join(format!("tiderace_deps_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let handler = handler_for(&dir);
+        let mut state = PersistedState::default();
+
+        handler.persist_results(
+            &mut state,
+            &[result("t.py::a", Some(true), &["t.py", "src.py"])],
+        );
+        handler.persist_results(&mut state, &[result("t.py::a", None, &[])]);
+        assert_eq!(
+            state.tests["t.py::a"].deps,
+            vec!["t.py".to_string(), "src.py".to_string()],
+            "a run with capture off must not wipe the footprint"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
