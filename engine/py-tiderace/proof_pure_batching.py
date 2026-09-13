@@ -1,6 +1,11 @@
-"""Pure-test batching proof — the payoff of the purity guard. Pure tests run in-process (no fork) at
-~90× the speed of fork-per-test, with identical outcomes; the purity guard re-checks each one so a
-misclassified mutator is flagged (defense in depth). Drives the real shim, no pytest.
+"""Pure-test batching proof. Pure tests run in-process (no fork) with identical outcomes to
+fork-per-test; the purity guard re-checks each one so a misclassified mutator is flagged (defense in
+depth). Drives the real shim, no pytest.
+
+The speed side is a microbenchmark, and should be read as one. On these trivial tests in-process is
+~90× cheaper per test than a fork from a light parent. That ratio does not carry over to a suite: real
+gains where the tier applies were measured at ~3.4×, and a suite built with module-level test doubles has
+no pure tests at all (TID-41).
 
 Run:  python3 proof_pure_batching.py
 """

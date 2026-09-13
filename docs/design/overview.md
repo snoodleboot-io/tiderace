@@ -41,11 +41,15 @@ A **wellspring** (ADR-E003) is a CPython process that imports your project **onc
 it. The engine then classifies each test and runs it the cheapest **sound** way — the
 [isolation ladder](parallel-execution.md) (ADR-E014):
 
-| Tier | When | Mechanism | Rel. cost |
+| Tier | When | Mechanism | Per-test cost ¹ |
 |---|---|---|---|
 | **bare no-fork** | test is *known pure* | nothing to isolate | ~0.05 ms (90×) |
 | **no-fork + restore** | restorable footprint, purity unknown/impure | snapshot module globals + `os.environ`, run, undo | ~0.4–0.9 ms (5–14×) |
 | **fork** | opaque (un-snapshot-able) globals | copy-on-write child | ~4.5 ms (1×) |
+
+¹ Per-test microbenchmark on a trivial test, against a fork from a light parent — not what a suite will
+see. On real projects the bare tier delivers ~3.4× where it applies, and often applies to no test at all;
+see [parallel execution](parallel-execution.md) for the measurements.
 
 This is **sound by construction**: no-fork + restore *contains* mutation rather than predicting it,
 and any module it can't snapshot falls back to fork. A wrong purity verdict can only change speed,

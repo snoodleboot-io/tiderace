@@ -34,7 +34,12 @@ pub struct ExecRequest<'a> {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force_no_fork: bool,
     /// This test is *recorded pure and unchanged* (TID-1): run it BARE no-fork — skip the snapshot/restore
-    /// entirely (~90×). Only ever set for a `force_no_fork` request. `false` ⇒ byte-identical frame.
+    /// entirely. Only ever set for a `force_no_fork` request. `false` ⇒ byte-identical frame.
+    ///
+    /// Skipping the snapshot means skipping isolation, so any mutation this test makes persists. That is
+    /// why it is gated on a recorded verdict whose dependencies are unchanged, and why the payoff — ~90×
+    /// per test in the trivial-test microbenchmark, ~3.4× on a real snapshot-heavy corpus — only exists
+    /// for tests that genuinely mutate nothing (TID-41).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub trusted_pure: bool,
 }

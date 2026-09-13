@@ -95,7 +95,9 @@ impl EngineHandler {
     /// Run the requested tests across a **parallel pool** of wellsprings (one per core), not the single
     /// warm wellspring — the fix for sequential full runs. Tests run no-fork + restore by default; the
     /// shim forks non-restorable (opaque) modules for soundness. `trusted` node ids (recorded pure +
-    /// unchanged, TID-1) run BARE no-fork (skip the snapshot → ~90×).
+    /// unchanged, TID-1) run BARE no-fork, skipping the snapshot. That is ~90× cheaper per test only in
+    /// the trivial-test microbenchmark; measured on real corpora it is ~3.4× where it applies, and on a
+    /// suite built with module-level test doubles it applies to no test at all (TID-41).
     fn run_items_parallel(
         &self,
         requested: &[String],
