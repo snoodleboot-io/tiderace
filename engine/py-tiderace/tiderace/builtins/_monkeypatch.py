@@ -12,6 +12,24 @@ from typing import Any
 _SENTINEL = object()  # marks "attribute/key did not exist" so undo deletes instead of restoring
 
 
+def _pytest_notset_sentinels() -> tuple:
+    """Whichever "key did not exist" sentinels the running pytest defines.
+
+    pytest renamed its sentinel between releases — `_pytest.monkeypatch.notset` (a `Notset`) through
+    8.x, `NOTSET` (a `NotSetType` enum from `_pytest.compat`) in 9.x — and compares it *by identity*.
+    So this collects whatever actually exists and `undo()` compares by identity too. Importing a
+    single name would reproduce, inside its own fix, the very version gap TID-44 is about.
+
+    Only called when pytest-format records exist, and only pytest can have produced those, so a suite
+    that never touches pytest still never imports it."""
+    try:
+        import _pytest.monkeypatch as pytest_monkeypatch
+    except ImportError:
+        return ()
+    names = ("notset", "NOTSET")
+    return tuple(v for v in (getattr(pytest_monkeypatch, n, None) for n in names) if v is not None)
+
+
 class MonkeyPatch:
     """Record-and-undo mutations for the duration of one test.
 
@@ -21,6 +39,12 @@ class MonkeyPatch:
 
     def __init__(self) -> None:
         self._undo: list = []  # list[Callable[[], None]] — inverse ops, replayed in reverse
+        # pytest's *private* setitem undo log, as `(mapping, key, old_value)` tuples (TID-44). Not part
+        # of pytest's API, but real suites reach into it: flask's conftest appends a session's worth of
+        # standard-environ records to `monkeypatch._setitem` so every test's teardown resets
+        # `os.environ`. Without this attribute that autouse fixture errored on setup for 451 of flask's
+        # 482 tests. Entries appended here are honoured by `undo()` exactly as pytest honours them.
+        self._setitem: list = []
 
     # ---- attributes ----
     def setattr(self, target: Any, name: str, value: Any = _SENTINEL) -> None:
@@ -82,9 +106,24 @@ class MonkeyPatch:
 
     # ---- teardown ----
     def undo(self) -> None:
-        """Replay every recorded inverse, newest first; idempotent (the queue empties)."""
+        """Replay every recorded inverse, newest first; idempotent (the queues empty).
+
+        tiderace's own inverses run first, then any pytest-format `_setitem` records, newest first —
+        the order pytest itself uses (attribute undos, then item undos). For flask that means the
+        standard environ it appended is what survives, which is what it appended it for."""
         while self._undo:
             self._undo.pop()()
+        if self._setitem:
+            notset = _pytest_notset_sentinels()
+            while self._setitem:
+                mapping, key, old = self._setitem.pop()
+                if old is _SENTINEL or any(old is sentinel for sentinel in notset):
+                    try:
+                        del mapping[key]
+                    except KeyError:
+                        pass  # already gone — exactly pytest's behaviour
+                else:
+                    mapping[key] = old
 
     @staticmethod
     def _resolve_target(dotted: str, name: Any) -> tuple:
