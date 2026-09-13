@@ -170,3 +170,67 @@ fn discovery_does_not_descend_into_a_virtualenv() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A module-level object that raises on attribute access does not crash discovery (TID-43).
+///
+/// Discovery probes every module global to see whether it is a fixture or a provider. flask's tests
+/// do `from flask import request` at module level — a werkzeug `LocalProxy` that raises
+/// `RuntimeError: Working outside of request context` on any attribute access. `hasattr` only swallows
+/// `AttributeError`, so that escaped `_discover` and killed the shim before a single test ran.
+///
+/// Reproduced here without flask: an object whose `__getattr__` raises `RuntimeError`, which is the
+/// whole mechanism. The same object is also passed as a parametrize value, because parametrize ids
+/// probe `__name__` on arbitrary values and had the identical weakness.
+#[test]
+fn a_module_global_that_raises_on_attribute_access_does_not_crash_discovery() {
+    let Some(python) = python_with_pytest() else {
+        skip_live("no interpreter with pytest available");
+        return;
+    };
+    let dir = scratch("lazyproxy");
+    std::fs::write(
+        dir.join("test_lazy_proxy.py"),
+        "import pytest\n\
+         \n\
+         \n\
+         class LazyProxy:\n\
+         \x20   \"\"\"Stands in for werkzeug's LocalProxy: every attribute access raises.\"\"\"\n\
+         \n\
+         \x20   def __getattr__(self, name):\n\
+         \x20       raise RuntimeError(\"Working outside of request context.\")\n\
+         \n\
+         \n\
+         request = LazyProxy()\n\
+         \n\
+         \n\
+         def test_the_suite_still_runs():\n\
+         \x20   assert True\n\
+         \n\
+         \n\
+         @pytest.mark.parametrize(\"proxy\", [LazyProxy()])\n\
+         def test_a_proxy_as_a_parameter(proxy):\n\
+         \x20   assert proxy is not None\n",
+    )
+    .unwrap();
+
+    let items = RegexCollector::new().collect(&dir).expect("collection");
+    let mut worker = SubprocessWorker::new(20_000, 1).with_target(python, &shim(), &dir);
+    let results = worker
+        .run(&items)
+        .expect("TID-43: a raising module global must not kill the shim during discovery");
+    assert_eq!(
+        results.len(),
+        2,
+        "both tests report, including the parametrized one"
+    );
+    for r in &results {
+        assert_eq!(
+            r.outcome,
+            Outcome::Passed,
+            "{} — {}",
+            r.node_id.as_str(),
+            r.detail
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

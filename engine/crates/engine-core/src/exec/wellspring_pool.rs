@@ -23,6 +23,7 @@ use std::io::BufReader;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use std::collections::HashSet;
 
@@ -30,6 +31,16 @@ use crate::domain::{TestItem, TestResult};
 use crate::error::{EngineError, Result};
 use crate::exec::transport::{run_batch, PipeTransport, ShimTransport};
 use crate::exec::Worker;
+
+/// How long the parent may spend importing the project before the first worker connects. Generous on
+/// purpose: a false timeout here would break a legitimate large project, while a dead parent is caught
+/// immediately by the liveness check and never has to wait this out.
+const IMPORT_DEADLINE: Duration = Duration::from_secs(300);
+
+/// How long the remaining workers may take once the first has connected. They are forks of an image
+/// that has already imported everything, so they arrive within milliseconds; this is slack, not a
+/// budget.
+const WORKER_DEADLINE: Duration = Duration::from_secs(30);
 
 /// A transport to one pooled worker.
 pub type PooledTransport = PipeTransport<UnixStream, BufReader<UnixStream>>;
@@ -93,10 +104,16 @@ impl WellspringPool {
             socket_path,
             workers: Vec::with_capacity(size),
         };
+        // Non-blocking, so the wait below can notice the parent dying instead of sitting in `accept`
+        // forever. That is exactly what happened before (TID-43): the shim crashed during discovery on
+        // flask, and the default configuration hung indefinitely with its python child a zombie.
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| EngineError::Exec(format!("worker socket: {e}")))?;
+        let started = Instant::now();
+        let mut first_connected: Option<Instant> = None;
         for i in 0..size {
-            let (stream, _) = listener
-                .accept()
-                .map_err(|e| EngineError::Exec(format!("worker {i} never connected: {e}")))?;
+            let stream = pool.accept_worker(&listener, i, size, started, &mut first_connected)?;
             let read_half = stream
                 .try_clone()
                 .map_err(|e| EngineError::Exec(format!("worker {i} socket clone: {e}")))?;
@@ -105,6 +122,69 @@ impl WellspringPool {
             pool.workers.push(transport);
         }
         Ok(pool)
+    }
+
+    /// Wait for worker `i` to connect, failing fast if it never will.
+    ///
+    /// Two clocks, because startup has two phases with very different expected durations:
+    ///
+    /// * **Before the first worker connects**, the parent is importing the project. That is the slow
+    ///   part and legitimately so — 2.6s on a large-import corpus, and it can be far longer — so it
+    ///   gets a generous deadline. It also gets an immediate check on the parent: if the parent has
+    ///   exited, no worker can ever arrive, and waiting out the deadline would just be a slower hang.
+    /// * **Once one worker has connected**, the import is finished and every other worker is a fork of
+    ///   that same image, arriving within milliseconds. A missing one after that means a worker died
+    ///   on its way in. The parent is still alive in that case — it is busy waiting on the others —
+    ///   so a liveness check alone would never fire, and only the short deadline catches it.
+    fn accept_worker(
+        &mut self,
+        listener: &UnixListener,
+        i: usize,
+        size: usize,
+        started: Instant,
+        first_connected: &mut Option<Instant>,
+    ) -> Result<UnixStream> {
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    // Accepted sockets are blocking on Linux regardless of the listener, but the
+                    // transport's reads rely on it, so do not leave that to platform behaviour.
+                    stream
+                        .set_nonblocking(false)
+                        .map_err(|e| EngineError::Exec(format!("worker {i} socket: {e}")))?;
+                    first_connected.get_or_insert_with(Instant::now);
+                    return Ok(stream);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => {
+                    return Err(EngineError::Exec(format!(
+                        "worker {i} of {size} failed to connect: {e}"
+                    )))
+                }
+            }
+
+            if let Ok(Some(status)) = self.parent.try_wait() {
+                return Err(EngineError::Exec(format!(
+                    "the wellspring pool exited ({status}) before worker {} of {size} connected. The \
+                     Python traceback above says why. If this suite only fails under the shared-import \
+                     pool, --no-shared-import runs it with one interpreter per worker instead",
+                    i + 1
+                )));
+            }
+
+            let (clock, limit, phase) = match first_connected {
+                None => (started, IMPORT_DEADLINE, "importing the project"),
+                Some(t) => (*t, WORKER_DEADLINE, "starting its workers"),
+            };
+            if clock.elapsed() > limit {
+                return Err(EngineError::Exec(format!(
+                    "the wellspring pool was still {phase} after {}s with only {i} of {size} workers \
+                     connected, so it was stopped rather than waited on indefinitely",
+                    limit.as_secs()
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// Hand one worker's transport to a caller (typically one scheduler batch, on its own thread).
