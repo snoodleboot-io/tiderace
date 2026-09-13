@@ -164,3 +164,50 @@ fn the_project_is_imported_once_for_the_whole_pool() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A pool whose parent dies before any worker connects returns an error — promptly — instead of
+/// waiting in `accept` forever (TID-43).
+///
+/// That hang shipped as the default: the shim crashed during discovery on flask, and `tiderace run`
+/// sat indefinitely with its python child a zombie. The trigger here is independent of any Python
+/// compatibility bug — a "shim" that exits at once — so this pins the pool's behaviour, not flask's.
+///
+/// Run under a watchdog. A regression of this bug is a hang, and a hang must fail the test rather
+/// than hang CI along with it.
+#[test]
+fn a_pool_whose_parent_dies_before_workers_connect_fails_fast() {
+    let Some(python) = any_python() else {
+        skip_live("no Python interpreter available");
+        return;
+    };
+    let dir = write_corpus("deadparent", 1);
+    let dead_shim = dir.join("dead_shim.py");
+    std::fs::write(
+        &dead_shim,
+        "import sys\nprint('simulated startup crash', file=sys.stderr)\nsys.exit(1)\n",
+    )
+    .unwrap();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (py, shim, root) = (python.clone(), dead_shim.clone(), dir.clone());
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let outcome = WellspringPool::launch(&py, &shim, &root, true, 4).map(|_| ());
+        let _ = tx.send((outcome, started.elapsed()));
+    });
+
+    let (outcome, elapsed) = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("TID-43: WellspringPool::launch hung on a dead parent instead of failing fast");
+    let err = outcome.expect_err("a pool with no live parent cannot have started");
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "TID-43: took {elapsed:?} to notice a dead parent; it should be near-immediate"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("exited") && msg.contains("--no-shared-import"),
+        "the error must say the pool died and name the way out; got: {msg}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

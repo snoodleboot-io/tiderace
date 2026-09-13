@@ -378,7 +378,7 @@ def _own_markers(*owners) -> list:
     for owner in owners:
         if owner is None:
             continue
-        marks = getattr(owner, "pytestmark", None)
+        marks = _safe_getattr(owner, "pytestmark", None)  # owners can carry a raising metaclass
         if not marks:
             continue
         # pytest accepts both spellings — `pytestmark = pytest.mark.slow` and
@@ -559,13 +559,42 @@ def _with_request(func, args: dict, node_id: str, instance=None) -> dict:
     return {**args, "request": _TestRequest(node_id, func, instance)}
 
 
+_MISSING = object()
+
+
+def _safe_getattr(obj, name: str, default=None):
+    """`getattr` that treats *any* exception as "absent", not only `AttributeError` (TID-43).
+
+    Discovery probes every module-level value to see whether it is a fixture or a provider, and those
+    values are arbitrary objects. Plenty of them raise something other than `AttributeError` when
+    touched: flask's `request`, `g`, `session` and `current_app` are werkzeug `LocalProxy` objects
+    that raise `RuntimeError: Working outside of request context`; Django's `SimpleLazyObject` can
+    raise whatever its factory raises; a mock can have a side effect on attribute access.
+
+    Plain `hasattr` and `getattr(obj, name, default)` only swallow `AttributeError`, so any of those
+    escaped `_discover` and killed the shim before it was ready — which on flask made the default
+    configuration hang forever (see `WellspringPool::launch`). pytest's discovery goes through
+    `_pytest.compat.safe_getattr` for precisely this reason; this is the same contract.
+
+    `BaseException` is deliberately *not* caught: `KeyboardInterrupt` and `SystemExit` from a probe
+    mean the user or the interpreter wants out, and swallowing them would be its own bug."""
+    try:
+        return getattr(obj, name, default)
+    except Exception:  # noqa: BLE001 — see the docstring; this is the point
+        return default
+
+
+def _safe_hasattr(obj, name: str) -> bool:
+    return _safe_getattr(obj, name, _MISSING) is not _MISSING
+
+
 def _is_fixture(obj) -> bool:
-    return hasattr(obj, "_fixture_function_marker") and hasattr(obj, "_fixture_function")
+    return _safe_hasattr(obj, "_fixture_function_marker") and _safe_hasattr(obj, "_fixture_function")
 
 
 def _is_native_provider(obj) -> bool:
     """A tiderace-native provider (ADR-E012) — carries the tiderace-owned marker, not pytest's."""
-    return hasattr(obj, "__tiderace_provider__")
+    return _safe_hasattr(obj, "__tiderace_provider__")
 
 
 def _safe_type_hints(func) -> dict:
@@ -1727,6 +1756,11 @@ class Engine:
         try:
             requested = self._requested(node_id, style)
             marks = self._marks(node_id, style)
+            # Inside the same guard as its siblings. It used to sit outside, so a failure expanding this
+            # node's parametrize cases escaped `run()` and killed the whole worker — every other test on
+            # it was lost and the run reported `shim closed mid-run` (TID-43). Whatever the next unsafe
+            # probe turns out to be, it now costs this node an error rather than costing the worker.
+            raw_cases = self._cases(node_id, style)
         except Exception as exc:  # noqa: BLE001 — import/collection failure for this node
             return {"node_id": node_id, "outcome": "error",
                     "detail": "".join(traceback.format_exception_only(type(exc), exc))}
@@ -1744,7 +1778,6 @@ class Engine:
         case_params = [p for p in requested if p not in fixture_requested]
         # `@tiderace.cases` yields positional variants; `@pytest.mark.parametrize`
         # yields name→value maps (argnames need not follow the signature order).
-        raw_cases = self._cases(node_id, style)
         case_kwargs_list = [
             c if isinstance(c, dict) else dict(zip(case_params, c.values))
             for c, _ in raw_cases
@@ -2350,9 +2383,11 @@ def _parametrize_cases(func) -> list[dict]:
             # `pytest.param(...)` carries `.values`/`.marks`; both are checked so a
             # plain dict argvalue (which has a `.values` *method*) is not mistaken for one.
             explicit = None
-            if hasattr(entry, "values") and hasattr(entry, "marks"):
+            # Safe probes: `entry` is an arbitrary parametrize value, and a lazy proxy passed as one raises
+            # on attribute access exactly as it does as a module global (TID-43).
+            if _safe_hasattr(entry, "values") and _safe_hasattr(entry, "marks"):
                 raw = tuple(entry.values)
-                explicit = getattr(entry, "id", None)
+                explicit = _safe_getattr(entry, "id", None)
             elif len(names) == 1:
                 raw = (entry,)
             else:
@@ -2668,7 +2703,9 @@ def _id_part(value, argname: str, index: int) -> str:
         return value.encode("unicode_escape").decode("ascii")
     if value is None or isinstance(value, (bool, int, float)):
         return str(value)
-    name = getattr(value, "__name__", None)  # classes and functions id by name in pytest
+    # Classes and functions id by name in pytest. A parametrize value is an arbitrary object, and a lazy
+    # proxy passed as one raises on attribute access just as it does as a module global (TID-43).
+    name = _safe_getattr(value, "__name__", None)
     if isinstance(name, str):
         return name
     return f"{argname}{index}"
