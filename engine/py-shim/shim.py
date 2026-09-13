@@ -279,13 +279,50 @@ class FixtureDef:
         return "request" in inspect.signature(self.func).parameters
 
 
-class _Request:
-    """The minimal `request` object a parametrized fixture sees (just `.param`)."""
+def _run_finalizers(finalizers: list) -> None:
+    """Run `request.addfinalizer` callbacks newest-first, as pytest does (TID-44).
 
-    __slots__ = ("param",)
+    Guarded individually, matching `_teardown`: one finalizer raising must not stop the rest from
+    releasing what they hold."""
+    while finalizers:
+        fn = finalizers.pop()
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 — a failing finalizer must not abort the remaining ones
+            pass
+
+
+class _Request:
+    """The minimal `request` object a fixture sees: `.param`, plus `addfinalizer`."""
+
+    __slots__ = ("param", "_finalizers")
 
     def __init__(self, param):
         self.param = param
+        self._finalizers: list = []
+
+    def addfinalizer(self, fn) -> None:
+        """Run `fn` when this fixture tears down (TID-44).
+
+        Tied to the fixture's own teardown handle, so a session-scoped fixture's finalizer runs at
+        session end rather than after the first test. flask's fixtures use this for app and
+        request-context cleanup; without it they raised `AttributeError` during setup."""
+        self._finalizers.append(fn)
+
+
+class _FinalizingHandle:
+    """A fixture teardown handle plus the finalizers its body registered (TID-44).
+
+    Only built when a fixture actually called `addfinalizer`, so every fixture that did not keeps the
+    exact handle it always had. pytest registers a yield fixture's own teardown *after* the body
+    returns, which makes it the newest finalizer: the yield teardown runs first, then the body's
+    `addfinalizer` callbacks, newest first."""
+
+    __slots__ = ("inner", "finalizers")
+
+    def __init__(self, inner, finalizers: list):
+        self.inner = inner
+        self.finalizers = finalizers
 
 
 # Command-line options declared by conftests via `pytest_addoption`, as `dest -> default` (TID-14).
@@ -534,7 +571,7 @@ class _TestRequest:
     run, so `config` is the part that has to be real; the identity attributes are cheap and come
     along for free."""
 
-    __slots__ = ("config", "node", "function", "cls", "instance", "param", "fixturenames")
+    __slots__ = ("config", "node", "function", "cls", "instance", "param", "fixturenames", "_finalizers")
 
     def __init__(self, node_id: str, func, instance=None):
         self.config = _Config()
@@ -545,9 +582,14 @@ class _TestRequest:
         self.param = None  # only a parametrized *fixture* has one; a test's request never does
         self.fixturenames = [p for p in inspect.signature(func).parameters
                              if p not in ("self", "cls")]
+        self._finalizers: list = []
+
+    def addfinalizer(self, fn) -> None:
+        """Run `fn` after this test's body, before its function-scoped fixtures tear down (TID-44)."""
+        self._finalizers.append(fn)
 
 
-def _with_request(func, args: dict, node_id: str, instance=None) -> dict:
+def _with_request(func, args: dict, node_id: str, instance=None) -> tuple:
     """Add a `request` argument when the test asks for one (TID-14).
 
     `_bind_by_type` deliberately skips the name `request`, so it never resolves as a provider and
@@ -555,8 +597,15 @@ def _with_request(func, args: dict, node_id: str, instance=None) -> dict:
     is injected here instead of registered as a provider because it needs the node context that
     only the call site has."""
     if "request" in args or "request" not in inspect.signature(func).parameters:
-        return args
-    return {**args, "request": _TestRequest(node_id, func, instance)}
+        return args, None
+    request = _TestRequest(node_id, func, instance)
+    return {**args, "request": request}, request
+
+
+def _test_finalizers(request) -> None:
+    """A test request's finalizers — after the body has fully run, including an awaited one."""
+    if request is not None:
+        _run_finalizers(request._finalizers)
 
 
 _MISSING = object()
@@ -588,8 +637,44 @@ def _safe_hasattr(obj, name: str) -> bool:
     return _safe_getattr(obj, name, _MISSING) is not _MISSING
 
 
+def _fixture_marker(obj):
+    """The `FixtureFunctionMarker` for a `@pytest.fixture`, on any pytest version, or None.
+
+    pytest moved it in 8.4, and the old location is the only one many real suites have (TID-44):
+
+    | pytest  | `@pytest.fixture` returns     | marker                     | real function            |
+    | ------- | ----------------------------- | -------------------------- | ------------------------ |
+    | < 8.4   | the function, wrapped         | `_pytestfixturefunction`   | `__pytest_wrapped__.obj` |
+    | >= 8.4  | a `FixtureFunctionDefinition` | `_fixture_function_marker` | `_fixture_function`      |
+
+    Only the new names were recognised, so on any suite pinning an older pytest *every* fixture was
+    invisible and every test requesting one failed with a missing positional argument. click (pytest
+    7.4) and flask (8.1) lost 363 and 387 tests that way. Nothing caught it because every corpus the
+    engine had been validated against happened to run pytest 9.
+
+    The marker itself is the same `FixtureFunctionMarker` with the same fields on both sides of the
+    move, so only *finding* it differs."""
+    marker = _safe_getattr(obj, "_fixture_function_marker", None)  # pytest >= 8.4
+    if marker is None:
+        marker = _safe_getattr(obj, "_pytestfixturefunction", None)  # pytest < 8.4
+    return marker
+
+
+def _fixture_function(obj):
+    """The callable a fixture actually runs, on any pytest version, or None.
+
+    Never the decorated object itself: on every pytest version that is a wrapper whose job is to
+    raise `Failed: Fixture "x" called directly`. `Failed` derives from `BaseException`, so a caller
+    catching `Exception` would not even see it happen."""
+    func = _safe_getattr(obj, "_fixture_function", None)  # pytest >= 8.4
+    if func is None:
+        wrapped = _safe_getattr(obj, "__pytest_wrapped__", None)  # pytest < 8.4
+        func = _safe_getattr(wrapped, "obj", None) if wrapped is not None else None
+    return func
+
+
 def _is_fixture(obj) -> bool:
-    return _safe_hasattr(obj, "_fixture_function_marker") and _safe_hasattr(obj, "_fixture_function")
+    return _fixture_marker(obj) is not None and _fixture_function(obj) is not None
 
 
 def _is_native_provider(obj) -> bool:
@@ -649,13 +734,15 @@ def _native_fixture_def(obj, location: str, type_index: dict) -> FixtureDef:
 
 
 def _fixture_def(obj, location: str) -> FixtureDef:
-    marker = obj._fixture_function_marker
+    # Both accessors handle pytest before and after 8.4 (TID-44); see `_fixture_marker`.
+    marker = _fixture_marker(obj)
+    func = _fixture_function(obj)
     return FixtureDef(
-        name=getattr(obj, "name", None) or getattr(marker, "name", None) or obj._fixture_function.__name__,
+        name=_safe_getattr(obj, "name", None) or getattr(marker, "name", None) or func.__name__,
         scope=getattr(marker, "scope", "function"),
         params=getattr(marker, "params", None),
         autouse=getattr(marker, "autouse", False),
-        func=obj._fixture_function,
+        func=func,
         location=location,
         param_ids=getattr(marker, "ids", None),
     )
@@ -1078,17 +1165,26 @@ def _instance_key(fdef: FixtureDef, node_id: str):
 
 
 def _setup_fixture(fdef: FixtureDef, args: dict, param):
-    """Run a fixture body up to its first yield (or to completion). Returns (value, gen_or_none)."""
+    """Run a fixture body up to its first yield (or to completion). Returns (value, handle)."""
     call_args = dict(args)
-    if fdef.wants_request:
-        call_args["request"] = _Request(param)
+    request = _Request(param) if fdef.wants_request else None
+    if request is not None:
+        call_args["request"] = request
     if fdef.is_yield:
         gen = fdef.func(**call_args)
-        return next(gen), gen
-    return fdef.func(**call_args), None
+        value, handle = next(gen), gen
+    else:
+        value, handle = fdef.func(**call_args), None
+    if request is not None and request._finalizers:
+        handle = _FinalizingHandle(handle, request._finalizers)
+    return value, handle
 
 
 def _teardown(gen) -> None:
+    if isinstance(gen, _FinalizingHandle):
+        _teardown(gen.inner)  # the yield teardown is the newest finalizer, so it runs first
+        _run_finalizers(gen.finalizers)
+        return
     if gen is None:
         return
     try:
@@ -1109,20 +1205,29 @@ async def _setup_fixture_async(fdef: FixtureDef, args: dict, param):
     """Async-aware setup: drives sync *and* async providers up to their first (a)yield. Returns
     `(value, handle)` where handle is `None` | `("gen", g)` | `("agen", ag)` for teardown."""
     call_args = dict(args)
-    if fdef.wants_request:
-        call_args["request"] = _Request(param)
+    request = _Request(param) if fdef.wants_request else None
+    if request is not None:
+        call_args["request"] = request
     if inspect.isasyncgenfunction(fdef.func):
         ag = fdef.func(**call_args)
-        return await ag.__anext__(), ("agen", ag)
-    if inspect.iscoroutinefunction(fdef.func):
-        return await fdef.func(**call_args), None
-    if fdef.is_yield:  # a sync yield-fixture used alongside async ones
+        value, handle = await ag.__anext__(), ("agen", ag)
+    elif inspect.iscoroutinefunction(fdef.func):
+        value, handle = await fdef.func(**call_args), None
+    elif fdef.is_yield:  # a sync yield-fixture used alongside async ones
         gen = fdef.func(**call_args)
-        return next(gen), ("gen", gen)
-    return fdef.func(**call_args), None
+        value, handle = next(gen), ("gen", gen)
+    else:
+        value, handle = fdef.func(**call_args), None
+    if request is not None and request._finalizers:
+        handle = _FinalizingHandle(handle, request._finalizers)
+    return value, handle
 
 
 async def _teardown_async(handle) -> None:
+    if isinstance(handle, _FinalizingHandle):
+        await _teardown_async(handle.inner)
+        _run_finalizers(handle.finalizers)
+        return
     if handle is None:
         return
     kind, g = handle
@@ -1497,12 +1602,17 @@ async def _invoke_async(node_id: str, style: str, args: dict) -> tuple[str, str]
             cls_name, method = _class_method(node_id)
             instance = getattr(module, cls_name)()
             bound = getattr(instance, method)
-            result = bound(**_with_request(bound, args, node_id, instance))
+            target = bound
+            call_args, request = _with_request(bound, args, node_id, instance)
         else:
-            func = getattr(module, node_id.partition("::")[2])
-            result = func(**_with_request(func, args, node_id))
-        if inspect.iscoroutine(result):
-            await result
+            target = getattr(module, node_id.partition("::")[2])
+            call_args, request = _with_request(target, args, node_id)
+        try:
+            result = target(**call_args)
+            if inspect.iscoroutine(result):
+                await result
+        finally:
+            _test_finalizers(request)  # after the await, or a coroutine's finalizers run before its body
         return "passed", ""
     except AssertionError as exc:
         plain = "".join(traceback.format_exception_only(type(exc), exc))
@@ -2472,10 +2582,18 @@ def _invoke(node_id: str, style: str, args: dict) -> tuple[str, str]:
             cls_name, method = _class_method(node_id)
             instance = getattr(module, cls_name)()
             bound = getattr(instance, method)
-            _maybe_await(bound(**_with_request(bound, args, node_id, instance)))
+            call_args, request = _with_request(bound, args, node_id, instance)
+            try:
+                _maybe_await(bound(**call_args))
+            finally:
+                _test_finalizers(request)
             return "passed", ""
         func = getattr(module, node_id.partition("::")[2])
-        _maybe_await(func(**_with_request(func, args, node_id)))
+        call_args, request = _with_request(func, args, node_id)
+        try:
+            _maybe_await(func(**call_args))
+        finally:
+            _test_finalizers(request)
         return "passed", ""
     except AssertionError as exc:
         plain = "".join(traceback.format_exception_only(type(exc), exc))
