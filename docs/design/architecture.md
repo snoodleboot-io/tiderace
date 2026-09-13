@@ -71,15 +71,19 @@ flowchart TD
     STATIC -->|no| RESTORABLE{"module snapshot-<br/>restorable?"}
     RESTORABLE -->|"no (opaque globals)"| FORK["FORK · COW child<br/>~4.5 ms · bulletproof"]
     RESTORABLE -->|yes| KNOWN{"known pure?"}
-    KNOWN -->|yes| BARE["BARE NO-FORK<br/>in-process · ~0.05 ms (90×)"]
+    KNOWN -->|yes| BARE["BARE NO-FORK<br/>in-process · ~0.05 ms per trivial test"]
     KNOWN -->|"unknown / impure"| RESTORE["NO-FORK + RESTORE<br/>snapshot → run → undo<br/>~0.4–0.9 ms (5–14×)"]
 ```
 
-| Tier | When | How it stays isolated | Rel. cost |
+| Tier | When | How it stays isolated | Per-test cost ¹ |
 |---|---|---|---|
 | **bare no-fork** | test is known pure | nothing to isolate | ~0.05 ms (90×) |
 | **no-fork + restore** | mutates a restorable footprint | snapshot module globals + `os.environ`, run, restore | ~0.4–0.9 ms (5–14×) |
 | **fork** | opaque/un-restorable globals | copy-on-write child | ~4.5 ms (1×) |
+
+¹ Per-test microbenchmark on a trivial test, against a fork from a light parent — not what a suite will
+see. On real projects the bare tier delivers ~3.4× where it applies, and often applies to no test at all;
+see [parallel execution](parallel-execution.md) for the measurements.
 
 It's **sound by construction**: restore *undoes* mutation rather than predicting purity, and anything it
 can't snapshot falls back to fork. A wrong guess can only change speed, never correctness — which is why

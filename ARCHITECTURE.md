@@ -198,7 +198,7 @@ flowchart TD
     STATIC -->|"no obvious impurity"| RESTORABLE{"module<br/>snapshot-restorable?<br/>(no opaque globals)"}
     RESTORABLE -->|"no (opaque globals)"| FORK["FORK<br/>COW child<br/>~4.5 ms · bulletproof"]
     RESTORABLE -->|"yes"| KNOWN{"known pure?<br/>(recorded verdict)"}
-    KNOWN -->|"yes"| BARE["BARE NO-FORK<br/>run in-process, no snapshot<br/>~0.05 ms (90×)"]
+    KNOWN -->|"yes"| BARE["BARE NO-FORK<br/>run in-process, no snapshot<br/>~0.05 ms per trivial test"]
     KNOWN -->|"unknown / impure"| RESTORE["NO-FORK + RESTORE<br/>snapshot → run → undo mutation<br/>~0.4–0.9 ms (5–14×)"]
     RESTORE --> VERIFY["purity guard verifies<br/>(records verdict for next time)"]
     BARE --> DONE["outcome + coverage + purity"]
@@ -208,11 +208,24 @@ flowchart TD
 
 Three tiers, picked per test:
 
-| Tier | When | Isolation mechanism | Rel. cost |
+| Tier | When | Isolation mechanism | Per-test cost ¹ |
 |---|---|---|---|
 | **bare no-fork** | test is *known pure* (recorded verdict) | nothing to isolate | ~0.05 ms (90×) |
 | **no-fork + restore** | *restorable* footprint, purity unknown/impure | deep-copy snapshot of module globals + `os.environ`, run, restore | ~0.4–0.9 ms (5–14×) |
 | **fork** | module has *opaque* (un-deep-copyable) globals | copy-on-write child | ~4.5 ms (1×) |
+
+¹ **Microbenchmark figures** — one *trivial* test, against a fork from a *light* parent. They show the
+shape of each tier's overhead, not what a suite will see, and both halves of the ratio move:
+
+- **The fork baseline scales with the parent.** `fork()` copies page tables, so on a large-import project
+  it is far more than 4.5 ms — ~29 ms per test against a 66 MB parent (TID-18). Every multiplier above is
+  relative to the light-parent figure.
+- **The bare tier's reach depends on the suite, and is usually small.** It engages only for tests that
+  mutate *nothing*. Measured (TID-41): on a snapshot-heavy corpus of genuinely pure tests it delivers
+  **~3.4×** over no-fork + restore; on `pirn-agents`, a real 4,545-test suite built with module-level test
+  doubles and registries, **no test at all** measures pure, so the tier never engages. Suites of
+  self-contained assertions benefit; suites that record into shared state — most suites worth
+  optimising — do not. The no-fork + restore tier is where real suites actually spend their time.
 
 Key properties:
 
@@ -225,9 +238,11 @@ Key properties:
   writes to free/module names, `os.environ`/`os.chdir`/`random.seed`-style calls) without running — a
   sufficient (conservative) impurity test that seeds the tier decision.
 
-The daemon enables this by default: it sets `TIDERACE_RESTORE=1` and requests no-fork on every test; the
-shim downgrades to fork only where unsound. `TIDERACE_FORCE_FORK=1` reverts to fork-per-test (debug /
-benchmark baseline only — not a user flag).
+Both front ends enable this by default: the daemon sets `TIDERACE_RESTORE=1` and requests no-fork on every
+test, and `tiderace run` does the same (the in-process ladder has been its default since the TID-33 state
+fingerprint made it sound). The shim downgrades to fork only where unsound. To fork every test instead, use
+`--no-optimistic` on `tiderace run`, or `TIDERACE_FORCE_FORK=1`, which both front ends honour — the
+documented escape hatch for a suite that behaves differently under the two, not merely a benchmark knob.
 
 ---
 

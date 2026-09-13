@@ -43,7 +43,8 @@ orchestration (collection lookup, closure resolution, mark parsing) is **0.05 ms
 **Implication:** the prize isn't *fewer* forks — it's *no* fork for tests that don't need isolation.
 A **pure** test (no shared-state mutation) can run in-process at 0.05 ms; only **impure** tests need the
 4.5 ms fork. The [purity guard + pure-test batching](../planning/backlog/pure-test-batching/) is the
-single highest-leverage perf lever in the whole engine.
+single highest-leverage perf lever in the whole engine. *(Later measurement narrowed this considerably —
+see [Correction, 2026-09](#correction-2026-09).)*
 
 ## Smart batching — the realized win (`inproc-probe smart`)
 
@@ -134,3 +135,37 @@ bench's 5–20×.
 - **Persisted purity verdicts** — correctness doesn't need them (restore + opaque-fork is sound), but
   recording verdicts lets *known-pure* tests take the **bare no-fork** tier (skip the restore snapshot →
   the full 90×). Content-address the verdict like the result cache so CI teaches every machine.
+  *(The "full 90×" did not materialise on a real suite — see [Correction, 2026-09](#correction-2026-09).)*
+
+---
+
+## Correction, 2026-09
+
+The measurements above stand. What did not hold up is reading the ~90× as what the bare no-fork tier
+delivers on a suite, including this document's call for it as "the single highest-leverage perf lever".
+Recorded here rather than by editing the numbers above, so the original measurement stays visible.
+
+**The 90× is per test, on trivial tests, against a fork from a light parent.** Both halves move on a real
+project. The fork baseline scales with the parent's footprint — ~29 ms per test against a 66 MB parent,
+not 4.5 ms (TID-18). And the bare tier only engages for tests that mutate *nothing*.
+
+**Measured (TID-41):**
+
+| corpus | tests that measure pure | bare tier's gain |
+| -- | -- | -- |
+| snapshot-heavy fixture (10 modules × ~1,500 rows of state, genuinely pure tests) | all 200 | **~3.4×** over no-fork + restore |
+| `pirn-agents`, a real 4,545-test suite | **0** | never engages |
+
+The real suite has no pure tests because it is built the normal way: test doubles and registries that
+record into module-level state. Writing to shared state is correctly classified as impure — and it is
+precisely why such a suite needs an isolating runner in the first place. Purity turns out to be close to
+inversely correlated with a suite being worth optimising.
+
+Two things follow:
+
+- **The lever that matters is no-fork + restore**, not bare no-fork. It is what real suites run on, and it
+  is where the in-process ladder's actual gains came from (on `pirn-agents`, ~32 s → ~17 s wall at eight
+  workers, together with shared-import).
+- **The bare tier was also only delivering half its value** until TID-41: a bare run measured nothing,
+  persisted "unknown", and the next run fell back to a full snapshot, so it could never apply twice in a
+  row. The ~3.4× above is after that fix.

@@ -1,7 +1,12 @@
 """Trusted-pure bare no-fork proof (TID-1). A test the caller has *recorded as pure* is run with
-`trusted_pure=True`: the shim skips the snapshot/restore entirely (bare no-fork, ~90×) instead of
-snapshot+restore (~5–14×). The purity guard/restore path still MEASURES and reports a `pure` verdict so
-the recording can be built in the first place. Real shim, no pytest.
+`trusted_pure=True`: the shim skips the snapshot/restore entirely (bare no-fork) instead of
+snapshot+restore. The purity guard/restore path still MEASURES and reports a `pure` verdict so the
+recording can be built in the first place. Real shim, no pytest.
+
+This proves the mechanism is *correct*, on deliberately trivial tests. It is not a claim about speed on a
+real suite: the ~90× per-test figure is a trivial-test microbenchmark, measured real-world gains are ~3.4×
+where the tier applies, and a suite that records into module-level state has no pure tests for it to
+apply to (TID-41).
 
 Run:  python3 proof_trusted_pure.py
 """

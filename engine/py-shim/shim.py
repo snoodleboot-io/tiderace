@@ -1712,7 +1712,8 @@ class Engine:
 
     def run(self, node_id: str, style: str, deadline_ms: int, force_no_fork: bool = False,
             trusted_pure: bool = False) -> dict:
-        # `force_no_fork`: run THIS test in-process (no fork) — the pure-test fast path (~90× cheaper).
+        # `force_no_fork`: run THIS test in-process (no fork). On a trivial test that is ~90× cheaper than a
+        # fork; on a real suite the win is smaller and depends on the parent's size (TID-18, TID-41).
         # The caller asserts it's pure (purity guard); the guard re-checks and flags any escapee.
         module_key = _module_key(node_id)
         if style in ("inherited_methods", "unresolved_class"):
@@ -2163,7 +2164,9 @@ class Engine:
             # When running in-process (no fork) with `restore`, undo any mutation so the next test is
             # isolated WITHOUT a fork — the snapshot/restore fast path for impure tests too.
             # `trusted_pure` (TID-1): a recorded-pure, unchanged test skips the snapshot entirely and runs
-            # BARE no-fork (~90×) — no measurement, no restore. Otherwise snapshot to measure/restore.
+            # BARE no-fork — no measurement, no restore, no isolation. Worth ~3.4× where it applies and
+            # usually applies to few tests: anything recording into shared state is not pure (TID-41).
+            # Otherwise snapshot to measure/restore.
             need_snap = (self.purity_guard or (self.restore and in_process)) and not trusted_pure
             mod = importlib.import_module(_module_name(module_key)) if need_snap else None
             before = _snapshot_shared(mod) if mod is not None else None
