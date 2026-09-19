@@ -832,7 +832,15 @@ _MARKER_EXPR = None
 
 
 def _read_addopts(start: str) -> str:
-    """`addopts` from the nearest pytest config at or above `start`, or "" if there is none.
+    """`addopts` from the nearest pytest config at or above `start`, or "" if there is none."""
+    return _read_addopts_at(start)[0]
+
+
+def _read_addopts_at(start: str) -> tuple[str, str]:
+    """`addopts` and the directory of the config it came from (`("", start)` when there is none).
+
+    The directory matters for `--ignore`: pytest resolves those paths against the config's own
+    directory, not against the run root.
 
     Searched in pytest's own precedence order, and stopping at the first file that *carries* a
     pytest section rather than the first file that exists — a `pyproject.toml` with no
@@ -858,11 +866,58 @@ def _read_addopts(start: str) -> str:
             except Exception:  # noqa: BLE001 — an unreadable config must not stop the run
                 continue
             if section:
-                return str(section.get("addopts", "") or "")
+                return str(section.get("addopts", "") or ""), directory
         parent = os.path.dirname(directory)
         if parent == directory:
-            return ""
+            return "", os.path.abspath(start)
         directory = parent
+
+
+_IGNORED: tuple = ()  # absolute paths the project's own `addopts` excludes from collection
+
+
+def _ignores_from(addopts: str, config_dir: str) -> tuple:
+    """`--ignore` / `--ignore-glob` paths out of an `addopts` string, resolved to absolute paths.
+
+    A project that excludes a directory from its default run means it: pirn-core's `--ignore=tests/perf`
+    holds benchmarks that need the `pytest-benchmark` plugin, and collecting them anyway reported 23
+    failures for tests pytest never runs. Ignored here rather than in the Rust collector because this
+    is where the project's own config is already being read."""
+    if not addopts:
+        return ()
+    try:
+        import shlex
+        argv = shlex.split(addopts)
+    except ValueError:
+        return ()
+    out: list = []
+    for i, arg in enumerate(argv):
+        for flag, glob in (("--ignore", False), ("--ignore-glob", True)):
+            value = None
+            if arg.startswith(flag + "="):
+                value = arg[len(flag) + 1:]
+            elif arg == flag and i + 1 < len(argv):
+                value = argv[i + 1]
+            if value:
+                out.append((os.path.abspath(os.path.join(config_dir, value)), glob))
+    return tuple(out)
+
+
+def _is_ignored(path: str) -> bool:
+    """Is `path` (absolute) excluded by the project's own `--ignore` / `--ignore-glob`?"""
+    if not _IGNORED:
+        return False
+    import fnmatch
+    # Absolute on both sides: the run root arrives as `.` as often as not, and a relative path never
+    # matches a target resolved against the config's directory.
+    path = os.path.abspath(path)
+    for target, glob in _IGNORED:
+        if glob:
+            if fnmatch.fnmatch(path, target):
+                return True
+        elif path == target or path.startswith(target + os.sep):
+            return True
+    return False
 
 
 def _marker_expr_from(addopts: str):
@@ -1002,6 +1057,11 @@ def _walk_suite(root: str):
 
 def _discover(root: str) -> Registry:
     reg = Registry()
+    # The project's own config, read before the walk: `--ignore` has to prune it, and the `-m` filter
+    # below is read from the same place.
+    addopts, config_dir = _read_addopts_at(root)
+    global _IGNORED
+    _IGNORED = _ignores_from(addopts, config_dir)
     native: list[tuple] = []  # (provider obj, location) — resolved in a second pass (see below)
     conftests: list = []  # every conftest module, for the collection hooks (TID-20)
     test_modules: list = []  # (module, rel path) — the items those hooks inspect
@@ -1019,6 +1079,9 @@ def _discover(root: str) -> Registry:
         rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
         if _dir_skip(rel_dir) is not None:
             dirs[:] = []  # a skipped conftest's subtree is not collected at all, as in pytest
+            continue
+        if _is_ignored(current):
+            dirs[:] = []
             continue
         # The directory's conftest before its test modules: it may skip the directory, and `sorted`
         # alone would put `a_test.py` ahead of `conftest.py`.
@@ -1065,7 +1128,7 @@ def _discover(root: str) -> Registry:
     # The project's own `-m` filter (TID-32). Read here rather than at each node so a malformed
     # expression is reported once.
     global _MARKER_EXPR
-    expr = _marker_expr_from(_read_addopts(root))
+    expr = _marker_expr_from(addopts)
     _MARKER_EXPR = _compile_marker_expr(expr) if expr else None
 
     # Native providers wire by type, so provider→provider deps need the FULL type set first: build the
@@ -1899,6 +1962,8 @@ class Engine:
         module_key = _module_key(node_id)
         # Under a directory whose conftest skipped itself (TID-48): pytest never collects these, so
         # nothing about the node — its class, its marks, its module — may be touched.
+        if _is_ignored(os.path.join(_ROOT or ".", module_key)):
+            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
         dir_skip = _dir_skip(module_key)
         if dir_skip is not None:
             return {"node_id": node_id, "outcome": "skipped", "detail": dir_skip}
@@ -2946,6 +3011,8 @@ def _preimport(root: str) -> None:
     for current, _dirs, files in _walk_suite(root):  # never warm a dependency's own suite
         for name in files:
             if name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py")):
+                if _is_ignored(os.path.join(current, name)):
+                    continue
                 rel = os.path.relpath(os.path.join(current, name), root).replace(os.sep, "/")
                 try:
                     # Named as `_discover` and execution name it (TID-37); a module-level
