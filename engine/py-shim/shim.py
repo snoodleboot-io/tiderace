@@ -254,11 +254,11 @@ class FixtureDef:
 
     __slots__ = (
         "name", "scope", "params", "autouse", "func", "location", "deps", "is_yield",
-        "bindings", "provides_type", "param_ids",
+        "bindings", "provides_type", "param_ids", "owner",
     )
 
     def __init__(self, name, scope, params, autouse, func, location, bindings=None, provides_type=None,
-                 param_ids=None):
+                 param_ids=None, owner=None):
         self.name = name
         self.scope = scope if isinstance(scope, str) else "function"
         self.params = list(params) if params else None
@@ -269,9 +269,14 @@ class FixtureDef:
         self.func = func
         self.location = location  # module key ('tests/m.py') for module fixtures, or dir for conftest
         self.provides_type = provides_type  # native: the type this provider is injected by (else None)
+        # The class a fixture method was defined on, or None. A fixture defined inside a test class
+        # is scoped to that class in pytest — flask's `TestRoutes.app` overrides the conftest `app`
+        # for that class and nowhere else — and it is called with the instance as `self` (TID-47).
+        self.owner = owner
         if bindings is None:
             sig = list(inspect.signature(func).parameters)
-            bindings = {p: p for p in sig if p != "request"}  # pytest/name-DI: identity
+            skip = {"request"} | ({"self"} if owner is not None else set())
+            bindings = {p: p for p in sig if p not in skip}  # pytest/name-DI: identity
         self.bindings = bindings  # param_name -> provider_name
         self.deps = list(bindings.values())
         self.is_yield = inspect.isgeneratorfunction(func)
@@ -283,6 +288,16 @@ class FixtureDef:
     @property
     def wants_request(self) -> bool:
         return "request" in inspect.signature(self.func).parameters
+
+
+def _owner_args(fdef) -> tuple:
+    """The positional `self` a class fixture is called with, or `()` for an ordinary one.
+
+    A fixture defined inside a test class is a plain function until it is looked up on an instance, so
+    it needs one. pytest binds it to the class's instance; a fresh one per setup matches what fixture
+    bodies actually use it for — reaching the class's own helpers — without tying fixture setup to the
+    instance the test body will later run on (TID-47)."""
+    return (fdef.owner(),) if fdef.owner is not None else ()
 
 
 def _run_finalizers(finalizers: list) -> None:
@@ -739,7 +754,7 @@ def _native_fixture_def(obj, location: str, type_index: dict) -> FixtureDef:
     )
 
 
-def _fixture_def(obj, location: str) -> FixtureDef:
+def _fixture_def(obj, location: str, owner=None) -> FixtureDef:
     # Both accessors handle pytest before and after 8.4 (TID-44); see `_fixture_marker`.
     marker = _fixture_marker(obj)
     func = _fixture_function(obj)
@@ -751,6 +766,7 @@ def _fixture_def(obj, location: str) -> FixtureDef:
         func=func,
         location=location,
         param_ids=getattr(marker, "ids", None),
+        owner=owner,
     )
 
 
@@ -775,36 +791,61 @@ class Registry:
         """Whether `name` is a discovered provider (vs. a bare test param filled by @cases)."""
         return name in self.by_name
 
-    def resolve(self, name: str, module_key: str) -> FixtureDef | None:
-        """Nearest-override: among defs of `name` visible to `module_key`, pick the most specific
-        (a same-file module def beats a conftest; a deeper conftest beats a shallower one)."""
-        test_dir = _test_dir(module_key)
-        best: FixtureDef | None = None
-        best_spec = None
-        for d in self.by_name.get(name, ()):
-            if d.location.endswith(".py"):  # module fixture: visible only in its own module
-                if d.location != module_key:
-                    continue
-                spec = 10_000  # most specific
-            elif _is_ancestor_dir(d.location, test_dir):
-                spec = _location_depth(d.location)  # deeper dir = more specific; above root = negative
-            else:
-                continue
-            if best_spec is None or spec > best_spec:
-                best, best_spec = d, spec
-        return best
+    def resolve(self, name: str, module_key: str, classes: tuple = (),
+                below: int | None = None) -> FixtureDef | None:
+        """Nearest-override: among defs of `name` visible here, pick the most specific.
 
-    def autouse_for(self, module_key: str) -> list[FixtureDef]:
-        """Every autouse fixture visible to `module_key`, widest scope first."""
+        Order, narrowest first: a fixture defined in the test's own class (or a base of it) beats one
+        defined at module level, which beats a conftest, and a deeper conftest beats a shallower one.
+        `classes` is the test class's MRO names — pytest collects fixtures from base classes too.
+        `below` looks *past* an override: a fixture may request the very name it overrides, and must
+        then be given the definition it shadows rather than itself (TID-47)."""
+        best = None
+        for spec, d in self.visible(name, module_key, classes):
+            if below is not None and spec >= below:
+                continue  # looking *past* an override, for the def it shadows
+            if best is None or spec > best[0]:
+                best = (spec, d)
+        return best[1] if best else None
+
+    def visible(self, name: str, module_key: str, classes: tuple = ()):
+        """`(specificity, def)` for every def of `name` in scope here — narrower is larger."""
+        test_dir = _test_dir(module_key)
+        for d in self.by_name.get(name, ()):
+            if "::" in d.location:  # class fixture: visible only inside its own class
+                owner_module, _, owner_cls = d.location.partition("::")
+                if owner_module != module_key or owner_cls not in classes:
+                    continue
+                yield 20_000, d      # narrower than anything else that can define this name
+            elif d.location.endswith(".py"):  # module fixture: visible only in its own module
+                if d.location == module_key:
+                    yield 10_000, d
+            elif _is_ancestor_dir(d.location, test_dir):
+                yield _location_depth(d.location), d  # deeper dir = more specific
+
+    def specificity(self, fdef: FixtureDef, module_key: str, classes: tuple = ()) -> int | None:
+        """How specific `fdef` is here — the ceiling to look below when it requests the name it
+        overrides."""
+        for spec, d in self.visible(fdef.name, module_key, classes):
+            if d is fdef:
+                return spec
+        return None
+
+    def autouse_for(self, module_key: str, classes: tuple = ()) -> list[FixtureDef]:
+        """Every autouse fixture visible to `module_key` (and the test's class), widest scope first."""
         test_dir = _test_dir(module_key)
         out = []
         for defs in self.by_name.values():
             for d in defs:
                 if not d.autouse:
                     continue
-                visible = d.location == module_key if d.location.endswith(".py") else _is_ancestor_dir(
-                    d.location, test_dir
-                )
+                if "::" in d.location:  # class fixture: autouse only inside its own class (TID-47)
+                    owner_module, _, owner_cls = d.location.partition("::")
+                    visible = owner_module == module_key and owner_cls in classes
+                elif d.location.endswith(".py"):
+                    visible = d.location == module_key
+                else:
+                    visible = _is_ancestor_dir(d.location, test_dir)
                 if visible:
                     out.append(d)
         out.sort(key=lambda d: -d.rank)
@@ -1120,6 +1161,12 @@ def _discover(root: str) -> Registry:
                     native.append((obj, location))
                 elif _is_fixture(obj):
                     reg.add(_fixture_def(obj, location))
+                elif isinstance(obj, type):
+                    # Fixtures defined inside a test class. pytest scopes these to the class, where
+                    # they commonly *override* a conftest fixture of the same name for that class
+                    # alone — flask's `TestRoutes.app` is exactly that — so they are registered with
+                    # a `module.py::Class` location rather than merged into the module (TID-47).
+                    _register_class_fixtures(reg, obj, location)
 
     # After every conftest is loaded and every test module imported — the hooks need both, and the
     # marks they inspect only exist once the decorators have run.
@@ -1141,6 +1188,27 @@ def _discover(root: str) -> Registry:
         reg.add(_native_fixture_def(obj, location, type_index))
     _register_builtins(reg)
     return reg
+
+
+def _register_class_fixtures(reg: Registry, cls: type, module_key: str) -> None:
+    """Register every fixture a test class defines, including ones it inherits.
+
+    pytest collects a class's fixtures from its whole MRO, so a base class holding shared fixtures
+    works. Each def is filed under the class it is *looked up from*, which is what makes an override
+    in a subclass beat its base."""
+    names = _safe_getattr(cls, "__mro__", None) or ()
+    for base in names:
+        if base is object:
+            continue
+        for attr, obj in list(vars(base).items()):
+            if not _is_fixture(obj):
+                continue
+            fdef = _fixture_def(obj, f"{module_key}::{cls.__name__}", owner=cls)
+            # A subclass that redefines the name has already registered its own def for this class;
+            # the base's copy would be an identical location and must not shadow it.
+            if any(d.location == fdef.location for d in reg.by_name.get(fdef.name, ())):
+                continue
+            reg.add(fdef)
 
 
 def _register_builtins(reg: Registry) -> None:
@@ -1213,30 +1281,36 @@ def _import_conftest(path: str, rel_dir: str):
 
 
 # --------------------------------------------------------------------------- closure
-def _closure(reg: Registry, module_key: str, requested: dict, extra: list | None = None) -> list[FixtureDef]:
+def _closure(reg: Registry, module_key: str, requested: dict, extra: list | None = None,
+             classes: tuple = ()) -> list[FixtureDef]:
     """Resolved fixture closure for a test, dependencies-before-dependents (topo). Includes
     requested fixtures (the provider names of `requested`'s param→provider bindings), `extra` provider
     names (e.g. `@tiderace.uses` — set up but not injected), all in-scope autouse fixtures, and their
     transitive deps."""
     ordered: list[FixtureDef] = []
-    seen: set[str] = set()
-    visiting: set[str] = set()
+    # Keyed by definition, not by name: `app` overriding `app` is two defs that both have to be set
+    # up, outer first, so the override receives the value it wraps (TID-47).
+    seen: set = set()
+    visiting: set = set()
 
-    def visit(name: str) -> None:
-        if name in seen or name in visiting:
-            return
-        d = reg.resolve(name, module_key)
+    def visit(name: str, below: int | None = None) -> None:
+        d = reg.resolve(name, module_key, classes, below=below)
         if d is None:
             return  # unknown name (e.g. a non-fixture arg) — the body call will surface it
-        visiting.add(name)
+        key = (d.name, d.location)
+        if key in seen or key in visiting:
+            return
+        visiting.add(key)
         for dep in d.deps:
-            visit(dep)
-        visiting.discard(name)
-        if name not in seen:
-            seen.add(name)
+            # A fixture requesting its own name wants the definition it overrides — pytest's
+            # override-and-extend idiom, e.g. `def app(self, app)` inside a test class.
+            visit(dep, below=reg.specificity(d, module_key, classes) if dep == d.name else None)
+        visiting.discard(key)
+        if key not in seen:
+            seen.add(key)
             ordered.append(d)
 
-    for d in reg.autouse_for(module_key):
+    for d in reg.autouse_for(module_key, classes):
         visit(d.name)
     for provider_name in requested.values():
         visit(provider_name)
@@ -1276,10 +1350,10 @@ def _setup_fixture(fdef: FixtureDef, args: dict, param):
     if request is not None:
         call_args["request"] = request
     if fdef.is_yield:
-        gen = fdef.func(**call_args)
+        gen = fdef.func(*_owner_args(fdef), **call_args)
         value, handle = next(gen), gen
     else:
-        value, handle = fdef.func(**call_args), None
+        value, handle = fdef.func(*_owner_args(fdef), **call_args), None
     if request is not None:
         # Wrapped whenever the fixture takes a `request`, not only when it registered a finalizer
         # during its own body. A fixture that hands the test a callable — flask's `purge_module` is
@@ -1321,15 +1395,15 @@ async def _setup_fixture_async(fdef: FixtureDef, args: dict, param):
     if request is not None:
         call_args["request"] = request
     if inspect.isasyncgenfunction(fdef.func):
-        ag = fdef.func(**call_args)
+        ag = fdef.func(*_owner_args(fdef), **call_args)
         value, handle = await ag.__anext__(), ("agen", ag)
     elif inspect.iscoroutinefunction(fdef.func):
-        value, handle = await fdef.func(**call_args), None
+        value, handle = await fdef.func(*_owner_args(fdef), **call_args), None
     elif fdef.is_yield:  # a sync yield-fixture used alongside async ones
-        gen = fdef.func(**call_args)
+        gen = fdef.func(*_owner_args(fdef), **call_args)
         value, handle = next(gen), ("gen", gen)
     else:
-        value, handle = fdef.func(**call_args), None
+        value, handle = fdef.func(*_owner_args(fdef), **call_args), None
     if request is not None:
         # Wrapped whenever the fixture takes a `request`, not only when it registered a finalizer
         # during its own body. A fixture that hands the test a callable — flask's `purge_module` is
@@ -2093,7 +2167,8 @@ class Engine:
                 force_no_fork = False
 
         uses = self._uses(node_id, style)  # @tiderace.uses: set up by type, not injected (B2)
-        closure = _closure(self.reg, module_key, fixture_requested, uses)
+        closure = _closure(self.reg, module_key, fixture_requested, uses,
+                           self._test_classes(node_id, style))
         parametrized = [d for d in closure if d.params]
         if parametrized:
             axes = [
@@ -2618,6 +2693,21 @@ class Engine:
         else:
             func = getattr(module, node_id.partition("::")[2])
         return list(getattr(func, "__tiderace_marks__", ()))
+
+    def _test_classes(self, node_id: str, style: str) -> tuple:
+        """The names in the test class's MRO, narrowest first — empty for a plain function.
+
+        Fixtures defined inside a test class are visible to that class and its subclasses only, so the
+        closure needs to know which class the node belongs to (TID-47)."""
+        if "::" not in node_id.partition("::")[2]:
+            return ()
+        try:
+            module = importlib.import_module(_module_name(_module_key(node_id)))
+            cls = getattr(module, _class_method(node_id)[0], None)
+        except Exception:  # noqa: BLE001 — resolution problems surface per test, not here
+            return ()
+        mro = _safe_getattr(cls, "__mro__", None) or ()
+        return tuple(c.__name__ for c in mro)
 
     def _indirect(self, node_id: str, style: str) -> set:
         """Argnames this node's `parametrize` marks route through a fixture (`indirect=`)."""
