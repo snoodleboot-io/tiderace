@@ -14,7 +14,9 @@
 
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
-use engine_core::exec::{PooledWorker, SubprocessWorker, WellspringPool, Worker};
+#[cfg(unix)]
+use engine_core::exec::{PooledWorker, WellspringPool};
+use engine_core::exec::{SubprocessWorker, Worker};
 use engine_core::testing::skip_live;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -131,7 +133,10 @@ fn the_run_roots_basedir_wins_over_a_sibling_already_on_sys_path() {
 }
 
 /// A conftest that skips its directory costs exactly that directory, under the shared-import pool.
+///
+/// Unix only: the pool forks its workers, so there is no pool to take down elsewhere.
 #[test]
+#[cfg(unix)]
 fn a_conftest_that_skips_its_directory_does_not_take_down_the_pool() {
     let Some(python) = python_with_pytest() else {
         skip_live("no interpreter with pytest available");
