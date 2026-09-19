@@ -2049,7 +2049,19 @@ class Engine:
 
         # Split requested params: fixtures (resolved by the graph) vs. bare params filled positionally
         # by @tiderace.cases. Without this, a parametrized test's params look like missing fixtures.
-        fixture_requested = {p: t for p, t in requested.items() if self.reg.is_provider(t)}
+        #
+        # A name the parametrize supplies is NOT a fixture request, even when a fixture of that name
+        # exists: pytest's rule is that direct parametrization wins, and the value the author wrote
+        # beside the test is the one that runs (TID-57). The collision is easy to hit — `history`,
+        # `client`, `config` are ordinary words — and it only appears once the run root is wide enough
+        # to have discovered the other module's fixture, so the same test passes on a narrow root and
+        # errors on the whole package.
+        parametrized = {name for case, _ in raw_cases if isinstance(case, dict) for name in case}
+        parametrized -= self._indirect(node_id, style)  # indirect values go to the fixture, not the test
+        fixture_requested = {
+            p: t for p, t in requested.items()
+            if p not in parametrized and self.reg.is_provider(t)
+        }
         case_params = [p for p in requested if p not in fixture_requested]
         # `@tiderace.cases` yields positional variants; `@pytest.mark.parametrize`
         # yields name→value maps (argnames need not follow the signature order).
@@ -2607,6 +2619,19 @@ class Engine:
             func = getattr(module, node_id.partition("::")[2])
         return list(getattr(func, "__tiderace_marks__", ()))
 
+    def _indirect(self, node_id: str, style: str) -> set:
+        """Argnames this node's `parametrize` marks route through a fixture (`indirect=`)."""
+        if style == "unittest_method":
+            return set()
+        module = importlib.import_module(_module_name(_module_key(node_id)))
+        if style == "class_method":
+            cls, method = _class_method(node_id)
+            owner = getattr(module, cls)
+            func = getattr(owner, method)
+            return _indirect_names(func, owner, module)
+        func = getattr(module, node_id.partition("::")[2])
+        return _indirect_names(func, module)
+
     def _uses(self, node_id: str, style: str) -> list:
         """Provider names a test depends on via `@tiderace.uses(Type, ...)` — resolved by type, set up
         in the closure but never passed as args (the native `usefixtures`). unittest carries none."""
@@ -2649,6 +2674,29 @@ class Engine:
     def teardown_all(self) -> None:
         while self.active:
             _teardown(self.active.pop().gen)
+
+
+def _indirect_names(func, *outer) -> set:
+    """Argnames a `parametrize` marks as **indirect**, anywhere in the owner chain.
+
+    `indirect=True` (or a list of names) does not hand the value to the test: pytest gives it to the
+    *fixture* of that name as `request.param`, and the test receives whatever the fixture returns. So
+    an indirect name stays a fixture request, where a direct one overrides any fixture sharing its
+    name (TID-57). Getting this backwards hands the test the raw parametrize value — typically the
+    fixture function itself, which then fails on the first attribute the test touches."""
+    out: set = set()
+    for mark in _own_markers(func, *outer):
+        if getattr(mark, "name", "") != "parametrize":
+            continue
+        indirect = (getattr(mark, "kwargs", None) or {}).get("indirect")
+        if not indirect:
+            continue
+        names = mark.args[0]
+        names = ([n.strip() for n in names.split(",") if n.strip()] if isinstance(names, str)
+                 else list(names))
+        out.update(names if indirect is True else
+                   [n for n in names if n in set(indirect)])
+    return out
 
 
 def _parametrize_cases(func, *outer) -> list[dict]:
