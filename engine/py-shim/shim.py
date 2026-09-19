@@ -2594,15 +2594,17 @@ class Engine:
         native = list(getattr(func, "__tiderace_cases__", ()))
         if native:
             return [(c, None) for c in native]  # native cases carry no author-supplied id
-        return _parametrize_cases(func)
+        # The class and the module too: pytest applies their marks to every test they hold (TID-53).
+        owner = getattr(module, _class_method(node_id)[0], None) if style == "class_method" else None
+        return _parametrize_cases(func, *(o for o in (owner, module) if o is not None))
 
     def teardown_all(self) -> None:
         while self.active:
             _teardown(self.active.pop().gen)
 
 
-def _parametrize_cases(func) -> list[dict]:
-    """Expand `@pytest.mark.parametrize` on ``func`` into one kwargs dict per case.
+def _parametrize_cases(func, *outer) -> list[dict]:
+    """Expand `@pytest.mark.parametrize` on ``func`` — and on its class and module — into cases.
 
     The corpus is authored against pytest, so a test whose arguments come from
     `parametrize` looks, to a runner that only knows fixtures, like a test
@@ -2620,8 +2622,18 @@ def _parametrize_cases(func) -> list[dict]:
 
     Stacked marks with ids on only *some* axes fall back to generated ids for the whole case rather
     than splicing the two schemes, which would produce an id matching neither runner.
+
+    `outer` is the rest of the owner chain, narrowest first: the class, then the module. pytest applies
+    a mark on a class to every method the class collects, and the same for a module-level `pytestmark`
+    — reading only the function missed both. A class parametrized with 5 values and holding 4 methods
+    is 20 tests in pytest and was 4 here, each failing on the argument nobody supplied (TID-53).
+
+    Order matters and is pytest's, not ours: axes run narrowest first, so `test[1-A]` puts the
+    function's own parameter before the class's, and the class's value varies fastest across the
+    generated cases. `_own_markers` reports widest first, which is why the chain is passed in reverse
+    here.
     """
-    marks = [m for m in getattr(func, "pytestmark", ()) if getattr(m, "name", "") == "parametrize"]
+    marks = [m for m in _own_markers(func, *outer) if getattr(m, "name", "") == "parametrize"]
     if not marks:
         return []
     axes: list[list[tuple]] = []
