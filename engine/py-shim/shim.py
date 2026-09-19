@@ -2108,6 +2108,12 @@ class Engine:
             # meant `@pytest.mark.slwo` quietly ran a test its author had filtered out (TID-59).
             unknown = sorted(n for n in names if n and n not in _DECLARED_MARKS and n not in _BUILTIN_MARKS)
             if unknown:
+                # Everything a plugin registered counts as declared — ask pytest rather than guess.
+                # If it cannot tell us, enforce nothing: a false error on a valid mark fails a correct
+                # suite, which is worse than missing a typo (TID-60).
+                registered = _plugin_marks()
+                unknown = [n for n in unknown if n not in registered] if registered is not None else []
+            if unknown:
                 return {"node_id": node_id, "outcome": "error",
                         "detail": f"{', '.join(unknown)} not found in `markers` configuration option"}
         if _MARKER_EXPR is not None and not _MARKER_EXPR(names):
@@ -2919,8 +2925,42 @@ def _mark_names(node_id: str, style: str) -> set:
 # Marks pytest itself defines; `--strict-markers` never complains about these.
 _BUILTIN_MARKS = frozenset({
     "skip", "skipif", "xfail", "parametrize", "usefixtures", "filterwarnings", "tryfirst", "trylast",
-    "anyio", "asyncio",  # supplied by plugins a suite may be running under
 })
+_PLUGIN_MARKS: frozenset | None = None  # markers the installed plugins register; None = not asked yet
+
+
+def _plugin_marks() -> frozenset | None:
+    """Every marker the installed pytest plugins register, or `None` if we could not find out.
+
+    A plugin registers its markers at runtime — pytest-timeout's `timeout`, pytest-benchmark's
+    `benchmark`, pytest-django's `django_db` — by calling `addinivalue_line("markers", ...)` from
+    `pytest_configure`. None of that is in the project's own `markers` list, and tiderace does not run
+    plugins, so a hand-written allowlist would flag every one of them as a typo. pirn-core showed
+    exactly that: 60 tests erroring on `@pytest.mark.timeout`, which pytest accepts without comment
+    (TID-60).
+
+    So ask pytest, which already knows: `--markers` prints the registered set, plugins included. One
+    subprocess, only when a project has turned strict checking on, cached for the run.
+
+    `None` means we could not get an answer, and the caller must then **not** enforce: a false error
+    on a valid mark is worse than a missed typo, because it fails a suite that is correct."""
+    global _PLUGIN_MARKS
+    if _PLUGIN_MARKS is not None:
+        return _PLUGIN_MARKS
+    import re
+    import subprocess
+    try:
+        out = subprocess.run(
+            [sys.executable, "-m", "pytest", "--markers"],
+            capture_output=True, text=True, timeout=60, cwd=_ROOT or None,
+        ).stdout
+    except Exception:  # noqa: BLE001 — no pytest, or it refused to start
+        return None
+    names = frozenset(re.findall(r"^@pytest\.mark\.(\w+)", out, re.M))
+    if not names:
+        return None  # an empty answer is not an answer
+    _PLUGIN_MARKS = names
+    return _PLUGIN_MARKS
 
 
 def _registered_marks(addopts: str, config_dir: str) -> tuple:
