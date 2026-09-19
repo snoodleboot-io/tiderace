@@ -47,21 +47,29 @@ class MonkeyPatch:
         self._setitem: list = []
 
     # ---- attributes ----
-    def setattr(self, target: Any, name: str, value: Any = _SENTINEL) -> None:
-        """`setattr(obj, "attr", value)` or the string-target form `setattr("pkg.mod.attr", value)`."""
+    def setattr(self, target: Any, name: str, value: Any = _SENTINEL, raising: bool = True) -> None:
+        """`setattr(obj, "attr", value)` or the string-target form `setattr("pkg.mod.attr", value)`.
+
+        `raising=True` (the default) refuses to create an attribute that does not already exist —
+        pytest's guard against a patch that silently does nothing because the name was misspelled or
+        moved. `raising=False` allows it."""
         if value is _SENTINEL:
             target, name, value = self._resolve_target(target, name)
         old = getattr(target, name, _SENTINEL)
+        if old is _SENTINEL and raising:
+            raise AttributeError(f"{target!r} has no attribute {name!r}")
         self._undo.append(
             (lambda: setattr(target, name, old)) if old is not _SENTINEL
             else (lambda: delattr(target, name))
         )
         setattr(target, name, value)
 
-    def delattr(self, target: Any, name: str = _SENTINEL) -> None:
+    def delattr(self, target: Any, name: str = _SENTINEL, raising: bool = True) -> None:
         if name is _SENTINEL:
             target, name, _ = self._resolve_target(target, _SENTINEL)
         old = getattr(target, name, _SENTINEL)
+        if old is _SENTINEL and raising:
+            raise AttributeError(f"{target!r} has no attribute {name!r}")
         if old is not _SENTINEL:
             self._undo.append(lambda: setattr(target, name, old))
             delattr(target, name)
@@ -75,7 +83,9 @@ class MonkeyPatch:
         )
         mapping[key] = value
 
-    def delitem(self, mapping: Any, key: Any) -> None:
+    def delitem(self, mapping: Any, key: Any, raising: bool = True) -> None:
+        if key not in mapping and raising:
+            raise KeyError(key)
         if key in mapping:
             old = mapping[key]
             self._undo.append(lambda: mapping.__setitem__(key, old))
@@ -105,6 +115,19 @@ class MonkeyPatch:
         os.chdir(str(path))
 
     # ---- teardown ----
+    def context(self) -> "_MonkeyPatchContext":
+        """A nested patcher undone at the end of the `with` block, not at teardown.
+
+        ```python
+        with monkeypatch.context() as m:
+            m.setenv("MODE", "test")
+        # already undone here
+        ```
+
+        The inner patcher is independent: what it records is undone on exit, and this one's own
+        records are untouched."""
+        return _MonkeyPatchContext()
+
     def undo(self) -> None:
         """Replay every recorded inverse, newest first; idempotent (the queues empty).
 
@@ -136,3 +159,18 @@ class MonkeyPatch:
         obj = importlib.import_module(module_path)
         # `name` here is actually the *value* in the two-arg string form.
         return obj, attr, name
+
+
+class _MonkeyPatchContext:
+    """The object `MonkeyPatch.context()` yields — a fresh patcher scoped to the `with` block."""
+
+    __slots__ = ("_mp",)
+
+    def __init__(self) -> None:
+        self._mp = MonkeyPatch()
+
+    def __enter__(self) -> MonkeyPatch:
+        return self._mp
+
+    def __exit__(self, *exc: object) -> None:
+        self._mp.undo()

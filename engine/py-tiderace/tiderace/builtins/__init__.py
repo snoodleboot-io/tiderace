@@ -16,16 +16,19 @@ they are available to every test without an import in the test's own conftest.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
-from typing import Iterator
+from typing import Any, Iterator
 
 import tiderace
 
 from ._capture import Capfd, Capsys, CaptureResult
+from ._config import RunConfig
 from ._logging import CapLog
 from ._monkeypatch import MonkeyPatch
 from ._paths import TmpPath
+from ._warnings import Warnings
 
 __all__ = [
     "MonkeyPatch",
@@ -34,11 +37,16 @@ __all__ = [
     "Capfd",
     "CapLog",
     "CaptureResult",
+    "Warnings",
+    "RunConfig",
     "monkeypatch",
     "tmp_path",
     "capsys",
     "capfd",
     "caplog",
+    "recwarn",
+    "tmpdir",
+    "pytestconfig",
     "providers",
 ]
 
@@ -87,6 +95,68 @@ def caplog() -> Iterator[CapLog]:
     cap._stop()
 
 
+@tiderace.provides
+def recwarn() -> Iterator[Warnings]:
+    """Function-scoped warning recorder; the warnings filter is restored at teardown.
+
+    Native form: `w: Warnings`. `recwarn` is pytest's name for the same resource."""
+    rec = Warnings()
+    rec._start()
+    yield rec
+    rec._stop()
+
+
+@tiderace.provides
+def tmpdir() -> Iterator[Any]:
+    """pytest's legacy `py.path.local` temp directory, for suites that still ask for it.
+
+    `tmp_path` is the modern spelling and the one to migrate to — this exists so a suite written
+    before `pathlib` runs unmodified. When no `py.path` implementation is importable the resource
+    resolves to a `TmpPath`, which covers the common `str()` / `join()`-free usage rather than
+    failing the test outright.
+    """
+    raw = tempfile.mkdtemp(prefix="tiderace-")
+    try:
+        from _pytest._py.path import LocalPath  # pytest vendors py.path
+        value: Any = LocalPath(raw)
+    except Exception:  # noqa: BLE001 — no vendored py.path
+        try:
+            from py.path import local as LocalPath  # the standalone `py` package
+
+            value = LocalPath(raw)
+        except Exception:  # noqa: BLE001 — neither: hand back the modern object
+            value = TmpPath(raw)
+    yield value
+    shutil.rmtree(raw, ignore_errors=True)
+
+
+@tiderace.provides
+def pytestconfig() -> RunConfig:
+    """Session-wide run configuration: declared options and the project root.
+
+    Native form: `config: RunConfig`. Values come from what the engine already knows — the project's
+    `addopts` and any `pytest_addoption` defaults a conftest declared (TID-14)."""
+    return RunConfig(_declared_options(), _rootdir())
+
+
+def _declared_options() -> dict:
+    """Option defaults the shim collected from conftest `pytest_addoption` hooks, if it is driving."""
+    try:
+        import shim  # the engine's own module, present only when the shim is running this
+    except Exception:  # noqa: BLE001 — imported directly (tests of this package); no options known
+        return {}
+    return dict(getattr(shim, "_CLI_OPTIONS", {}) or {})
+
+
+def _rootdir() -> str:
+    try:
+        import shim
+
+        return getattr(shim, "_ROOT", "") or os.getcwd()
+    except Exception:  # noqa: BLE001
+        return os.getcwd()
+
+
 def providers() -> list:
     """The builtin provider callables, for the shim to register globally (always-available)."""
-    return [monkeypatch, tmp_path, capsys, capfd, caplog]
+    return [monkeypatch, tmp_path, capsys, capfd, caplog, recwarn, tmpdir, pytestconfig]
