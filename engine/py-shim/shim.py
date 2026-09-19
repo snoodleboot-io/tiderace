@@ -1603,7 +1603,22 @@ def _state_fingerprint() -> dict:
         "logging.handlers": tuple(id(h) for h in root.handlers),
         "logging.level": root.level,
         "threads": threading.active_count(),
+        # The working directory is process-wide and every relative path in the next test resolves
+        # against it, so a test that chdirs without cleaning up silently moves its neighbours'
+        # footing. flask's suite does exactly that and nine of its tests then disagreed with pytest —
+        # but only on the in-process tier, which is the signature of a leak the fingerprint is blind
+        # to (TID-45). `getcwd` can raise if the directory was deleted underneath us, which is itself
+        # a disturbance worth catching rather than a reason to crash the worker.
+        "cwd": _safe_cwd(),
     }
+
+
+def _safe_cwd() -> str | None:
+    """`os.getcwd()`, or None if the directory has been removed underneath the process."""
+    try:
+        return os.getcwd()
+    except OSError:
+        return None
 
 
 def _restore_state(before: dict) -> None:
@@ -1625,6 +1640,14 @@ def _restore_state(before: dict) -> None:
         keep = {i: h for i, h in ((id(h), h) for h in root.handlers)}
         root.handlers[:] = [keep[i] for i in before["logging.handlers"] if i in keep]
     root.setLevel(before["logging.level"])
+    # Cheap to put back and cheap to check, so the common case — a test that chdirs and forgets —
+    # costs its neighbours nothing. A directory that no longer exists cannot be returned to; the
+    # delta below still reports the move, and the node is demoted.
+    if before.get("cwd") is not None and _safe_cwd() != before["cwd"]:
+        try:
+            os.chdir(before["cwd"])
+        except OSError:
+            pass
 
 
 def _fingerprint_delta(before: dict, after: dict) -> str | None:
@@ -1646,6 +1669,8 @@ def _fingerprint_delta(before: dict, after: dict) -> str | None:
     for key in changed:
         if key == "threads":
             parts.append(f"left {after[key] - before[key]} thread(s) running")
+        elif key == "cwd":
+            parts.append(f"changed the working directory to {after[key]}")
         elif key == "environ":
             added = sorted(after[key] - before[key])
             removed = sorted(before[key] - after[key])
