@@ -35,6 +35,9 @@ Options for `run`:
       --no-optimistic     fork every test, even the restorable ones (see the note below)
       --shared-import     import the project once and fork the workers from it (the default)
       --no-shared-import  give every worker its own interpreter, each importing the project
+  -m, --markers <EXPR>    run only tests matching a marker expression, e.g. 'not slow and db'.
+                          Matches pytest marks and tiderace tags alike, and overrides any -m the
+                          project sets in its own addopts
   -q, --quiet             suppress the per-test lines; print only the tally
   -h, --help              show this message
 
@@ -83,7 +86,16 @@ fn main() -> ExitCode {
             Err(e) => usage_error(&e),
         },
         "run" => match Options::parse(&args[1..]) {
-            Ok(opts) => cmd_run(&opts.root, &opts.plan, opts.quiet),
+            Ok(opts) => {
+                // Handed to the shim through the environment: it is the process that reads the
+                // project's own `addopts`, and it applies the same precedence pytest does — an
+                // expression on the command line wins over one in the config (TID-59).
+                if let Some(expr) = &opts.marker_expr {
+                    // SAFETY: single-threaded here; workers are spawned further down.
+                    unsafe { std::env::set_var("TIDERACE_MARKER_EXPR", expr) };
+                }
+                cmd_run(&opts.root, &opts.plan, opts.quiet)
+            }
             Err(e) => usage_error(&e),
         },
         other => usage_error(&format!("unknown command: {other}")),
@@ -110,6 +122,8 @@ struct Options {
     root: PathBuf,
     plan: RunPlan,
     quiet: bool,
+    /// `-m EXPR`: the marker expression for this run, overriding the project's own `addopts`.
+    marker_expr: Option<String>,
 }
 
 impl Options {
@@ -131,6 +145,7 @@ impl Options {
             plan.shared_import = false;
         }
         let mut quiet = false;
+        let mut marker_expr: Option<String> = None;
         let mut root: Option<PathBuf> = None;
         let mut strategy_set = false;
 
@@ -194,6 +209,7 @@ impl Options {
                 "--no-optimistic" => plan.optimistic_no_fork = false,
                 "--shared-import" => plan.shared_import = true,
                 "--no-shared-import" => plan.shared_import = false,
+                "-m" | "--markers" => marker_expr = Some(value("--markers")?),
                 "-q" | "--quiet" => quiet = true,
                 other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
                 _ => {
@@ -218,6 +234,7 @@ impl Options {
             root: root.ok_or("missing <path>")?,
             plan,
             quiet,
+            marker_expr,
         })
     }
 }

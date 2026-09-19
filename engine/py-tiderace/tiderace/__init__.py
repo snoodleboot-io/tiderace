@@ -43,6 +43,7 @@ __all__ = [
     "skip_if",
     "xfail",
     "tag",
+    "mark",
     "ProviderSpec",
     "Case",
     "Mark",
@@ -141,7 +142,11 @@ def xfail(_fn=None, *, reason: str = "", strict: bool = False):
 
 
 def tag(*names: str):
-    """Attach selection tag(s) — `@tiderace.tag("slow", "db")`. Metadata only; no execution effect."""
+    """Attach selection tag(s) — `@tiderace.tag("slow", "db")`.
+
+    Selection only: the engine deselects tagged tests when a run's `-m` expression says to, and never
+    changes how a selected test executes. `@tiderace.mark.slow` is the same thing spelled the way
+    pytest spells it."""
 
     def deco(fn):
         for n in names:
@@ -149,6 +154,30 @@ def tag(*names: str):
         return fn
 
     return deco
+
+
+class _MarkNamespace:
+    """`@tiderace.mark.<name>` — a custom mark by attribute, pytest's ergonomics on native marks.
+
+    `tag("slow")` and `mark.slow` produce the identical mark; this spelling exists because it is the
+    one people already know, and because it reads better stacked with other decorators. A project
+    declares its marks in `[tool.tiderace] markers` (or pytest's `markers`) and turns on
+    `--strict-markers` to have undeclared ones rejected — declaration is what makes a typo an error
+    rather than a test that silently stops matching its filter (TID-59).
+    """
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return tag(name)
+
+    def __repr__(self) -> str:
+        return "<tiderace.mark: attribute access builds a selection tag>"
+
+
+mark = _MarkNamespace()
 
 
 def _normalize_cases(arg, kwargs, ids) -> list[Case]:
