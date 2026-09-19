@@ -1920,6 +1920,7 @@ class Engine:
         self.purity_guard = purity_guard  # detect shared-state mutation per test (→ pure-test batching)
         self._leaked = None          # this test's unmodelled state drift, if any (TID-33)
         self._state_disturbed = False  # …and whether the node should be forked from now on
+        self._disturbance = None  # what moved, kept for the verdict the clean-room handoff reports
         self.restore = restore  # snapshot/restore shared state around no-fork tests (isolation w/o fork)
         self.active: list[_Active] = []  # in setup order (widest → narrowest)
 
@@ -2052,6 +2053,9 @@ class Engine:
         impurity = None  # first impurity reason across variants (any impure ⇒ the node is impure)
         node_pure = None  # tri-state across variants: None (unmeasured), True (all measured pure), False
         node_must_fork = False  # any case disturbed interpreter state ⇒ fork the whole node (TID-33)
+        # `--strategy subprocess` runs in-process by configuration; there the restore is the remedy
+        # and there is nothing better to hand the node to.
+        force_no_fork_only = self.no_fork
         # Per-variant results, reported alongside the aggregate (TID-25). Each case already gets its
         # own `_fork_run`, so collapsing them to one outcome discarded results that had already been
         # paid for — the tally lost the passes, and a node with several failures kept one detail.
@@ -2089,6 +2093,7 @@ class Engine:
             for case_pos, case_kwargs in enumerate(case_kwargs_list):
                 started = time.perf_counter()
                 self._state_disturbed = False
+                self._disturbance = None
                 oc, detail, cov, purity = self._fork_run(
                     node_id, style, fixture_requested, closure, combo, deadline_ms, case_kwargs,
                     force_no_fork, trusted_pure, must_fork)
@@ -2138,6 +2143,23 @@ class Engine:
                 resp["impurity"] = impurity
         if node_must_fork:  # additive; omitted for the overwhelming majority that never trip
             resp["must_fork"] = True
+        # A node that disturbed interpreter state has an in-process result nobody should trust, and
+        # this process is no longer a safe thing to fork. Re-run it in the clean room and report that
+        # instead — the pristine image is the only place the answer is both correct and reachable
+        # without deadlocking (TID-50).
+        if node_must_fork and _CLEAN_ROOM is not None and not self.no_fork and not force_no_fork_only:
+            print(f"tiderace: re-running {node_id} from a clean image — it disturbed interpreter state",
+                  file=sys.stderr, flush=True)
+            clean = _clean_room_run(node_id, style, deadline_ms)
+            if clean is not None:
+                clean["must_fork"] = True
+                # The clean run cannot observe what the first attempt did, and the verdict is about
+                # the test, not about where it finally ran: it disturbed state, so it is impure and
+                # must not take the in-process path again.
+                clean["pure"] = False
+                if self._disturbance:
+                    clean["impurity"] = f"disturbed interpreter state: {self._disturbance}"
+                return clean
         return resp
 
     def _run_inherited(self, node_id: str, deadline_ms: int, force_no_fork: bool,
@@ -2250,6 +2272,12 @@ class Engine:
                 # exactly who needs it. Note this is NOT the `must_fork` parameter above, which says
                 # the test's *module* is unrestorable; this says the test disturbed the interpreter.
                 self._state_disturbed = True
+                self._disturbance = drift
+            if drift is not None and _CLEAN_ROOM is not None and not must_fork and not self.no_fork:
+                # The clean room re-runs the whole node from a pristine image; `run()` above does the
+                # handoff and reports THAT. Forking here would fork the process this test just
+                # dirtied — if what it leaked was a thread, straight into a deadlock (TID-50).
+                return result
             if drift is not None and _FORK_AVAILABLE and not must_fork and not self.no_fork:
                 print(f"tiderace: re-running {node_id} in a fork — it {drift}",
                       file=sys.stderr, flush=True)
@@ -3138,6 +3166,132 @@ def subinterp() -> int:
             t.join(timeout=5)
 
 
+_CLEAN_ROOM = None  # socket to a pristine helper process that re-runs demoted tests (TID-50)
+
+
+def _start_clean_room(engine: "Engine") -> None:
+    """Fork a helper that keeps a pristine copy of this worker's image, for re-running demoted tests.
+
+    A test that disturbs interpreter state is re-run in a fork so the *current* run reports the right
+    answer (TID-33). The fork used to be taken from the worker that had just run it — a process now
+    holding whatever the test leaked. When what leaked is a **thread**, that fork is the classic POSIX
+    hazard: the child gets the one calling thread and inherits every object the others owned, so a
+    re-run that waits on a background worker waits forever. Three dask tests in one real suite hung
+    exactly there, each burning the full 60-second deadline: 54 of that run's 73 seconds were the
+    engine waiting on tests whose work takes milliseconds.
+
+    The helper is forked *before* this worker runs anything, so its image is clean, and it never
+    executes test code itself — each request is run in a grandchild it forks on demand. That keeps it
+    pristine for the life of the run no matter what the worker does to itself.
+
+    Cheap by construction: one extra process per worker, copy-on-write, idle until something trips."""
+    global _CLEAN_ROOM
+    if not _FORK_AVAILABLE:
+        return
+    import socket
+
+    ours, theirs = socket.socketpair()
+    pid = os.fork()
+    if pid == 0:  # ---- helper: pristine, and it stays that way ----
+        ours.close()
+        try:
+            _clean_room_serve(theirs, engine)
+        finally:
+            os._exit(0)  # never unwind past the fork point in a child
+    theirs.close()
+    _CLEAN_ROOM = ours
+
+
+def _clean_room_serve(sock, engine: "Engine") -> None:
+    """Serve node re-runs from a pristine image: one grandchild per request, nothing run in here.
+
+    Running the node here instead would set its wider-scope fixtures up in *this* process, and a
+    fixture that starts a thread would dirty the one image the run has left. Forking per request costs
+    a fork — on the rare path this exists for — and keeps the guarantee absolute."""
+    fd = sock.fileno()
+    while True:
+        req = _read_frame(fd)
+        if req is None:
+            return
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:  # ---- grandchild: has the clean image, may dirty itself freely ----
+            os.close(read_fd)
+            try:
+                # `_CLEAN_ROOM` is None in here (it is set in the worker only, after this helper was
+                # forked), so a demotion inside this run takes the ordinary local fork and cannot
+                # bounce back to us.
+                resp = engine.run(req["node_id"], req["style"], req.get("deadline_ms", 5000))
+                payload = json.dumps(resp).encode()
+            except BaseException as exc:  # noqa: BLE001 — report it; never die silently (TID-15)
+                payload = json.dumps({"node_id": req["node_id"], "outcome": "error",
+                                      "detail": _child_fault_detail(exc)[:4000]}).encode()
+            try:
+                os.write(write_fd, payload)
+            except BaseException:  # noqa: BLE001
+                pass
+            os.close(write_fd)
+            os._exit(0)
+        os.close(write_fd)
+        # Wait no longer than the node's own deadline plus slack: a re-run that hangs here must not
+        # hang the worker waiting on it, which is the whole failure this exists to end.
+        budget = req.get("deadline_ms", 5000) / 1000.0 + 5.0
+        chunks, deadline = [], time.monotonic() + budget
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([read_fd], [], [], remaining)
+            if not ready:
+                break
+            chunk = os.read(read_fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        os.close(read_fd)
+        if not chunks:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        try:
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+        raw = b"".join(chunks)
+        try:
+            resp = json.loads(raw) if raw else None
+        except ValueError:
+            resp = None
+        if resp is None:
+            resp = {"node_id": req["node_id"], "outcome": "error",
+                    "detail": "timeout (clean re-run produced no result)"}
+        _write_frame(fd, resp)
+
+
+def _clean_room_run(node_id: str, style: str, deadline_ms: int) -> dict | None:
+    """Ask the clean room to run a node from a pristine image. `None` if it cannot (caller falls back).
+
+    A helper that has died takes the channel with it; the caller then forks locally, which is what it
+    would have done anyway before this existed."""
+    global _CLEAN_ROOM
+    if _CLEAN_ROOM is None:
+        return None
+    fd = _CLEAN_ROOM.fileno()
+    try:
+        _write_frame(fd, {"node_id": node_id, "style": style, "deadline_ms": deadline_ms})
+        resp = _read_frame(fd)
+    except BaseException:  # noqa: BLE001 — a broken channel costs the clean re-run, not the run
+        resp = None
+    if resp is None:
+        try:
+            _CLEAN_ROOM.close()
+        except BaseException:  # noqa: BLE001
+            pass
+        _CLEAN_ROOM = None
+    return resp
+
+
 def _serve_pool(size: int, socket_path: str, engine_args: dict) -> int:
     """Import once in this process, then fork `size` workers that each serve their own connection.
 
@@ -3167,6 +3321,7 @@ def _serve_pool(size: int, socket_path: str, engine_args: dict) -> int:
             sock.connect(socket_path)
             _STDIN = _STDOUT = sock.fileno()
             engine = Engine(**engine_args)
+            _start_clean_room(engine)  # before a single test runs: the image is pristine now (TID-50)
             _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
             try:
                 while True:
@@ -3218,6 +3373,7 @@ def serve() -> int:
     if pool and conn:
         return _serve_pool(int(pool), conn, engine_args)
     engine = Engine(**engine_args)
+    _start_clean_room(engine)  # before a single test runs: the image is pristine now (TID-50)
     _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
     try:
         while True:
