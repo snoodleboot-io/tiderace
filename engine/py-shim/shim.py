@@ -1280,7 +1280,14 @@ def _setup_fixture(fdef: FixtureDef, args: dict, param):
         value, handle = next(gen), gen
     else:
         value, handle = fdef.func(**call_args), None
-    if request is not None and request._finalizers:
+    if request is not None:
+        # Wrapped whenever the fixture takes a `request`, not only when it registered a finalizer
+        # during its own body. A fixture that hands the test a callable — flask's `purge_module` is
+        # the canonical shape — registers nothing at setup time and everything later, from inside the
+        # test body. Deciding here whether to wrap therefore dropped exactly those finalizers, and a
+        # module a test asked to have purged stayed in `sys.modules` for its neighbours (TID-56).
+        # The list is shared by reference, so later appends are seen; an empty one tears down as
+        # cheaply as before.
         handle = _FinalizingHandle(handle, request._finalizers)
     return value, handle
 
@@ -1323,7 +1330,14 @@ async def _setup_fixture_async(fdef: FixtureDef, args: dict, param):
         value, handle = next(gen), ("gen", gen)
     else:
         value, handle = fdef.func(**call_args), None
-    if request is not None and request._finalizers:
+    if request is not None:
+        # Wrapped whenever the fixture takes a `request`, not only when it registered a finalizer
+        # during its own body. A fixture that hands the test a callable — flask's `purge_module` is
+        # the canonical shape — registers nothing at setup time and everything later, from inside the
+        # test body. Deciding here whether to wrap therefore dropped exactly those finalizers, and a
+        # module a test asked to have purged stayed in `sys.modules` for its neighbours (TID-56).
+        # The list is shared by reference, so later appends are seen; an empty one tears down as
+        # cheaply as before.
         handle = _FinalizingHandle(handle, request._finalizers)
     return value, handle
 
@@ -1694,10 +1708,19 @@ def _restore_modules(before: dict) -> list:
     whole interpreter affordable here when snapshotting every module's *contents* would not be.
 
     Modules the test merely **added** are left alone. Those are a warmed import cache, not damage,
-    and evicting them would only make the next test pay to import them again."""
+    and evicting them would only make the next test pay to import them again.
+
+    A module the test **removed** is left removed, which is a different thing from one it replaced
+    (TID-56). Suites purge a name on purpose — flask's conftest pops a module at teardown so the next
+    test imports it fresh from that test's own temporary directory — and putting it back handed the
+    next test a module built against the previous test's tmp dir, with nothing to re-import because
+    the name was already bound. Restoring only names still bound to *something else* keeps TID-27's
+    case (evict-and-reimport leaves a different object there, so the original still goes back) and
+    honours the removal. The cost of honouring it is one import the author asked for."""
     replaced = []
     for name, module in before.items():
-        if sys.modules.get(name) is not module:
+        current = sys.modules.get(name)
+        if current is not None and current is not module:
             sys.modules[name] = module
             replaced.append(name)
     return replaced
