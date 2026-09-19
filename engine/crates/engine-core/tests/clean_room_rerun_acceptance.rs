@@ -16,6 +16,10 @@
 //! thread to answer. Forked from the dirty worker it deadlocks, and the only thing that ends it is the
 //! deadline. Forked from a clean image it passes in milliseconds.
 
+// Unix only, whole file: the clean room is forked, and on Windows there is neither a fork to take nor
+// a demotion path to take it from — gating just the test would leave every helper here dead code.
+#![cfg(unix)]
+
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::Worker;
@@ -115,7 +119,6 @@ def test_ordinary():
     assert True
 "#;
 
-#[cfg(unix)]
 #[test]
 fn a_thread_leaking_test_is_rerun_from_a_clean_image_not_the_process_it_dirtied() {
     use engine_core::exec::ForkWorker;
