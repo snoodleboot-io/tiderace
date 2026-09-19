@@ -157,8 +157,14 @@ def _insert_run_root(root: str) -> None:
     still holds a directory named like a stdlib module. pytest has the same exposure there, and
     naming it beats letting it surface as unrelated errors later."""
     basedir = _package_basedir(root)
-    if basedir not in sys.path:
-        sys.path.insert(0, basedir)
+    # First, not merely present (TID-48). A monorepo venv's editable-install `.pth` files already put
+    # every package directory on `sys.path` — each holding its own `tests` package — so the basedir
+    # is usually there, just behind a sibling. Leaving it where it was meant `tests.unit` resolved
+    # against pirn-agents' `tests` while running pirn-core: 4,855 of 4,855 tests errored.
+    # `python -m pytest` hides this, because `-m` puts the cwd ahead of every `.pth` entry.
+    while basedir in sys.path:
+        sys.path.remove(basedir)
+    sys.path.insert(0, basedir)
     try:
         entries = os.listdir(basedir)
     except OSError:
@@ -1008,10 +1014,18 @@ def _discover(root: str) -> Registry:
                 native.append((obj, location))
             elif _is_fixture(obj):
                 reg.add(_fixture_def(obj, location))
-    for current, _dirs, files in _walk_suite(root):
+    for current, dirs, files in _walk_suite(root):
         rel_dir = os.path.relpath(current, root)
         rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
-        for name in sorted(files):
+        if _dir_skip(rel_dir) is not None:
+            dirs[:] = []  # a skipped conftest's subtree is not collected at all, as in pytest
+            continue
+        # The directory's conftest before its test modules: it may skip the directory, and `sorted`
+        # alone would put `a_test.py` ahead of `conftest.py`.
+        for name in sorted(files, key=lambda n: (n != "conftest.py", n)):
+            if _dir_skip(rel_dir) is not None:
+                dirs[:] = []
+                break
             if not name.endswith(".py"):
                 continue
             path = os.path.join(current, name)
@@ -1030,7 +1044,7 @@ def _discover(root: str) -> Registry:
                 rel = _module_name(os.path.relpath(path, root).replace(os.sep, "/"))
                 try:
                     module = importlib.import_module(rel)
-                except Exception:  # noqa: BLE001 — a bad module surfaces per-test, not at discovery
+                except (Exception, *_skip_exceptions()):  # noqa: BLE001 — surfaces per-test, not at discovery
                     continue
                 location = os.path.relpath(path, root).replace(os.sep, "/")
                 test_modules.append((module, location))
@@ -1088,6 +1102,27 @@ def _register_builtins(reg: Registry) -> None:
         reg.add(_native_fixture_def(obj, "", {}))
 
 
+_DIR_SKIPS: dict[str, str] = {}  # suite-relative dir ("" = everything) -> why its conftest skipped it
+
+
+def _dir_skip(rel_path: str) -> str | None:
+    """The skip reason covering `rel_path` (a suite-relative file or dir), if a conftest skipped it."""
+    if not _DIR_SKIPS:
+        return None
+    if "" in _DIR_SKIPS:
+        return _DIR_SKIPS[""]
+    parts = rel_path.split("/")
+    for depth in range(len(parts), 0, -1):
+        reason = _DIR_SKIPS.get("/".join(parts[:depth]))
+        if reason is not None:
+            return reason
+    return None
+
+
+def _skip_reason(exc: BaseException) -> str:
+    return str(getattr(exc, "msg", None) or exc) or type(exc).__name__
+
+
 def _import_conftest(path: str, rel_dir: str):
     # Ancestor dirs (TID-19) arrive as `..`, `../..`, … — dotted, non-identifier, and indistinguishable
     # from each other once punctuation is stripped. Name them by how far up they sit instead.
@@ -1099,6 +1134,13 @@ def _import_conftest(path: str, rel_dir: str):
         sys.modules[mod_name] = module
         spec.loader.exec_module(module)
         return module
+    except _skip_exceptions() as exc:
+        # `pytest.importorskip("ray")` at the top of a conftest skips that directory — pytest collects
+        # nothing below it (TID-48). `Skipped` is a BaseException, so it used to sail past the handler
+        # below and kill the shim during discovery: under the shared-import pool that was the pool
+        # parent, and the entire run failed before a single test started.
+        _DIR_SKIPS["" if rel_dir.startswith("..") else rel_dir] = _skip_reason(exc)
+        return None
     except Exception as exc:  # noqa: BLE001 — a broken conftest costs its fixtures, not the run
         # Say so. A conftest that fails to import takes its fixtures and its side effects with it, and
         # the tests below it then fail for reasons that name something else entirely — the exact
@@ -1855,6 +1897,11 @@ class Engine:
         # fork; on a real suite the win is smaller and depends on the parent's size (TID-18, TID-41).
         # The caller asserts it's pure (purity guard); the guard re-checks and flags any escapee.
         module_key = _module_key(node_id)
+        # Under a directory whose conftest skipped itself (TID-48): pytest never collects these, so
+        # nothing about the node — its class, its marks, its module — may be touched.
+        dir_skip = _dir_skip(module_key)
+        if dir_skip is not None:
+            return {"node_id": node_id, "outcome": "skipped", "detail": dir_skip}
         if style in ("inherited_methods", "unresolved_class"):
             return self._run_inherited(node_id, deadline_ms, force_no_fork, trusted_pure,
                                        own_too=style == "unresolved_class")
@@ -1871,6 +1918,10 @@ class Engine:
             # it was lost and the run reported `shim closed mid-run` (TID-43). Whatever the next unsafe
             # probe turns out to be, it now costs this node an error rather than costing the worker.
             raw_cases = self._cases(node_id, style)
+        except _skip_exceptions() as exc:
+            # A module-level `pytest.importorskip` / `pytest.skip(allow_module_level=True)`. Not an
+            # `Exception`, so without this it escaped `run()` and took the worker with it (TID-48).
+            return {"node_id": node_id, "outcome": "skipped", "detail": _skip_reason(exc)}
         except Exception as exc:  # noqa: BLE001 — import/collection failure for this node
             return {"node_id": node_id, "outcome": "error",
                     "detail": "".join(traceback.format_exception_only(type(exc), exc))}
@@ -2895,10 +2946,12 @@ def _preimport(root: str) -> None:
     for current, _dirs, files in _walk_suite(root):  # never warm a dependency's own suite
         for name in files:
             if name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py")):
-                rel = os.path.relpath(os.path.join(current, name), root)[:-3]
+                rel = os.path.relpath(os.path.join(current, name), root).replace(os.sep, "/")
                 try:
-                    importlib.import_module(rel.replace(os.sep, "."))
-                except Exception:  # noqa: BLE001
+                    # Named as `_discover` and execution name it (TID-37); a module-level
+                    # `importorskip` is a skip, not a reason to take the pool parent down (TID-48).
+                    importlib.import_module(_module_name(rel))
+                except (Exception, *_skip_exceptions()):  # noqa: BLE001
                     pass
 
 
