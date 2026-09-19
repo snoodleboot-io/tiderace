@@ -870,6 +870,8 @@ _ANCESTOR_CONFTESTS: dict[str, list] = {}
 # The `-m` expression from the project's pytest config, or None when there is none (TID-32).
 # Populated once during discovery; consulted per node in `Engine.run`.
 _MARKER_EXPR = None
+_DECLARED_MARKS: frozenset = frozenset()  # names the project declared via `markers = [...]`
+_STRICT_MARKS = False  # --strict-markers: using an undeclared mark is an error, as in pytest
 
 
 def _read_addopts(start: str) -> str:
@@ -1174,9 +1176,12 @@ def _discover(root: str) -> Registry:
 
     # The project's own `-m` filter (TID-32). Read here rather than at each node so a malformed
     # expression is reported once.
-    global _MARKER_EXPR
-    expr = _marker_expr_from(addopts)
+    global _MARKER_EXPR, _DECLARED_MARKS, _STRICT_MARKS
+    # The command line wins over the project's own `addopts`, as it does in pytest: a config filter is
+    # the project's default, and `-m` on the command line is this run's intent (TID-59).
+    expr = os.environ.get("TIDERACE_MARKER_EXPR") or _marker_expr_from(addopts)
     _MARKER_EXPR = _compile_marker_expr(expr) if expr else None
+    _DECLARED_MARKS, _STRICT_MARKS = _registered_marks(addopts, config_dir)
 
     # Native providers wire by type, so provider→provider deps need the FULL type set first: build the
     # type index, then build the defs (a two-pass the name-DI pytest path doesn't need).
@@ -2096,7 +2101,16 @@ class Engine:
         # Deselected by the project's own `-m` filter (TID-32). Reported as an EMPTY expansion
         # rather than a skip: pytest deselects these, so they must not appear in the tally at all —
         # a skip would be a different, visible outcome.
-        if _MARKER_EXPR is not None and not _MARKER_EXPR(_pytest_mark_names(node_id, style)):
+        names = _mark_names(node_id, style) if (_MARKER_EXPR is not None or _STRICT_MARKS) else set()
+        if _STRICT_MARKS:
+            # `--strict-markers`: a mark the project never declared is a typo far more often than an
+            # intention, and pytest errors the item rather than running it. Silently ignoring the flag
+            # meant `@pytest.mark.slwo` quietly ran a test its author had filtered out (TID-59).
+            unknown = sorted(n for n in names if n and n not in _DECLARED_MARKS and n not in _BUILTIN_MARKS)
+            if unknown:
+                return {"node_id": node_id, "outcome": "error",
+                        "detail": f"{', '.join(unknown)} not found in `markers` configuration option"}
+        if _MARKER_EXPR is not None and not _MARKER_EXPR(names):
             return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
         try:
             requested = self._requested(node_id, style)
@@ -2875,8 +2889,13 @@ def _explicit_id(ids_kw, values: tuple, position: int):
         return None
 
 
-def _pytest_mark_names(node_id: str, style: str) -> set:
-    """The `@pytest.mark.*` names on a test, from its module, its class and the function itself."""
+def _mark_names(node_id: str, style: str) -> set:
+    """Every selectable mark name on a test — pytest's and tiderace's own.
+
+    Selection has to mean the same thing in both dialects, so `-m "not slow"` deselects a
+    `@pytest.mark.slow` test and a `@tiderace.mark.slow` one alike. pytest marks are read from the
+    module, the class and the function; native tags are read from the function's
+    `__tiderace_marks__` (TID-59)."""
     try:
         module = importlib.import_module(_module_name(_module_key(node_id)))
     except Exception:  # noqa: BLE001 — an unimportable module surfaces per node, not here
@@ -2889,7 +2908,72 @@ def _pytest_mark_names(node_id: str, style: str) -> set:
         owners.append(getattr(cls, method, None) if cls is not None else None)
     else:
         owners.append(getattr(module, node_id.partition("::")[2], None))
-    return {getattr(m, "name", "") for m in _own_markers(*owners)}
+    names = {getattr(m, "name", "") for m in _own_markers(*owners)}
+    for owner in owners:
+        for m in _safe_getattr(owner, "__tiderace_marks__", None) or ():
+            if getattr(m, "kind", "") == "tag" and getattr(m, "name", ""):
+                names.add(m.name)
+    return names
+
+
+# Marks pytest itself defines; `--strict-markers` never complains about these.
+_BUILTIN_MARKS = frozenset({
+    "skip", "skipif", "xfail", "parametrize", "usefixtures", "filterwarnings", "tryfirst", "trylast",
+    "anyio", "asyncio",  # supplied by plugins a suite may be running under
+})
+
+
+def _registered_marks(addopts: str, config_dir: str) -> tuple:
+    """`(declared names, strict)` — which marks the project declared, and whether it wants them checked.
+
+    pytest projects declare marks as `markers = ["slow: ...", ...]` in their config and opt into
+    validation with `--strict-markers`; a tiderace-native project says the same thing under
+    `[tool.tiderace]`. Both are read, because a suite mid-migration has both kinds of test in it."""
+    names: set = set()
+    strict = "--strict-markers" in addopts or "--strict" in addopts.split()
+    for raw in _config_values(config_dir, "markers"):
+        # pytest's spelling is "name: description" or a bare name; only the name selects.
+        name = str(raw).split(":", 1)[0].strip()
+        if name:
+            names.add(name.partition("(")[0].strip())  # `name(args)` in a few suites
+    if _config_values(config_dir, "strict_markers"):
+        strict = True
+    return frozenset(names), strict
+
+
+def _config_values(config_dir: str, key: str) -> list:
+    """`key` from `[tool.pytest.ini_options]` and `[tool.tiderace]` in the project's pyproject.toml,
+    plus the ini-style configs, as a flat list."""
+    out: list = []
+    for name in ("pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"):
+        path = os.path.join(config_dir, name)
+        if not os.path.exists(path):
+            continue
+        try:
+            if name == "pyproject.toml":
+                import tomllib
+                with open(path, "rb") as fh:
+                    tool = tomllib.load(fh).get("tool", {})
+                sections = [tool.get("pytest", {}).get("ini_options", {}), tool.get("tiderace", {})]
+            else:
+                import configparser
+                parser = configparser.ConfigParser()
+                parser.read(path)
+                header = "tool:pytest" if name == "setup.cfg" else "pytest"
+                sections = [dict(parser[header]) if parser.has_section(header) else {}]
+        except Exception:  # noqa: BLE001 — an unreadable config must not stop the run
+            continue
+        for section in sections:
+            value = section.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                out.extend(v for v in value.splitlines() if v.strip())
+            elif isinstance(value, (list, tuple)):
+                out.extend(value)
+            else:
+                out.append(value)
+    return out
 
 
 def _skip_decision(marks: list):
