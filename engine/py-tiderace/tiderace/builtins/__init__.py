@@ -24,7 +24,7 @@ from typing import Any, Iterator
 import tiderace
 
 from ._capture import Capfd, Capsys, CaptureResult
-from ._config import RunConfig
+from ._config import NullPluginManager, RunConfig
 from ._logging import CapLog
 from ._monkeypatch import MonkeyPatch
 from ._paths import TmpPath
@@ -39,6 +39,7 @@ __all__ = [
     "CaptureResult",
     "Warnings",
     "RunConfig",
+    "NullPluginManager",
     "monkeypatch",
     "tmp_path",
     "capsys",
