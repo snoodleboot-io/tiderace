@@ -966,6 +966,7 @@ _ANCESTOR_CONFTESTS: dict[str, list] = {}
 # The `-m` expression from the project's pytest config, or None when there is none (TID-32).
 # Populated once during discovery; consulted per node in `Engine.run`.
 _MARKER_EXPR = None
+_FORCE_ASYNCIO = False  # pytest-asyncio's auto mode drives every async test, whatever anyio says
 _DECLARED_MARKS: frozenset = frozenset()  # names the project declared via `markers = [...]`
 _STRICT_MARKS = False  # --strict-markers: using an undeclared mark is an error, as in pytest
 
@@ -1278,6 +1279,19 @@ def _discover(root: str) -> Registry:
     expr = os.environ.get("TIDERACE_MARKER_EXPR") or _marker_expr_from(addopts)
     _MARKER_EXPR = _compile_marker_expr(expr) if expr else None
     _DECLARED_MARKS, _STRICT_MARKS = _registered_marks(addopts, config_dir)
+    # `asyncio_mode = "auto"` means pytest-asyncio claims *every* async test, including ones carrying
+    # `@pytest.mark.anyio`. In that configuration pytest runs even a `[trio]`-labelled variant on an
+    # asyncio loop — the id says trio and the loop never is. Emulating the suite's configured
+    # toolchain is the job here, so the same thing happens: the expansion still produces one variant
+    # per backend, as pytest's ids do, and they all run where pytest runs them (TID-54).
+    global _FORCE_ASYNCIO
+    _FORCE_ASYNCIO = False
+    if any(str(v).strip().strip('"\'') == "auto" for v in _config_values(config_dir, "asyncio_mode")):
+        try:
+            import pytest_asyncio  # noqa: F401 — only its presence matters
+            _FORCE_ASYNCIO = True
+        except Exception:  # noqa: BLE001 — declared but not installed: nothing claims the tests
+            pass
 
     # Native providers wire by type, so provider→provider deps need the FULL type set first: build the
     # type index, then build the defs (a two-pass the name-DI pytest path doesn't need).
@@ -1332,6 +1346,49 @@ def _register_builtins(reg: Registry) -> None:
         return
     for obj in builtins_pkg.providers():
         reg.add(_native_fixture_def(obj, "", {}))
+    _register_anyio_backend(reg)
+
+
+def _register_anyio_backend(reg: Registry) -> None:
+    """Provide `anyio_backend` when anyio is installed, as anyio's own plugin would.
+
+    The fixture a `@pytest.mark.anyio` test runs against is not declared by the suite — anyio's plugin
+    declares it, parametrised over the backends that are actually installed:
+
+        @pytest.fixture(scope="module", params=get_available_backends())
+        def anyio_backend(request): return request.param
+
+    Tiderace hosts no plugins, so nothing supplied it and every marked test ran **once**, on the
+    default loop, where its author asked for one run per backend. The tests passed, which is what
+    made it dangerous: half the intended coverage was missing and nothing said so (TID-54).
+
+    Registered at the root location, so a suite that declares its own `anyio_backend` — anyio's test
+    suite does, to add uvloop — still overrides this one by ordinary nearest-wins resolution."""
+    try:
+        import anyio  # noqa: F401 — presence is the question
+    except Exception:  # noqa: BLE001 — no anyio, nothing to provide
+        return
+    backends: list = []
+    try:
+        from anyio.pytest_plugin import get_available_backends
+
+        backends = list(get_available_backends())
+    except Exception:  # noqa: BLE001 — older or restructured anyio: work it out directly
+        backends = ["asyncio"]
+        try:
+            import trio  # noqa: F401
+
+            backends.append("trio")
+        except Exception:  # noqa: BLE001
+            pass
+    if not backends:
+        return
+
+    def anyio_backend(request):
+        return request.param
+
+    reg.add(FixtureDef(name="anyio_backend", scope="module", params=backends, autouse=False,
+                       func=anyio_backend, location=""))
 
 
 _DIR_SKIPS: dict[str, str] = {}  # suite-relative dir ("" = everything) -> why its conftest skipped it
@@ -2074,6 +2131,35 @@ def _is_unittest_node(module, node_id: str, style: str) -> bool:
     return isinstance(cls, type) and issubclass(cls, unittest.TestCase)
 
 
+def _drive_async(make_coro, backend=None):
+    """Run an async body to completion on the backend the run asked for.
+
+    `anyio_backend` carries either a name (`"trio"`) or a name and its options
+    (`("asyncio", {"debug": True})`), which is what the suite's own fixture yields. anyio's public
+    `run()` is used rather than a reimplementation: it is the same entry point the plugin uses, and it
+    is only reached when the suite already depends on anyio.
+
+    Everything else — the overwhelming majority — keeps the plain asyncio path it always had."""
+    if backend is None or _FORCE_ASYNCIO:
+        return asyncio.run(make_coro())
+    name, options = (backend, None)
+    if isinstance(backend, (tuple, list)) and backend:
+        name = backend[0]
+        options = backend[1] if len(backend) > 1 else None
+    try:
+        import anyio
+    except ImportError:  # the fixture named a backend but anyio is gone: asyncio is the best guess
+        return asyncio.run(make_coro())
+    if not isinstance(name, str):
+        return asyncio.run(make_coro())
+    try:
+        return anyio.run(make_coro, backend=name, backend_options=options or {})
+    except TypeError:
+        # An option this anyio does not accept (`loop_factory` came late) must not fail the test for
+        # a reason the test has nothing to do with; the backend itself is what matters.
+        return anyio.run(make_coro, backend=name)
+
+
 def _test_is_async(node_id: str, style: str) -> bool:
     """Whether the test body is `async def` **and** tiderace is the thing that must await it.
 
@@ -2473,6 +2559,18 @@ class Engine:
                 force_no_fork = False
 
         uses = self._uses(node_id, style)  # @tiderace.uses: set up by type, not injected (B2)
+        # A marker can imply a fixture request. `@pytest.mark.anyio` means "run me on the backends
+        # `anyio_backend` describes" — the anyio plugin wires that up, and a test never names the
+        # fixture itself. Adding it to the closure is enough to get the expansion: `anyio_backend` is
+        # an ordinary parametrised fixture, so the combos below turn one test into one per backend,
+        # with the suite's own ids. Without it each test ran once, silently covering one backend
+        # where its author asked for three (TID-54).
+        # Async tests only: the marker parametrises *how a coroutine is run*, so a synchronous test
+        # in an anyio-marked module is one test, not one per backend — which is how pytest collects
+        # it too.
+        if (_test_is_async(node_id, style) and "anyio" in _mark_names(node_id, style)
+                and self.reg.is_provider("anyio_backend")):
+            uses = list(uses) + ["anyio_backend"]
         closure = _closure(self.reg, module_key, fixture_requested, uses,
                            self._test_classes(node_id, style))
         parametrized = [d for d in closure if d.params]
@@ -2882,8 +2980,10 @@ class Engine:
             _is_async_fixture(d.func) for d in closure if d.rank == 0
         ):
             try:
-                outcome, detail = asyncio.run(
-                    self._child_exec_async(node_id, style, requested, closure, combo, case_kwargs)
+                outcome, detail = _drive_async(
+                    lambda: self._child_exec_async(node_id, style, requested, closure, combo,
+                                                   case_kwargs),
+                    combo.get("anyio_backend"),
                 )
                 cov.stop()
                 # Closure merged in here, not inside `_Coverage`, so the capture object stays purely
