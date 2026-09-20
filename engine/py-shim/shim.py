@@ -2151,7 +2151,8 @@ class Engine:
         # to have discovered the other module's fixture, so the same test passes on a narrow root and
         # errors on the whole package.
         parametrized = {name for case, _ in raw_cases if isinstance(case, dict) for name in case}
-        parametrized -= self._indirect(node_id, style)  # indirect values go to the fixture, not the test
+        indirect = self._indirect(node_id, style)
+        parametrized -= indirect  # indirect values go to the fixture, not the test
         fixture_requested = {
             p: t for p, t in requested.items()
             if p not in parametrized and self.reg.is_provider(t)
@@ -2249,8 +2250,18 @@ class Engine:
                 started = time.perf_counter()
                 self._state_disturbed = False
                 self._disturbance = None
+                # `indirect=` routes a case's value to the *fixture* of that name, as `request.param`,
+                # and the test receives whatever the fixture returns (TID-58). The per-fixture param
+                # map is what `combo` already is, so an indirect value simply joins it — and must be
+                # kept out of the test's own kwargs, or the raw value would shadow the fixture's.
+                case_combo, test_kwargs = combo, case_kwargs
+                if indirect and case_kwargs:
+                    routed = {k: v for k, v in case_kwargs.items() if k in indirect}
+                    if routed:
+                        case_combo = {**combo, **routed}
+                        test_kwargs = {k: v for k, v in case_kwargs.items() if k not in indirect}
                 oc, detail, cov, purity = self._fork_run(
-                    node_id, style, fixture_requested, closure, combo, deadline_ms, case_kwargs,
+                    node_id, style, fixture_requested, closure, case_combo, deadline_ms, test_kwargs,
                     force_no_fork, trusted_pure, must_fork)
                 # Per case, because only some cases of a parametrized node may trip (TID-33).
                 disturbed = self._state_disturbed
