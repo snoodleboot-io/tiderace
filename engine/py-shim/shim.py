@@ -2089,18 +2089,27 @@ async def _invoke_async_body(node_id: str, style: str, args: dict) -> tuple[str,
     try:
         if style == "class_method":
             cls_name, method = _class_method(node_id)
-            instance = getattr(module, cls_name)()
+            cls = getattr(module, cls_name)
+            _xunit_class_setup(cls)
+            instance = cls()
             bound = getattr(instance, method)
             target = bound
             call_args, request = _with_request(bound, args, node_id, instance)
         else:
             target = getattr(module, node_id.partition("::")[2])
             call_args, request = _with_request(target, args, node_id)
+        hooks = _xunit_test_hooks(module, style, node_id, target)
         try:
+            _call_hook(*hooks[0]) if hooks[0] else None
             result = target(**call_args)
             if inspect.iscoroutine(result):
                 await result
         finally:
+            if hooks[1]:
+                try:
+                    _call_hook(*hooks[1])
+                except Exception:  # noqa: BLE001 — teardown must not mask the body's outcome
+                    pass
             _test_finalizers(request)  # after the await, or a coroutine's finalizers run before its body
         return "passed", ""
     except AssertionError as exc:
@@ -2864,6 +2873,10 @@ class Engine:
         # Named as pytest names it, parametrize id included: a fixture keying a resource off
         # `request.node.name` needs `test_x[case]`, not `test_x`, or every case collides (TID-51).
         _node_for(variant_id or node_id)
+        # `setUpModule` / `setup_module` before any fixture or test body: a suite uses it to put
+        # something in place for the whole file — stubbing an optional SDK in `sys.modules`, say —
+        # and without it every test in that file fails on the thing it was meant to provide (TID-60).
+        _xunit_module_setup(importlib.import_module(_module_name(module_key)))
         try:
             for d in closure:
                 if d.rank != 0:
@@ -3069,6 +3082,7 @@ class Engine:
     def teardown_all(self) -> None:
         while self.active:
             _teardown(self.active.pop().gen)
+        _xunit_module_teardown()  # tearDownModule / teardown_module, once this worker is done
 
 
 def _indirect_names(func, *outer) -> set:
@@ -3337,19 +3351,37 @@ def _invoke_body(node_id: str, style: str, args: dict) -> tuple[str, str]:
             return _invoke_unittest(module, node_id)
         if style == "class_method":
             cls_name, method = _class_method(node_id)
-            instance = getattr(module, cls_name)()
+            cls = getattr(module, cls_name)
+            _xunit_class_setup(cls)  # pytest's `setup_class`, once per class per process (TID-60)
+            instance = cls()
             bound = getattr(instance, method)
             call_args, request = _with_request(bound, args, node_id, instance)
+            setup, teardown = _xunit_test_hooks(module, style, node_id, bound)
             try:
+                if setup:
+                    _call_hook(*setup)  # `setup_method(self, method)`
                 _maybe_await(bound(**call_args))
             finally:
+                if teardown:
+                    try:
+                        _call_hook(*teardown)
+                    except Exception:  # noqa: BLE001 — teardown must not mask the body's outcome
+                        pass
                 _test_finalizers(request)
             return "passed", ""
         func = getattr(module, node_id.partition("::")[2])
         call_args, request = _with_request(func, args, node_id)
+        setup, teardown = _xunit_test_hooks(module, style, node_id, func)
         try:
+            if setup:
+                _call_hook(*setup)  # `setup_function(function)`
             _maybe_await(func(**call_args))
         finally:
+            if teardown:
+                try:
+                    _call_hook(*teardown)
+                except Exception:  # noqa: BLE001 — teardown must not mask the body's outcome
+                    pass
             _test_finalizers(request)
         return "passed", ""
     except AssertionError as exc:
@@ -3394,6 +3426,84 @@ class _SkipAwareResult(unittest.TestResult):
             self.addSkip(test, str(err[1]))
             return
         super().addError(test, err)
+
+
+_XUNIT_DONE: set = set()  # (kind, qualified name) of module/class setups this process has run
+
+
+def _call_hook(owner, names: tuple, *args) -> bool:
+    """Call the first hook of `names` that `owner` defines, passing `args` if it accepts them.
+
+    Both dialects are looked for at every level, because a suite mid-migration has files in each:
+    unittest spells it `setUpModule`, pytest's xunit style spells it `setup_module`."""
+    for name in names:
+        hook = _safe_getattr(owner, name, None)
+        if hook is None or not callable(hook):
+            continue
+        try:
+            signature = inspect.signature(hook)
+            accepted = len([p for p in signature.parameters.values()
+                            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)])
+        except (TypeError, ValueError):  # a builtin or C-level callable
+            accepted = len(args)
+        hook(*args[:accepted])
+        return True
+    return False
+
+
+def _xunit_module_setup(module) -> None:
+    """`setUpModule` / `setup_module`, once per module per process.
+
+    Once per *process*, not per test: a forked run re-enters it in each child, which is the right
+    reading since every child is its own interpreter, but repeating it for every in-process test
+    would run a non-idempotent hook many times. Its teardown runs when the worker finishes with the
+    module, via `teardown_all` (TID-60)."""
+    key = ("module", _safe_getattr(module, "__name__", ""))
+    if key in _XUNIT_DONE:
+        return
+    _XUNIT_DONE.add(key)
+    _call_hook(module, ("setUpModule", "setup_module"), module)
+
+
+def _xunit_module_teardown() -> None:
+    """`tearDownModule` / `teardown_module` for every module this process set up."""
+    for kind, name in list(_XUNIT_DONE):
+        if kind != "module":
+            continue
+        module = sys.modules.get(name)
+        if module is not None:
+            try:
+                _call_hook(module, ("tearDownModule", "teardown_module"), module)
+            except Exception:  # noqa: BLE001 — a teardown fault must not mask the run's results
+                pass
+        _XUNIT_DONE.discard((kind, name))
+
+
+def _xunit_test_hooks(module, style: str, node_id: str, target) -> tuple:
+    """`(setup, teardown)` call specs for the per-test xunit hooks, or `(None, None)`.
+
+    A method's hooks live on its class and receive the method; a module-level test's live on the
+    module and receive the function. unittest's own `setUp`/`tearDown` are deliberately absent:
+    `TestCase.run()` calls those itself, and calling them here would double every one."""
+    if style == "unittest_method":
+        return (None, None)
+    if style == "class_method":
+        cls = _safe_getattr(module, _class_method(node_id)[0], None)
+        if cls is None:
+            return (None, None)
+        owner = target.__self__ if hasattr(target, "__self__") else cls
+        return ((owner, ("setup_method",), target), (owner, ("teardown_method",), target))
+    return ((module, ("setup_function",), target), (module, ("teardown_function",), target))
+
+
+def _xunit_class_setup(cls) -> None:
+    """pytest's `setup_class`, once per class per process. unittest's `setUpClass` is run by
+    `_invoke_unittest`, which needs it inside its own result handling."""
+    key = ("class", f"{_safe_getattr(cls, '__module__', '')}.{_safe_getattr(cls, '__name__', '')}")
+    if key in _XUNIT_DONE:
+        return
+    _XUNIT_DONE.add(key)
+    _call_hook(cls, ("setup_class",), cls)
 
 
 def _invoke_unittest(module, node_id: str) -> tuple[str, str]:
