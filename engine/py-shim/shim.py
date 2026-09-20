@@ -375,13 +375,31 @@ def _runtime_outcome(node, outcome: str, detail: str) -> tuple:
     the process that ran the test."""
     if node is None or not node.own_markers:
         return outcome, detail
-    for m in node.own_markers:
+    return _fold_pytest_marks(node.own_markers, outcome, detail)
+
+
+def _fold_pytest_marks(markers, outcome: str, detail: str) -> tuple:
+    """Fold pytest-style `xfail` / `skip` markers into an outcome.
+
+    Shared by the static path and the runtime one, because `@pytest.mark.xfail` written above a test
+    and `request.node.add_marker(pytest.mark.xfail(...))` added during it mean exactly the same thing
+    and must land on the same outcome. Reporting a plain failure for either turns a failure the
+    author expected into one the run complains about (TID-63)."""
+    for m in markers:
         name = getattr(m, "name", "")
         kwargs = getattr(m, "kwargs", None) or {}
         reason = kwargs.get("reason") or ""
         if name == "skip":
             return "skipped", reason or "skipped at runtime"
-        if name == "xfail" and kwargs.get("condition", True) is not False:
+        if name == "xfail":
+            # `@pytest.mark.xfail(sys.platform == "win32", reason=...)` puts the condition first
+            # positionally; the bare form has none and always applies. A string condition is left
+            # unevaluated and treated as applying, matching `_marker_skip_reason`'s caution in the
+            # other direction: an xfail that does not fire only ever reports a real failure.
+            args = getattr(m, "args", ()) or ()
+            condition = args[0] if args and not isinstance(args[0], str) else kwargs.get("condition", True)
+            if condition is False:
+                continue
             if outcome in ("failed", "error"):
                 return "xfail", reason or detail
             if outcome == "passed":
@@ -2564,6 +2582,10 @@ class Engine:
                         impurity = purity
         outcome, detail = _aggregate(outcomes)
         outcome, detail = _apply_xfail(marks, outcome, detail)
+        # pytest's own `@pytest.mark.xfail` / `skip`, which `_apply_xfail` above does not see: it
+        # reads tiderace's native marks. Without this a test the author marked as expected-to-fail
+        # was reported as a failure — one of click's two remaining divergences (TID-63).
+        outcome, detail = _fold_pytest_marks(_pytest_markers(node_id, style), outcome, detail)
         resp = {"node_id": node_id, "outcome": outcome, "detail": detail}
         # Additive and omitted for an unparametrized node, so its frame stays byte-identical.
         if variants:
@@ -3192,6 +3214,23 @@ def _explicit_id(ids_kw, values: tuple, position: int):
         return ids_kw[position]
     except Exception:  # noqa: BLE001 — a malformed `ids` must not take the test down
         return None
+
+
+def _pytest_markers(node_id: str, style: str) -> list:
+    """The `@pytest.mark.*` objects on a test, from its module, class and function."""
+    try:
+        module = importlib.import_module(_module_name(_module_key(node_id)))
+    except Exception:  # noqa: BLE001 — an unimportable module surfaces per node, not here
+        return []
+    owners = [module]
+    if style in ("class_method", "unittest_method"):
+        cls_name, method = _class_method(node_id)
+        cls = getattr(module, cls_name, None)
+        owners.append(cls)
+        owners.append(getattr(cls, method, None) if cls is not None else None)
+    else:
+        owners.append(getattr(module, node_id.partition("::")[2], None))
+    return list(_own_markers(*owners))
 
 
 def _mark_names(node_id: str, style: str) -> set:
