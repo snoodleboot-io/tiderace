@@ -40,8 +40,11 @@ fn shim() -> PathBuf {
     repo_root().join("engine/py-shim/shim.py")
 }
 
-/// Needs anyio itself: without it there are no backends to expand over and nothing to assert.
-fn python_with_anyio() -> Option<String> {
+/// Only pytest is needed. The corpus declares its own `anyio_backend`, so the expansion under test
+/// does not depend on anyio being installed — and the run does not either: with a backend named but
+/// anyio absent, the driver falls back to plain asyncio. Requiring anyio here would have made this
+/// skip on any machine without it, and a skipped test proves nothing.
+fn python_with_pytest() -> Option<String> {
     let venv = repo_root().join(".tiderace-fx-venv/bin/python");
     let mut candidates: Vec<String> = Vec::new();
     if venv.exists() {
@@ -50,7 +53,7 @@ fn python_with_anyio() -> Option<String> {
     candidates.extend(["python3".to_string(), "python".to_string()]);
     candidates.into_iter().find(|p| {
         std::process::Command::new(p)
-            .args(["-c", "import pytest, anyio"])
+            .args(["-c", "import pytest"])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
@@ -97,8 +100,8 @@ def test_sync_is_not_expanded():
 
 #[test]
 fn an_anyio_marked_async_test_expands_over_the_backends() {
-    let Some(python) = python_with_anyio() else {
-        skip_live("no interpreter with pytest and anyio");
+    let Some(python) = python_with_pytest() else {
+        skip_live("no interpreter with pytest available");
         return;
     };
     let dir = scratch("anyio");
