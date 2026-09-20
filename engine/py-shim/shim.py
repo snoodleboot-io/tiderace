@@ -313,13 +313,91 @@ def _run_finalizers(finalizers: list) -> None:
             pass
 
 
+_CURRENT_NODE = None  # the node the worker is running right now; fixtures and the test share it
+
+
+def _node_for(node_id: str, func=None, instance=None):
+    """The node object for `node_id`, reused for the whole test.
+
+    One object, so a marker a *fixture* attaches and one the *test* attaches land in the same place —
+    and so the executor can read both when folding runtime markers into the outcome."""
+    global _CURRENT_NODE
+    if _CURRENT_NODE is None or _CURRENT_NODE.nodeid != node_id:
+        _CURRENT_NODE = _Node(node_id, func, instance)
+    elif func is not None and _CURRENT_NODE.function is None:
+        _CURRENT_NODE.function = func
+    return _CURRENT_NODE
+
+
+class _Node:
+    """`request.node` — what pytest calls the item under test.
+
+    Fixtures reach for it to name the thing they are building for (`request.node.name` in a temp-file
+    or database-name prefix) and, less often, to attach a marker while the run is in flight. Both
+    were `AttributeError` before: the fixture request had no `node` at all, and the test request had
+    the node *id string* rather than an object (TID-51)."""
+
+    __slots__ = ("nodeid", "name", "originalname", "cls", "function", "own_markers")
+
+    def __init__(self, node_id: str, func=None, instance=None):
+        self.nodeid = node_id
+        # pytest's `name` is the last component, parametrize id included: `test_x[case]`.
+        self.name = node_id.rpartition("::")[2] or node_id
+        self.originalname = self.name.partition("[")[0]
+        self.cls = type(instance) if instance is not None else None
+        self.function = func
+        self.own_markers: list = []
+
+    def add_marker(self, marker) -> None:
+        """Attach a marker mid-run, as pytest allows from a fixture or a test body.
+
+        Recorded here and folded into the outcome by the executor below, because a marker added at
+        runtime is usually an `xfail` the author expects to be honoured — ignoring it would turn a
+        tolerated failure into a reported one."""
+        self.own_markers.append(marker)
+
+    def iter_markers(self, name: str | None = None):
+        for m in self.own_markers:
+            if name is None or getattr(m, "name", None) == name:
+                yield m
+
+    def get_closest_marker(self, name: str, default=None):
+        return next(self.iter_markers(name), default)
+
+    def __repr__(self) -> str:
+        return f"<Node {self.nodeid}>"
+
+
+def _runtime_outcome(node, outcome: str, detail: str) -> tuple:
+    """Fold markers added during the run into the outcome (`xfail`, `skip`).
+
+    Applied here rather than beside the static marks because a marker added at runtime exists only in
+    the process that ran the test."""
+    if node is None or not node.own_markers:
+        return outcome, detail
+    for m in node.own_markers:
+        name = getattr(m, "name", "")
+        kwargs = getattr(m, "kwargs", None) or {}
+        reason = kwargs.get("reason") or ""
+        if name == "skip":
+            return "skipped", reason or "skipped at runtime"
+        if name == "xfail" and kwargs.get("condition", True) is not False:
+            if outcome in ("failed", "error"):
+                return "xfail", reason or detail
+            if outcome == "passed":
+                return ("failed", f"[xpass strict] {reason}".strip()) if kwargs.get("strict") \
+                    else ("xpass", reason)
+    return outcome, detail
+
+
 class _Request:
-    """The minimal `request` object a fixture sees: `.param`, plus `addfinalizer`."""
+    """The minimal `request` object a fixture sees: `.param` and `.node`, plus `addfinalizer`."""
 
-    __slots__ = ("param", "_finalizers")
+    __slots__ = ("param", "node", "_finalizers")
 
-    def __init__(self, param):
+    def __init__(self, param, node=None):
         self.param = param
+        self.node = node
         self._finalizers: list = []
 
     def addfinalizer(self, fn) -> None:
@@ -596,7 +674,7 @@ class _TestRequest:
 
     def __init__(self, node_id: str, func, instance=None):
         self.config = _Config()
-        self.node = node_id
+        self.node = _node_for(node_id, func, instance)
         self.function = func
         self.instance = instance
         self.cls = type(instance) if instance is not None else None
@@ -1351,7 +1429,7 @@ def _instance_key(fdef: FixtureDef, node_id: str):
 def _setup_fixture(fdef: FixtureDef, args: dict, param):
     """Run a fixture body up to its first yield (or to completion). Returns (value, handle)."""
     call_args = dict(args)
-    request = _Request(param) if fdef.wants_request else None
+    request = _Request(param, _CURRENT_NODE) if fdef.wants_request else None
     if request is not None:
         call_args["request"] = request
     if fdef.is_yield:
@@ -1396,7 +1474,7 @@ async def _setup_fixture_async(fdef: FixtureDef, args: dict, param):
     """Async-aware setup: drives sync *and* async providers up to their first (a)yield. Returns
     `(value, handle)` where handle is `None` | `("gen", g)` | `("agen", ag)` for teardown."""
     call_args = dict(args)
-    request = _Request(param) if fdef.wants_request else None
+    request = _Request(param, _CURRENT_NODE) if fdef.wants_request else None
     if request is not None:
         call_args["request"] = request
     if inspect.isasyncgenfunction(fdef.func):
@@ -1811,11 +1889,36 @@ def _restorable(module) -> bool:
     return _OPAQUE not in _snapshot_shared(module).values()
 
 
+def _is_unittest_node(module, node_id: str, style: str) -> bool:
+    """Whether this node's class is really a `unittest.TestCase`, whatever the collector decided.
+
+    The source scan reads base classes as *text*, so `class TestThing(_MyBase)` looks like a pytest
+    class even when `_MyBase` derives from `IsolatedAsyncioTestCase`. Running it as a pytest class
+    calls the method directly and never runs `setUp` / `asyncSetUp`, so every attribute the setup
+    assigned is missing — seven tests on one real corpus, each reporting an `AttributeError` that
+    named the test's own class (TID-51).
+
+    The shim holds the live class and can simply ask."""
+    if style != "class_method":
+        return style == "unittest_method"
+    try:
+        cls = getattr(module, _class_method(node_id)[0], None)
+    except Exception:  # noqa: BLE001 — a node id we cannot parse is not a unittest node
+        return False
+    return isinstance(cls, type) and issubclass(cls, unittest.TestCase)
+
+
 def _test_is_async(node_id: str, style: str) -> bool:
-    """Whether the test body is `async def` (unittest methods are never async-driven here)."""
+    """Whether the test body is `async def` **and** tiderace is the thing that must await it.
+
+    A `unittest` class drives its own coroutines — `IsolatedAsyncioTestCase.run()` builds the loop and
+    calls `asyncSetUp` around the body — so those are never async-driven from here, however the
+    collector labelled them."""
     if style == "unittest_method":
         return False
     module = importlib.import_module(_module_name(_module_key(node_id)))
+    if _is_unittest_node(module, node_id, style):
+        return False
     if style == "class_method":
         cls, method = _class_method(node_id)
         func = getattr(getattr(module, cls), method, None)
@@ -1825,6 +1928,12 @@ def _test_is_async(node_id: str, style: str) -> bool:
 
 
 async def _invoke_async(node_id: str, style: str, args: dict) -> tuple[str, str]:
+    """The async sibling of `_invoke`, with the same runtime-marker fold (TID-51)."""
+    outcome, detail = await _invoke_async_body(node_id, style, args)
+    return _runtime_outcome(_CURRENT_NODE, outcome, detail)
+
+
+async def _invoke_async_body(node_id: str, style: str, args: dict) -> tuple[str, str]:
     """The async sibling of `_invoke`: call the test, `await` it if it's a coroutine, and map the same
     outcomes (incl. lazy RichDiff on `AssertionError`). Runs inside the per-test event loop, so it must
     `await` directly — never `asyncio.run` (which can't nest)."""
@@ -2059,6 +2168,7 @@ class Engine:
         raise KeyError(name)
 
     def _sync_wider(self, closure: list[FixtureDef], node_id: str) -> None:
+        _node_for(node_id)  # a wider-scope fixture is built for the test that first needed it
         """Tear down active wider fixtures whose scope-instance no longer matches this test, then set
         up any missing wider fixtures the test needs (each exactly once per scope-instance)."""
         # Teardown stale from the narrow end (active is ordered widest → narrowest).
@@ -2262,7 +2372,7 @@ class Engine:
                         test_kwargs = {k: v for k, v in case_kwargs.items() if k not in indirect}
                 oc, detail, cov, purity = self._fork_run(
                     node_id, style, fixture_requested, closure, case_combo, deadline_ms, test_kwargs,
-                    force_no_fork, trusted_pure, must_fork)
+                    force_no_fork, trusted_pure, must_fork, variant_ids[variant_index])
                 # Per case, because only some cases of a parametrized node may trip (TID-33).
                 disturbed = self._state_disturbed
                 node_must_fork = node_must_fork or disturbed
@@ -2395,7 +2505,7 @@ class Engine:
                 "expanded": True, "variants": variants}
 
     def _fork_run(self, node_id, style, requested, closure, combo, deadline_ms, case_kwargs=None,
-                  force_no_fork=False, trusted_pure=False, must_fork=False) -> tuple:
+                  force_no_fork=False, trusted_pure=False, must_fork=False, variant_id=None) -> tuple:
         """Run one (combo, case) variant; returns `(outcome, detail, coverage, purity)` where purity is a
         reason string (impure), `None` (measured pure), or `_UNKNOWN_PURITY` (not measured). `force_no_fork`
         runs it in THIS process (the pure-test fast path) without forking; `trusted_pure` additionally
@@ -2421,6 +2531,7 @@ class Engine:
             self._leaked = None
             try:
                 result = self._child_exec(node_id, style, requested, closure, combo, case_kwargs,
+                                          variant_id=variant_id,
                                           in_process=True, trusted_pure=trusted_pure)
             except BaseException as exc:  # noqa: BLE001 — any in-process test error → Outcome::Error
                 return "error", "".join(traceback.format_exception_only(type(exc), exc)), {}, _UNKNOWN_PURITY
@@ -2449,7 +2560,7 @@ class Engine:
                       file=sys.stderr, flush=True)
                 oc, detail, cov, _ = self._fork_run(
                     node_id, style, requested, closure, combo, deadline_ms, case_kwargs,
-                    force_no_fork=False, trusted_pure=False, must_fork=True)
+                    force_no_fork=False, trusted_pure=False, must_fork=True, variant_id=variant_id)
                 # Keep the impurity verdict: the point is that this node must not take the
                 # in-process path again, and the forked run cannot observe what the first one did.
                 return oc, detail, cov, f"disturbed interpreter state: {drift}"
@@ -2461,7 +2572,7 @@ class Engine:
             os.close(read_fd)
             try:
                 outcome, detail, coverage, purity = self._child_exec(
-                    node_id, style, requested, closure, combo, case_kwargs)
+                    node_id, style, requested, closure, combo, case_kwargs, variant_id=variant_id)
                 payload = {"outcome": outcome, "detail": detail[:4000]}
                 if coverage:
                     payload["coverage"] = coverage
@@ -2569,7 +2680,7 @@ class Engine:
             purity = res.get("impurity") or "impure"
         return res["outcome"], res.get("detail", ""), res.get("coverage", {}), purity
 
-    def _child_exec(self, node_id, style, requested, closure, combo, case_kwargs=None,
+    def _child_exec(self, node_id, style, requested, closure, combo, case_kwargs=None, variant_id=None,
                     in_process=False, trusted_pure=False) -> tuple:
         """In the forked child: set up function-scope fixtures (incl. parametrized + reinit-after-fork
         resources, which thus get a FRESH handle per child), run the body, tear down in reverse.
@@ -2602,6 +2713,9 @@ class Engine:
                         _UNKNOWN_PURITY)  # async purity not measured
             finally:
                 cov.stop()
+        # Named as pytest names it, parametrize id included: a fixture keying a resource off
+        # `request.node.name` needs `test_x[case]`, not `test_x`, or every case collides (TID-51).
+        _node_for(variant_id or node_id)
         try:
             for d in closure:
                 if d.rank != 0:
@@ -3051,9 +3165,15 @@ def _apply_xfail(marks: list, outcome: str, detail: str):
 
 
 def _invoke(node_id: str, style: str, args: dict) -> tuple[str, str]:
+    """Run the test, then fold in any marker it or its fixtures attached while running (TID-51)."""
+    outcome, detail = _invoke_body(node_id, style, args)
+    return _runtime_outcome(_CURRENT_NODE, outcome, detail)
+
+
+def _invoke_body(node_id: str, style: str, args: dict) -> tuple[str, str]:
     module = importlib.import_module(_module_name(_module_key(node_id)))
     try:
-        if style == "unittest_method":
+        if style == "unittest_method" or _is_unittest_node(module, node_id, style):
             return _invoke_unittest(module, node_id)
         if style == "class_method":
             cls_name, method = _class_method(node_id)

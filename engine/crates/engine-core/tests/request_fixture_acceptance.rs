@@ -91,7 +91,11 @@ def test_undeclared_option_raises(request):
 
 
 def test_request_identifies_the_node(request):
-    assert request.node.endswith(\"test_request_identifies_the_node\")
+    # `request.node` is an object, as it is in pytest — `.nodeid` is the string. This corpus used to
+    # assert `request.node.endswith(...)`, which pytest itself fails with
+    # \"'Function' object has no attribute 'endswith'\": the assertion encoded a divergence (TID-51).
+    assert request.node.nodeid.endswith(\"test_request_identifies_the_node\")
+    assert request.node.name == \"test_request_identifies_the_node\"
     assert request.function.__name__ == \"test_request_identifies_the_node\"
     assert request.param is None
 

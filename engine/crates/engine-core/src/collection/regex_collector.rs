@@ -25,6 +25,10 @@ const SKIP_DIRS: &[&str] = &[
 /// class scope; no Python import is performed.
 pub struct RegexCollector {
     class_re: Regex,
+    /// Any `def`/`class`, whatever it is called — used to track where a block *ends*. `func_re` only
+    /// matches test-named functions, so on its own it cannot tell that an ordinary helper has closed
+    /// the class above it.
+    block_re: Regex,
     func_re: Regex,
 }
 
@@ -41,6 +45,8 @@ impl RegexCollector {
                 .expect("valid class regex"),
             func_re: Regex::new(r"^(\s*)(?:async\s+)?def\s+(test\w*)\s*\(")
                 .expect("valid func regex"),
+            block_re: Regex::new(r"^(\s*)(?:async\s+)?(?:def|class)\s+\w+")
+                .expect("valid block regex"),
         }
     }
 
@@ -108,15 +114,21 @@ impl RegexCollector {
             let indent = line.len() - trimmed.len();
             let is_class = self.class_re.is_match(line);
             let is_func = self.func_re.is_match(line);
+            // Scope is closed by *any* def or class at or left of the column, not only by a
+            // test-named one. A module-level helper — `async def double(...)` in one real file — left
+            // the class above it open, and every indented `def test_*` after it was attributed to
+            // that stale class. Those nodes cannot run: the methods are not on the class, and pytest
+            // never collected them either, because they sit inside the helper's body (TID-51).
+            let is_block = self.block_re.is_match(line);
 
             // A new construct at or left of the class column closes the class scope.
             if let Some((_, cindent, _)) = &class_ctx {
-                if (is_class || is_func) && indent <= *cindent {
+                if is_block && indent <= *cindent {
                     class_ctx = None;
                 }
             }
             if let Some((uname, uindent, saw_test)) = &unresolved {
-                if (is_class || is_func) && indent <= *uindent {
+                if is_block && indent <= *uindent {
                     if *saw_test {
                         out.push(TestItem::new(
                             NodeId::new(format!("{rel}::{uname}")),
