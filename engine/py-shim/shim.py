@@ -1747,6 +1747,154 @@ def _restore_shared(module, before: dict, env_before: dict) -> None:
         os.environ.update(env_before)
 
 
+# The test frameworks themselves. A suite mutating pytest's internals is not the leak this is for,
+# and pytest is large: including it made the scan below cost 7ms, more than the tests it wraps.
+_UNWATCHED_PACKAGES = frozenset({"pytest", "_pytest", "py", "tiderace", "unittest", "hypothesis"})
+
+_WATCHED_PACKAGES: dict = {}  # module key -> the third-party packages its imports reach
+
+
+def _watched_packages(module_key: str) -> tuple:
+    """Top-level **non-stdlib** packages a test module imports, for registry watching (TID-46).
+
+    Scoped deliberately. Watching every module in `sys.modules` would cost more than the tests do,
+    and watching the standard library would demote constantly for no reason: `re._cache` is a
+    module-level dict that grows the first time anything compiles a pattern, which is not a leak.
+    A library the *test file itself* imports is where a registry mutation can plausibly come from —
+    click's `_available_shells`, a codec or plugin table, a framework's app registry."""
+    cached = _WATCHED_PACKAGES.get(module_key)
+    if cached is not None:
+        return cached
+    roots: set = set()
+    path = os.path.join(_ROOT or ".", module_key)
+    for name, level in _imported_names(path):
+        if level or not name:
+            continue  # a relative import is the suite's own code, covered by the module snapshot
+        root = name.partition(".")[0]
+        if root and root not in sys.stdlib_module_names and root not in _UNWATCHED_PACKAGES:
+            roots.add(root)
+    result = tuple(sorted(roots))
+    _WATCHED_PACKAGES[module_key] = result
+    return result
+
+
+_REGISTRY_TARGETS: dict = {}  # module key -> (sys.modules size, [(label, container), ...])
+
+
+def _registry_targets(module_key: str) -> list:
+    """The module-level containers worth watching for this test's module, found once.
+
+    Finding them means walking every module of the watched packages and every name in it, which
+    measured at 7ms — far more than the tests it wraps, and paid twice per test. The containers
+    themselves are few (two, on one 4,500-test suite), so the scan is cached and redone only when
+    `sys.modules` has grown, which is the only way a new one can appear."""
+    size = len(sys.modules)
+    cached = _REGISTRY_TARGETS.get(module_key)
+    if cached is not None and cached[0] == size:
+        return cached[1]
+    roots = _watched_packages(module_key)
+    targets: list = []
+    if roots:
+        for name, module in list(sys.modules.items()):
+            if name.partition(".")[0] not in roots or module is None:
+                continue
+            namespace = getattr(module, "__dict__", None)
+            if not namespace:
+                continue
+            for attr, value in list(namespace.items()):
+                # Exact types only: a subclass may define `__len__` arbitrarily, and a proxy object
+                # can raise on access (TID-43's lazy proxies are exactly that shape).
+                if attr.startswith("__") or type(value) not in (dict, list, set):
+                    continue
+                targets.append((f"{name}.{attr}", value))
+    _REGISTRY_TARGETS[module_key] = (size, targets)
+    return targets
+
+
+def _registry_snapshot(module_key: str) -> dict:
+    """Shallow copies of the module-level containers in the packages this test's module imports.
+
+    Copied rather than merely sized, because detection alone does not help the *neighbours*: the
+    offender can be re-run in the clean room, but the worker it polluted keeps serving tests, and
+    they would go on seeing a registry entry that a finished test added. A shallow copy is enough to
+    put the container back — the entries themselves are the library's, not ours to duplicate.
+
+    Restored **in place** (`clear` + refill), never rebound: other modules hold references to that
+    exact dict, and swapping in a new one would leave them looking at the polluted original — the
+    same reason `_restore_in_place` exists (TID-22)."""
+    out: dict = {}
+    for label, container in _registry_targets(module_key):
+        out[label] = (container, copy.copy(container))
+    return out
+
+
+def _is_test_owned(value, module_key: str) -> bool:
+    """Whether `value` was defined by the *test code* rather than by library code.
+
+    This is the line between pollution and a warm cache, and shape cannot draw it: both are additions
+    to a module-level dict. Origin can.
+
+    * A class the test defines and registers — click's `add_completion_class(MyshComplete)`, where
+      `MyshComplete` is declared inside the test function — belongs to that test. Its neighbours must
+      not see it.
+    * A handler a *library* registers for itself on first import — PIL putting a WEBP writer into
+      `PIL.Image.SAVE` when `WebPImagePlugin` loads — is that library warming up. Removing it breaks
+      the next test that wanted to save a WEBP, which is precisely what an earlier cut of this did.
+
+    "Library" here means anything that is not a test file, **including the project's own modules**: a
+    project that fills a plugin registry when one of its modules is imported is doing the same lazy
+    registration PIL does, and the fact that the code lives in this repo changes nothing about it."""
+    origin = _safe_getattr(value, "__module__", None) or _safe_getattr(type(value), "__module__", "")
+    if not isinstance(origin, str) or not origin:
+        return False
+    if origin == _module_name(module_key):
+        return True  # defined in this very test module, function-local classes included
+    module = sys.modules.get(origin)
+    file = _safe_getattr(module, "__file__", None) if module is not None else None
+    if not file:
+        return False
+    name = os.path.basename(file)
+    # A conftest counts: a fixture registering something for its tests is still test-side setup.
+    return name == "conftest.py" or name.startswith("test_") or name.endswith("_test.py")
+
+
+def _restore_registries(before: dict, module_key: str) -> str | None:
+    """Remove what the *suite* put into another module's containers; returns what it changed.
+
+    Only the suite's own additions are pulled back out. A library's lazy self-registration stays,
+    because the next test may well depend on it having happened.
+
+    Edited in place, so every reference to that container sees the correction."""
+    changed = []
+    for key, (container, saved) in before.items():
+        if container == saved:
+            continue
+        removed = False
+        try:
+            if isinstance(container, dict):
+                for k in [k for k in container if k not in saved and _is_test_owned(container[k], module_key)]:
+                    del container[k]
+                    removed = True
+            elif isinstance(container, list):
+                keep = [v for v in container if v in saved or not _is_test_owned(v, module_key)]
+                if len(keep) != len(container):
+                    container[:] = keep
+                    removed = True
+            else:
+                for v in [v for v in container if v not in saved and _is_test_owned(v, module_key)]:
+                    container.discard(v)
+                    removed = True
+        except Exception:  # noqa: BLE001 — an uncooperative container stays as it is
+            pass
+        if removed:
+            changed.append(key)
+    if not changed:
+        return None
+    shown = ", ".join(sorted(changed)[:3])
+    more = "" if len(changed) <= 3 else f" (+{len(changed) - 3} more)"
+    return f"mutated another module's state: {shown}{more}"
+
+
 def _state_fingerprint() -> dict:
     """A cheap snapshot of the interpreter state a test could disturb (TID-33).
 
@@ -2746,6 +2894,9 @@ class Engine:
             # affordable per test, and it is the only thing here that can notice a category nobody
             # has thought of yet.
             state_before = _state_fingerprint() if (self.restore and in_process) else None
+            # A registry inside an imported library is state the module snapshot cannot see: it does
+            # not live in this test's module, and restore has no way to put it back (TID-46).
+            registry_before = _registry_snapshot(module_key) if state_before is not None else None
             outcome, detail = _invoke(node_id, style, test_args)
             purity = _purity_verdict(mod, before, env_before) if mod is not None else _UNKNOWN_PURITY
             if self.restore and in_process and mod is not None and purity is not None:
@@ -2761,6 +2912,15 @@ class Engine:
                     purity = f"replaced modules in sys.modules: {shown}{more}"
             if state_before is not None:
                 drift = _fingerprint_delta(state_before, _state_fingerprint())
+                # Put the library's own containers back before anything else runs here, then treat
+                # the test as a disturber: its result came from a world it had already changed, so it
+                # is re-run in the clean room (TID-50) and forked from now on.
+                registry_drift = _restore_registries(registry_before, module_key)
+                if registry_drift is not None:
+                    self._leaked = registry_drift
+                    purity = f"disturbed interpreter state: {registry_drift}"
+                    self._state_disturbed = True
+                    self._disturbance = registry_drift
                 if drift is not None:
                     # Put back what is restorable before anything else runs in this process. The
                     # offender's own result is still discarded below — it ran against a world it had
