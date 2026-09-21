@@ -167,6 +167,9 @@ impl ShimTransport for InProcessTransport {
                     .ok()
                     .and_then(|m| m.extract::<bool>().ok())
                     .unwrap_or(false),
+                // Nothing here skips a whole module: this transport is handed one node at a time
+                // and the shim only sets `skip_origin` on an import-time skip (TID-55).
+                skip_origin: String::new(),
                 // This transport speaks the one-request-one-result protocol and does not expand
                 // parametrization or resolve inherited methods, so a node reports itself
                 // (TID-25/TID-26). `expanded: false` keeps the empty `variants` meaning "not
