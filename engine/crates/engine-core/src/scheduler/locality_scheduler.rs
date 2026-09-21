@@ -86,6 +86,60 @@ impl Scheduler for LocalityScheduler {
         batches.retain(|b| !b.is_empty());
         batches
     }
+
+    /// One unit per locality group, heaviest first (TID-52).
+    ///
+    /// Steps 1 and 2 above are unchanged — group by snapshot scope, order longest-first. Only step 3,
+    /// the greedy assignment onto a fixed set of bins, is dropped: the runner drains these from a
+    /// queue, so which worker runs which group is decided when a worker is free rather than
+    /// predicted from weights a cold run does not have.
+    ///
+    /// Ordering by weight still matters even though the assignment is dynamic: a long unit started
+    /// last *is* the tail of the run, so the heaviest goes out first.
+    ///
+    /// A group heavier than one perfect bin is sharded, for a different reason than the static plan
+    /// splits one. There, an oversized group would define the makespan of whichever bin held it.
+    /// Here, a corpus that is *one* module would otherwise be a single unit — one worker, and the
+    /// other seven with nothing to take. Each shard still holds consecutive tests of the one module,
+    /// so a shard's worker builds that module's snapshot once, exactly as a split group always has.
+    fn units(&self, input: &ScheduleInput) -> Vec<WorkerBatch> {
+        let mut groups_by_key: BTreeMap<&str, Group> = BTreeMap::new();
+        let mut total_ms: u64 = 0;
+        for t in input.tests() {
+            total_ms += t.duration_ms();
+            let g = groups_by_key.entry(t.locality_key()).or_insert(Group {
+                items: Vec::new(),
+                total_ms: 0,
+            });
+            g.items.push((t.node_id().clone(), t.duration_ms()));
+            g.total_ms += t.duration_ms();
+        }
+        let mut groups: Vec<(&str, Group)> = groups_by_key.into_iter().collect();
+        groups.sort_by(|(ka, a), (kb, b)| b.total_ms.cmp(&a.total_ms).then(ka.cmp(kb)));
+
+        // One perfect bin. A unit at most this heavy means the queue can always keep every worker
+        // busy; a unit heavier than this is the one thing a queue cannot schedule around.
+        let cap = ((total_ms as f64) / (input.workers() as f64)).ceil() as u64;
+        let mut units: Vec<WorkerBatch> = Vec::new();
+        for (_key, group) in groups {
+            let mut batch = WorkerBatch::new(units.len());
+            for (node, dur) in group.items {
+                // Shard on the way past the cap rather than before it, so a group that fits exactly
+                // stays whole and a group of one enormous test is never split into nothing.
+                if cap > 0 && !batch.is_empty() && batch.est_total_ms() + dur > cap {
+                    units.push(std::mem::replace(
+                        &mut batch,
+                        WorkerBatch::new(units.len() + 1),
+                    ));
+                }
+                batch.push(node, dur);
+            }
+            if !batch.is_empty() {
+                units.push(batch);
+            }
+        }
+        units
+    }
 }
 
 /// Index of the worker with the smallest current bin load (lowest index breaks ties — deterministic).
@@ -134,6 +188,105 @@ mod tests {
                 "a batch must hold one module (snapshot reuse)"
             );
         }
+    }
+
+    #[test]
+    fn units_are_per_module_heaviest_first_and_each_holds_one_module() {
+        // Four modules that each fit inside a perfect bin, and three workers. `plan` would commit
+        // them to three bins now; `units` hands out more than that, so which worker runs which is
+        // decided when a worker is free (TID-52).
+        let input = ScheduleInput::new(
+            vec![
+                t("light::a", "module:light", 1),
+                t("heavy::a", "module:heavy", 20),
+                t("heavy::b", "module:heavy", 10),
+                t("middle::a", "module:middle", 12),
+                t("small::a", "module:small", 5),
+            ],
+            3, // cap = ceil(48/3) = 16, so only `heavy` (30) is sharded
+        );
+        let units = LocalityScheduler::default().units(&input);
+        assert_eq!(
+            units
+                .iter()
+                .map(WorkerBatch::est_total_ms)
+                .collect::<Vec<_>>(),
+            vec![20, 10, 12, 5, 1],
+            "heaviest group first, sharded at the cap — a 30ms module must not become a unit twice \
+             the size of a perfect bin, which is the one thing a queue cannot schedule around"
+        );
+        for u in &units {
+            let modules: std::collections::HashSet<_> = u
+                .items()
+                .iter()
+                .map(|n| n.as_str().split("::").next().unwrap())
+                .collect();
+            assert_eq!(
+                modules.len(),
+                1,
+                "a unit is one module — the snapshot is reused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_module_corpus_still_yields_a_unit_per_worker() {
+        // The failure mode a queue introduces if a group is never sharded: one module is one unit,
+        // one worker takes it, and the other seven have nothing to take. A corpus that is a single
+        // large file is not exotic.
+        let tests: Vec<_> = (0..80)
+            .map(|i| t(&format!("m::t{i}"), "module:m", 1))
+            .collect();
+        let units = LocalityScheduler::default().units(&ScheduleInput::new(tests, 8));
+        assert_eq!(
+            units.len(),
+            8,
+            "eight shards for eight workers, not one unit: {units:?}"
+        );
+        assert!(
+            units.iter().all(|u| u.items().len() == 10),
+            "and evenly, since every test weighs the same here"
+        );
+    }
+
+    #[test]
+    fn units_hold_every_test_exactly_once() {
+        // Whatever the ordering does, the queue built from these units is the whole corpus.
+        let tests: Vec<_> = (0..20)
+            .map(|i| {
+                t(
+                    &format!("m{}::t{i}", i % 4),
+                    &format!("module:m{}", i % 4),
+                    i,
+                )
+            })
+            .collect();
+        let units = LocalityScheduler::default().units(&ScheduleInput::new(tests, 3));
+        let mut seen: Vec<String> = units
+            .iter()
+            .flat_map(|u| u.items().iter().map(|n| n.as_str().to_string()))
+            .collect();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            20,
+            "no test is dropped or duplicated by unit formation"
+        );
+    }
+
+    #[test]
+    fn a_partition_scheduler_keeps_its_static_plan_as_its_units() {
+        // The default `units` is `plan`, so the round-robin baseline — which *is* a partition —
+        // still yields one unit per worker and behaves exactly as it did.
+        let tests: Vec<_> = (0..9)
+            .map(|i| t(&format!("m{i}::t"), "module:m", 1))
+            .collect();
+        let input = ScheduleInput::new(tests, 3);
+        assert_eq!(
+            crate::scheduler::RoundRobinScheduler.units(&input),
+            crate::scheduler::RoundRobinScheduler.plan(&input)
+        );
     }
 
     #[test]
