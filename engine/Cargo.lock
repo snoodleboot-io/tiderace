@@ -22,6 +22,7 @@ name = "engine-cli"
 version = "0.0.1"
 dependencies = [
  "engine-core",
+ "serde_json",
 ]
 
 [[package]]

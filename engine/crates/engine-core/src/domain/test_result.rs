@@ -26,6 +26,22 @@ pub struct TestResult {
     /// buys. This marks only the ones whose damage survived the restore.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub must_fork: bool,
+    /// The module whose import skipped, when this test was skipped because a *whole module* did not
+    /// import (TID-55) — a `pytest.importorskip` in the module or in a conftest above it. Empty for
+    /// a per-test skip and for every non-skip outcome.
+    ///
+    /// One skip event can produce hundreds of skipped tests. Both numbers are worth reporting and
+    /// neither substitutes for the other, so the origin is kept rather than the count.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub skip_origin: String,
+    /// This node id came from *runtime expansion* — a parametrize case or an inherited method the
+    /// collector could not see statically — rather than from static collection (TID-55).
+    ///
+    /// Useful to anyone diffing our node ids against another runner's: an id that exists on one side
+    /// only is a different kind of disagreement than an id whose outcome changed, and expansion is
+    /// where those extra ids come from.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expanded: bool,
 }
 
 impl TestResult {
@@ -43,6 +59,8 @@ impl TestResult {
             touched_files: Vec::new(),
             pure: None,
             must_fork: false,
+            skip_origin: String::new(),
+            expanded: false,
         }
     }
 
@@ -61,6 +79,18 @@ impl TestResult {
     /// Mark the test as one that must be forked on later runs (builder style).
     pub fn with_must_fork(mut self, must_fork: bool) -> Self {
         self.must_fork = must_fork;
+        self
+    }
+
+    /// Name the module whose import skipped this test (builder style).
+    pub fn with_skip_origin(mut self, skip_origin: impl Into<String>) -> Self {
+        self.skip_origin = skip_origin.into();
+        self
+    }
+
+    /// Mark this node as produced by runtime expansion rather than static collection (builder style).
+    pub fn with_expanded(mut self, expanded: bool) -> Self {
+        self.expanded = expanded;
         self
     }
 }

@@ -2465,7 +2465,12 @@ class Engine:
             return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
         dir_skip = _dir_skip(module_key)
         if dir_skip is not None:
-            return {"node_id": node_id, "outcome": "skipped", "detail": dir_skip}
+            # `skip_origin` names the module that never imported, so the summary can report skips in
+            # both dimensions (TID-55): a conftest's `importorskip` skips every test under it, and
+            # "578 skipped" next to pytest's "94 skipped" reads as a defect until you can also say
+            # how many *modules* those 578 came from. A per-test skip leaves this empty.
+            return {"node_id": node_id, "outcome": "skipped", "detail": dir_skip,
+                    "skip_origin": module_key}
         if style in ("inherited_methods", "unresolved_class"):
             return self._run_inherited(node_id, deadline_ms, force_no_fork, trusted_pure,
                                        own_too=style == "unresolved_class")
@@ -2500,7 +2505,9 @@ class Engine:
         except _skip_exceptions() as exc:
             # A module-level `pytest.importorskip` / `pytest.skip(allow_module_level=True)`. Not an
             # `Exception`, so without this it escaped `run()` and took the worker with it (TID-48).
-            return {"node_id": node_id, "outcome": "skipped", "detail": _skip_reason(exc)}
+            # `skip_origin`: this module is the unit pytest would have reported one skip for (TID-55).
+            return {"node_id": node_id, "outcome": "skipped", "detail": _skip_reason(exc),
+                    "skip_origin": module_key}
         except Exception as exc:  # noqa: BLE001 — import/collection failure for this node
             return {"node_id": node_id, "outcome": "error",
                     "detail": "".join(traceback.format_exception_only(type(exc), exc))}
