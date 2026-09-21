@@ -105,6 +105,14 @@ pub struct ExecResponse {
     /// nothing undid.
     #[serde(default)]
     pub must_fork: bool,
+    /// The module whose *import* skipped, when this skip covers a whole module (TID-55).
+    ///
+    /// A `pytest.importorskip` in a module or in the conftest above it skips every test it holds.
+    /// pytest reports that as one skip; tiderace reports one per test, which is the more useful
+    /// number and looks like a defect beside pytest's. Carrying the origin lets the summary say
+    /// both — `578 skipped (12 modules skipped at import)`. Empty for a per-test skip.
+    #[serde(default)]
+    pub skip_origin: String,
     /// `variants` is the complete answer for this request, even when empty (TID-26).
     ///
     /// Needed because an empty list is otherwise ambiguous: an unparametrized node also sends none.

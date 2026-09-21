@@ -15,6 +15,7 @@ use std::process::ExitCode;
 
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, RunReport};
+use engine_core::reporter::{JsonReporter, Reporter};
 use engine_core::runner::{run_parallel, RunPlan, SchedulerKind, VerdictStore, WorkerStrategy};
 
 const USAGE: &str = "\
@@ -38,6 +39,9 @@ Options for `run`:
   -m, --markers <EXPR>    run only tests matching a marker expression, e.g. 'not slow and db'.
                           Matches pytest marks and tiderace tags alike, and overrides any -m the
                           project sets in its own addopts
+      --report <PATH>     also write a machine-readable JSON run report to PATH: one record per
+                          node with its id, outcome, duration and flags. Compare runs by node id;
+                          tallies hide two errors that cancel
   -q, --quiet             suppress the per-test lines; print only the tally
   -h, --help              show this message
 
@@ -94,7 +98,7 @@ fn main() -> ExitCode {
                     // SAFETY: single-threaded here; workers are spawned further down.
                     unsafe { std::env::set_var("TIDERACE_MARKER_EXPR", expr) };
                 }
-                cmd_run(&opts.root, &opts.plan, opts.quiet)
+                cmd_run(&opts.root, &opts.plan, opts.quiet, opts.report.as_deref())
             }
             Err(e) => usage_error(&e),
         },
@@ -124,6 +128,8 @@ struct Options {
     quiet: bool,
     /// `-m EXPR`: the marker expression for this run, overriding the project's own `addopts`.
     marker_expr: Option<String>,
+    /// `--report PATH`: where to write the per-node JSON report, if asked for.
+    report: Option<PathBuf>,
 }
 
 impl Options {
@@ -146,6 +152,7 @@ impl Options {
         }
         let mut quiet = false;
         let mut marker_expr: Option<String> = None;
+        let mut report: Option<PathBuf> = None;
         let mut root: Option<PathBuf> = None;
         let mut strategy_set = false;
 
@@ -210,6 +217,7 @@ impl Options {
                 "--shared-import" => plan.shared_import = true,
                 "--no-shared-import" => plan.shared_import = false,
                 "-m" | "--markers" => marker_expr = Some(value("--markers")?),
+                "--report" => report = Some(PathBuf::from(value("--report")?)),
                 "-q" | "--quiet" => quiet = true,
                 other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
                 _ => {
@@ -235,6 +243,7 @@ impl Options {
             plan,
             quiet,
             marker_expr,
+            report,
         })
     }
 }
@@ -290,7 +299,7 @@ fn effective_plan(plan: &RunPlan, item_count: usize, root: &Path) -> (RunPlan, S
     (effective, learned)
 }
 
-fn cmd_run(root: &Path, plan: &RunPlan, quiet: bool) -> ExitCode {
+fn cmd_run(root: &Path, plan: &RunPlan, quiet: bool, report_path: Option<&Path>) -> ExitCode {
     let python = std::env::var("TIDERACE_PYTHON").unwrap_or_else(|_| engine_core::default_python());
     let shim = match std::env::var("TIDERACE_SHIM") {
         Ok(s) => PathBuf::from(s),
@@ -350,14 +359,35 @@ fn cmd_run(root: &Path, plan: &RunPlan, quiet: bool) -> ExitCode {
             }
         }
     }
+    // A skip count answers two different questions and pytest's summary answers only one of them.
+    // `pytest.importorskip` in a module skips every test it holds: pytest prints one skip, we print
+    // hundreds, and side by side the two look like a disagreement — during the benchmark that gap
+    // cost hours of chasing a defect that was not there (TID-55). So print both numbers.
+    let modules = report.skipped_modules();
+    let at_import = if modules == 0 {
+        String::new()
+    } else {
+        format!(
+            " ({modules} module{} skipped at import)",
+            if modules == 1 { "" } else { "s" }
+        )
+    };
     eprintln!(
-        "{} passed, {} failed, {} error, {} skipped, {} total",
+        "{} passed, {} failed, {} error, {} skipped{at_import}, {} total",
         report.tally(Outcome::Passed),
         report.tally(Outcome::Failed),
         report.tally(Outcome::Error),
         report.tally(Outcome::Skipped),
         report.total(),
     );
+    if let Some(path) = report_path {
+        // Written after the summary so a failure to write is the last thing on the terminal, and
+        // non-fatal: the run's own verdict is what the exit code is for, and losing the report file
+        // must not turn a green suite red.
+        if let Err(e) = std::fs::write(path, JsonReporter.render(&report)) {
+            eprintln!("warning: could not write --report {}: {e}", path.display());
+        }
+    }
     ExitCode::from(report.exit_code() as u8)
 }
 
@@ -389,6 +419,31 @@ mod tests {
         assert_eq!(o.plan.scheduler, SchedulerKind::Locality);
         assert_eq!(o.plan.deadline_ms, DEFAULT_DEADLINE_MS);
         assert!(!o.quiet);
+    }
+
+    #[test]
+    fn the_report_path_parses_in_both_spellings_and_is_off_by_default() {
+        assert!(
+            parse(&["tests"])
+                .expect("a bare path is a valid run")
+                .report
+                .is_none(),
+            "no file is written unless one is asked for"
+        );
+        for args in [
+            vec!["--report", "/tmp/run.json", "tests"],
+            vec!["--report=/tmp/run.json", "tests"],
+        ] {
+            let o = parse(&args).expect("--report parses");
+            assert_eq!(
+                o.report.as_deref(),
+                Some(std::path::Path::new("/tmp/run.json"))
+            );
+        }
+        assert!(
+            parse(&["--report", "tests"]).is_err(),
+            "--report without a path is a usage error, not a silently dropped flag"
+        );
     }
 
     #[test]

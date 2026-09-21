@@ -19,6 +19,20 @@ impl RunReport {
         self.results.iter().filter(|r| r.outcome == outcome).count()
     }
 
+    /// How many distinct modules were skipped *at import* (TID-55).
+    ///
+    /// The second dimension of a skip count. `tally(Skipped)` answers "how many tests did not run";
+    /// this answers "how many skip events caused that". pytest's summary reports only the second and
+    /// ours reported only the first, which made two correct runs look like they disagreed.
+    pub fn skipped_modules(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|r| !r.skip_origin.is_empty())
+            .map(|r| r.skip_origin.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    }
+
     /// 0 if no failing outcomes, else 1 (pytest-style exit code).
     pub fn exit_code(&self) -> i32 {
         if self.results.iter().any(|r| r.outcome.is_failure()) {

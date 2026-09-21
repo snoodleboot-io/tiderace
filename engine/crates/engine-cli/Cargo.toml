@@ -11,3 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 engine-core = { path = "../engine-core" }
+
+[dev-dependencies]
+# Only the integration test reads the `--report` file back; the binary itself still has no
+# dependency beyond `engine-core`.
+serde_json = { workspace = true }
