@@ -43,3 +43,10 @@ engine/crates/engine-inproc/Cargo.lock
 engine/py-tiderace/tiderace/_shim/shim.py
 engine/crates/tiderace-dist/target/
 dist/
+
+# per-corpus virtualenvs for benchmarks/harness (see its README)
+.tiderace-bench-venvs/
+benchmarks/harness/report-*.json
+benchmarks/harness/parity.json
+benchmarks/harness/timing*.json
+benchmarks/harness/binab.json
