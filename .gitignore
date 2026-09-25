@@ -50,4 +50,5 @@ benchmarks/harness/report-*.json
 benchmarks/harness/parity.json
 benchmarks/harness/timing*.json
 benchmarks/harness/binab.json
+benchmarks/harness/second_run.json
 .tiderace-bench-snapshots/
