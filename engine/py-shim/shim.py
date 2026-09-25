@@ -2723,7 +2723,11 @@ class _Coverage:
         return self._report()
 
     def _report(self) -> dict:
-        return {os.path.relpath(p, self.root): sorted(lines) for p, lines in self.touched.items()}
+        # Forward slashes whatever the platform, as the import closure and the Rust side use: on
+        # Windows the raw relpath put `src\thing.py` beside the closure's `src/thing.py`, so the
+        # runtime half of a footprint never matched a changed file.
+        return {os.path.relpath(p, self.root).replace(os.sep, "/"): sorted(lines)
+                for p, lines in self.touched.items()}
 
     def report_with_imports(self, module_key: str) -> dict:
         """The runtime footprint plus the module's static import closure (TID-40).
