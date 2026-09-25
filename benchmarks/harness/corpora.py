@@ -30,9 +30,16 @@ def _public(name: str):
     return (name, "public", root, _python(name), "tests", os.path.join(root, "tests"), "")
 
 
+# pytest-xdist for the internal corpora, installed to a directory of its own rather than into the
+# snapshot's venv — the snapshot is a faithful copy of the project's environment, and xdist is the
+# benchmark's comparison, not the project's dependency. `uv pip install --target` it here.
+XDIST_PATH = os.environ.get("TIDERACE_XDIST_PATH", os.path.join(R, ".tiderace-bench-venvs", "xdist"))
+
+
 def _internal(pkg: str):
     root = os.path.join(PIRN, "packages", pkg)
-    return (pkg, "internal", root, os.path.join(PIRN, ".venv", "bin", "python"), "tests", root, "")
+    return (pkg, "internal", root, os.path.join(PIRN, ".venv", "bin", "python"), "tests", root,
+            XDIST_PATH)
 
 
 # (name, group, cwd, python, pytest target, tiderace root, extra PYTHONPATH for xdist)

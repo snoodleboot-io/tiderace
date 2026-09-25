@@ -13,6 +13,8 @@ anything, checks that tiderace agrees with pytest on them test for test.
 | `timing_rr.py` | pytest / `pytest -n auto` / tiderace, interleaved rounds, medians, load recorded |
 | `binab.py` | two tiderace binaries A/B'd on the same corpora, interleaved |
 | `analyse_bins.py` | rebuild the scheduler's bins from a report and charge them measured durations |
+| `second_run.py` | the run after an edit: warm no-change, leaf edit, hub edit, injected failure (TID-65) |
+| `warm_vs_xdist.py` | tiderace on its second run (duration-ordered) against `pytest -n auto` (TID-52) |
 | `quiet_gate.sh` | wait for the machine to be quiet before a timed pass |
 
 ## Method
@@ -47,4 +49,10 @@ python benchmarks/harness/parity.py cachetools        # 215 passed on both sides
 ```
 
 For the internal corpora, snapshot the monorepo at a commit (source plus a *copy* of its venv,
-with the `.pth` entries rewritten to the copy) and point `PIRN_SNAPSHOT` at it.
+with the `.pth` entries rewritten to the copy) and point `PIRN_SNAPSHOT` at it. The snapshot stays
+a faithful copy of the project's environment, so pytest-xdist — the benchmark's comparison, not the
+project's dependency — is installed beside it and reached through `PYTHONPATH`:
+
+```bash
+uv pip install --python $PIRN_SNAPSHOT/.venv/bin/python --target .tiderace-bench-venvs/xdist pytest-xdist
+```
