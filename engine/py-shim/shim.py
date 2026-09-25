@@ -3592,6 +3592,19 @@ def _registered_marks(addopts: str, config_dir: str) -> tuple:
             names.add(name.partition("(")[0].strip())  # `name(args)` in a few suites
     if _config_values(config_dir, "strict_markers"):
         strict = True
+    # The native declaration surface (TID-67): `tiderace.mark.register("slow", ...)` in a conftest.
+    # Every conftest has been imported by the time this runs, so whatever they registered is here.
+    # Without it a suite written natively — no `import pytest` anywhere — still needed a *pytest*
+    # config block to declare its own marks, or strict checking rejected them.
+    try:
+        import tiderace
+        names.update(tiderace.mark.registered())
+    except Exception:  # noqa: BLE001 — no native package on this interpreter ⇒ no native marks
+        pass
+    # `--strict-markers` on the command line (TID-67), for the same reason `-m` and `-k` travel
+    # this way: a project with no config file at all has nowhere else to say it.
+    if os.environ.get("TIDERACE_STRICT_MARKERS") == "1":
+        strict = True
     return frozenset(names), strict
 
 
