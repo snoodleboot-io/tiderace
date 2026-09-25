@@ -2443,6 +2443,11 @@ async def _invoke_async_body(node_id: str, style: str, args: dict) -> tuple[str,
 # Per-module static import closure: module_key -> {rel_path, …} (TID-40). Built lazily, memoised for
 # the process, and inherited by every forked child.
 _IMPORT_CLOSURE: dict[str, frozenset] = {}
+_FILE_DEPS: dict[str, tuple[str, ...]] = {}  # per source file: the in-tree files it imports (TID-76)
+_RESOLVED: dict[tuple, str | None] = {}  # (dotted, level, importing dir) → file, memoised (TID-76)
+# An import statement starts a line, or follows `;` or a compound statement's `:` on one. `yield from`
+# and `from_x = ...` do not match. What this finds is parsed as a statement, so names are exact.
+_IMPORT_STMT = re.compile(r"(?:^|[;:])[ \t]*(import|from)[ \t]")
 
 
 def _imported_names(path: str) -> list[tuple[str, int]]:
@@ -2450,14 +2455,74 @@ def _imported_names(path: str) -> list[tuple[str, int]]:
 
     AST rather than execution, because that is the whole point: a module's `import` lines run *once*,
     for whichever test happens to be first, so nothing that watches execution can see the imports of
-    the nineteen tests that follow. Parsing sees all of them, in any order, every time."""
+    the nineteen tests that follow. Parsing sees all of them, in any order, every time.
+
+    Parsing a whole file is 1.5ms; a closure walks ~100 of them and every worker walks the closures
+    of every module it runs (TID-76). So this parses only the import *statements*: a scan finds the
+    lines, each statement is parsed on its own, and the names are exactly what a full parse gives.
+    The one thing a line scan cannot tell is whether a line sits inside a string, so a file whose
+    candidate import lines fall inside a triple-quoted region takes the full parse instead — exact
+    over fast, never a missed import."""
     try:
         with open(path, encoding="utf-8") as fh:
-            tree = ast.parse(fh.read(), filename=path)
-    except (OSError, SyntaxError, UnicodeDecodeError):
-        return []  # unparseable ⇒ no closure; the runtime footprint still applies
+            src = fh.read()
+    except (OSError, UnicodeDecodeError):
+        return []  # unreadable ⇒ no closure; the runtime footprint still applies
+    if "import" not in src:
+        return []
+    stmts = _scan_import_statements(src)
+    if stmts is None:  # a candidate inside a string region: parse the whole file
+        try:
+            tree = ast.parse(src, filename=path)
+        except SyntaxError:
+            return []
+        return _import_names_in(ast.walk(tree))
     out: list[tuple[str, int]] = []
-    for node in ast.walk(tree):
+    for stmt in stmts:
+        try:
+            out.extend(_import_names_in(ast.parse(stmt).body))
+        except SyntaxError:
+            continue  # not a statement after all (a comment, a fragment); contributes nothing
+    return out
+
+
+def _scan_import_statements(src: str) -> list[str] | None:
+    """The import statements in `src`, each as its own parseable text, or None if any candidate
+    lies inside a triple-quoted region (the caller then parses the whole file)."""
+    lines = src.split("\n")
+    stmts: list[str] = []
+    in_string: str | None = None  # the delimiter of the triple-quoted region we are inside, if any
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        i += 1
+        candidate = "import" in line and _IMPORT_STMT.search(line)
+        if candidate and in_string:
+            return None
+        if candidate:
+            m = candidate
+            stmt = line[m.start(1):]
+            depth = stmt.count("(") - stmt.count(")")
+            while (depth > 0 or stmt.rstrip().endswith("\\")) and i < n:
+                nxt = lines[i]
+                i += 1
+                stmt = stmt.rstrip().rstrip("\\") + "\n" + nxt
+                depth += nxt.count("(") - nxt.count(")")
+            stmts.append(stmt)
+        # Track triple-quoted regions after the line's own statement is taken: a docstring that
+        # opens and closes on this line leaves the state as it was.
+        for tq in ('"""', "'''"):
+            if line.count(tq) % 2 == 1:
+                if in_string == tq:
+                    in_string = None
+                elif in_string is None:
+                    in_string = tq
+    return stmts
+
+
+def _import_names_in(nodes) -> list[tuple[str, int]]:
+    out: list[tuple[str, int]] = []
+    for node in nodes:
         if isinstance(node, ast.Import):
             out.extend((a.name, 0) for a in node.names)
         elif isinstance(node, ast.ImportFrom):
@@ -2474,7 +2539,18 @@ def _resolve_module_file(dotted: str, level: int, from_file: str, root: str) -> 
 
     Third-party and stdlib imports are deliberately dropped: a footprint exists to answer "did
     anything this test depends on change in this tree", and site-packages does not change between
-    runs of the same checkout."""
+    runs of the same checkout.
+
+    Memoised on (name, level, importing directory): the same `import os` or `from pirn.x import y`
+    appears in hundreds of files, and each resolution probes every `sys.path` entry (TID-76)."""
+    key = (dotted, level, os.path.dirname(from_file) if level else "")
+    if key in _RESOLVED:
+        return _RESOLVED[key]
+    resolved = _RESOLVED[key] = _resolve_module_file_uncached(dotted, level, from_file, root)
+    return resolved
+
+
+def _resolve_module_file_uncached(dotted: str, level: int, from_file: str, root: str) -> str | None:
     if level:  # relative import: resolve against the importing file's package
         base_dir = os.path.dirname(os.path.abspath(from_file))
         for _ in range(level - 1):
@@ -2491,6 +2567,25 @@ def _resolve_module_file(dotted: str, level: int, from_file: str, root: str) -> 
                     return abs_path
                 return None
     return None
+
+
+def _file_deps(path: str, root: str) -> tuple[str, ...]:
+    """The in-tree files one source file imports, parsed and resolved once per process.
+
+    The closures of different test modules overlap almost entirely — on pirn-core each one walks
+    ~100 files, and nearly all of them are the same project files every time. Without this memo
+    every module's closure re-parsed and re-resolved all of them: 230ms per module, 575 modules,
+    once per worker, which was the whole of coverage's cost on a cold run (TID-76). `root` and
+    `sys.path` are fixed for the life of a process, so the key is the file alone."""
+    cached = _FILE_DEPS.get(path)
+    if cached is None:
+        deps: dict[str, None] = {}
+        for dotted, level in _imported_names(path):
+            resolved = _resolve_module_file(dotted, level, path, root)
+            if resolved:
+                deps[resolved] = None
+        cached = _FILE_DEPS[path] = tuple(deps)
+    return cached
 
 
 def _import_closure(module_key: str, root: str) -> frozenset:
@@ -2513,9 +2608,8 @@ def _import_closure(module_key: str, root: str) -> frozenset:
     queue = [start]
     while queue:
         current = queue.pop()
-        for dotted, level in _imported_names(current):
-            resolved = _resolve_module_file(dotted, level, current, root)
-            if resolved and resolved not in seen:
+        for resolved in _file_deps(current, root):
+            if resolved not in seen:
                 seen.add(resolved)
                 queue.append(resolved)
     # Every conftest from the run root down to this module's directory.
@@ -2534,15 +2628,23 @@ def _import_closure(module_key: str, root: str) -> frozenset:
 
 class _Coverage:
     """Per-test executed-source capture inside the fork child (ADR-E006, design 11). Uses PEP 669
-    `sys.monitoring` LINE events on CPython 3.12+ (disabling each location once seen, so overhead is
-    low enough to leave on), falling back to `sys.settrace` on ≤3.11. Records `{rel_source_path:
-    set(line)}` for `.py` files under `root` — the test's dependency footprint the DepGraph/cache key
-    consume. A no-op when disabled, so the default path is byte-identical to before."""
+    `sys.monitoring` on CPython 3.12+, falling back to `sys.settrace` on ≤3.11. Records
+    `{rel_source_path: set(line)}` for `.py` files under `root` — the test's dependency footprint the
+    impact selection and cache key consume. A no-op when disabled, so the default path is
+    byte-identical to before.
+
+    By default the footprint is **file-level**: one `PY_START` event per code object entered (module
+    and class bodies are code objects too, so a dynamic import is seen), disabled after its first hit,
+    and an empty line list per file — the convention the import closure already uses for "any change
+    to this file counts". Nothing on a production path reads a line number (TID-76), so the default
+    carries none; `lines=True` (`--coverage-lines`) keeps LINE capture for a consumer that wants it.
+    (The cost of capture on a cold run was never the events or the lines — see `_file_deps`.)"""
 
     _TOOL_ID = 5  # sys.monitoring tool slot (0..5 available); 5 avoids coverage.py/profiler clashes
 
-    def __init__(self, root: str | None, enabled: bool):
+    def __init__(self, root: str | None, enabled: bool, lines: bool = False):
         self.enabled = enabled and root is not None
+        self.lines = lines
         self.root = os.path.abspath(root) if root else ""
         self.touched: dict[str, set] = {}
         self._mon = getattr(sys, "monitoring", None) if self.enabled else None
@@ -2564,15 +2666,42 @@ class _Coverage:
                     self.touched.setdefault(os.path.abspath(fn), set()).add(line_no)
                 return mon.DISABLE  # per-location disable ⇒ each line fires at most once (cheap)
 
+            def on_start(code, offset):
+                fn = code.co_filename
+                if self._want(fn):
+                    self.touched.setdefault(os.path.abspath(fn), set())
+                return mon.DISABLE  # per-code-object disable ⇒ each function fires at most once
+
+            # PY_RESUME as well: a generator or coroutine created by an earlier test (or a fixture)
+            # and resumed inside this one never *starts* here, but its file is still one this test
+            # ran code in. Both events carry (code, offset) and both are per-code-object.
+            file_events = events.PY_START | events.PY_RESUME
+
             mon.use_tool_id(tid, "tiderace")
-            mon.register_callback(tid, events.LINE, on_line)
-            mon.set_events(tid, events.LINE)
+            # `DISABLE` is per location and outlives `free_tool_id`; only this clears it. Without it
+            # the first test in the process to enter a function is the only one ever credited with
+            # its file — every later test in the same worker sees nothing there (TID-76).
+            mon.restart_events()
+            if self.lines:
+                mon.register_callback(tid, events.LINE, on_line)
+                mon.set_events(tid, events.LINE)
+            else:
+                mon.register_callback(tid, events.PY_START, on_start)
+                mon.register_callback(tid, events.PY_RESUME, on_start)
+                mon.set_events(tid, file_events)
         else:  # ≤3.11 fallback
+            want_lines = self.lines
+
             def tracer(frame, event, arg):
-                if event == "line":
-                    fn = frame.f_code.co_filename
-                    if self._want(fn):
-                        self.touched.setdefault(os.path.abspath(fn), set()).add(frame.f_lineno)
+                fn = frame.f_code.co_filename
+                if event == "call":
+                    if not self._want(fn):
+                        return None  # nothing to learn from this frame's lines
+                    if not want_lines:
+                        self.touched.setdefault(os.path.abspath(fn), set())
+                        return None
+                elif event == "line" and self._want(fn):
+                    self.touched.setdefault(os.path.abspath(fn), set()).add(frame.f_lineno)
                 return tracer
 
             self._prev_trace = sys.gettrace()
@@ -2585,14 +2714,20 @@ class _Coverage:
         if self._mon is not None:
             mon, tid = self._mon, self._TOOL_ID
             mon.set_events(tid, 0)
-            mon.register_callback(tid, mon.events.LINE, None)
+            for event in ((mon.events.LINE,) if self.lines
+                          else (mon.events.PY_START, mon.events.PY_RESUME)):
+                mon.register_callback(tid, event, None)
             mon.free_tool_id(tid)
         else:
             sys.settrace(self._prev_trace)
         return self._report()
 
     def _report(self) -> dict:
-        return {os.path.relpath(p, self.root): sorted(lines) for p, lines in self.touched.items()}
+        # Forward slashes whatever the platform, as the import closure and the Rust side use: on
+        # Windows the raw relpath put `src\thing.py` beside the closure's `src/thing.py`, so the
+        # runtime half of a footprint never matched a changed file.
+        return {os.path.relpath(p, self.root).replace(os.sep, "/"): sorted(lines)
+                for p, lines in self.touched.items()}
 
     def report_with_imports(self, module_key: str) -> dict:
         """The runtime footprint plus the module's static import closure (TID-40).
@@ -2618,11 +2753,13 @@ class Engine:
     """Parent-side scope state: wider-than-function fixtures live here, inherited by forked children."""
 
     def __init__(self, reg: Registry, no_fork: bool = False, root: str | None = None,
-                 coverage: bool = False, purity_guard: bool = False, restore: bool = False):
+                 coverage: bool = False, purity_guard: bool = False, restore: bool = False,
+                 coverage_lines: bool = False):
         self.reg = reg
         self.no_fork = no_fork  # no-COW fallback path (SubprocessWorker / Windows / --no-fork)
         self.root = root  # corpus root, for coverage path relativization
         self.coverage = coverage  # ADR-E006: capture per-test executed-source footprint
+        self.coverage_lines = coverage_lines  # line numbers in the footprint (opt-in, TID-76)
         self.purity_guard = purity_guard  # detect shared-state mutation per test (→ pure-test batching)
         self._leaked = None          # this test's unmodelled state drift, if any (TID-33)
         self._state_disturbed = False  # …and whether the node should be forked from now on
@@ -3236,7 +3373,7 @@ class Engine:
                 return local[name]
             return self._value(name, module_key)
 
-        cov = _Coverage(self.root, self.coverage)
+        cov = _Coverage(self.root, self.coverage, self.coverage_lines)
         cov.start()  # capture the per-test footprint: fixture setup + body, this test only (ADR-E006)
         # B5: async test body or any function-scope async provider ⇒ run setup+body+teardown on ONE
         # event loop (objects created on a loop must be awaited on the same loop). Sync path untouched.
@@ -4562,6 +4699,8 @@ def serve() -> int:
     _ROOT = root
     no_fork = "--no-fork" in sys.argv[2:]
     coverage = "--coverage" in sys.argv[2:] or os.environ.get("TIDERACE_COVERAGE") == "1"
+    coverage_lines = ("--coverage-lines" in sys.argv[2:]
+                      or os.environ.get("TIDERACE_COVERAGE_LINES") == "1")
     purity = "--purity" in sys.argv[2:] or os.environ.get("TIDERACE_PURITY") == "1"
     restore = "--restore" in sys.argv[2:] or os.environ.get("TIDERACE_RESTORE") == "1"
     _insert_run_root(root)
@@ -4585,6 +4724,7 @@ def serve() -> int:
         print(f"tiderace: start-up: {_SKIPPED_AT_DISCOVERY} test modules not imported (unselected)",
               file=sys.stderr, flush=True)
     engine_args = dict(reg=reg, no_fork=no_fork, root=root, coverage=coverage,
+                       coverage_lines=coverage_lines,
                        purity_guard=purity, restore=restore)
     # Pool mode (TID-4): fork the workers from this one imported image instead of importing per
     # worker. Every worker below is created *after* the fork, so its fixture state is its own and
