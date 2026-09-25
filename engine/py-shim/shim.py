@@ -36,6 +36,7 @@ import json
 import linecache
 import logging
 import os
+import re
 import select
 import signal
 import struct
@@ -966,6 +967,7 @@ _ANCESTOR_CONFTESTS: dict[str, list] = {}
 # The `-m` expression from the project's pytest config, or None when there is none (TID-32).
 # Populated once during discovery; consulted per node in `Engine.run`.
 _MARKER_EXPR = None
+_KEYWORD_EXPR = None  # `-k EXPR` as a parsed tree, or None when no name filter applies (TID-63)
 _FORCE_ASYNCIO = False  # pytest-asyncio's auto mode drives every async test, whatever anyio says
 _DECLARED_MARKS: frozenset = frozenset()  # names the project declared via `markers = [...]`
 _STRICT_MARKS = False  # --strict-markers: using an undeclared mark is an error, as in pytest
@@ -1060,8 +1062,9 @@ def _is_ignored(path: str) -> bool:
     return False
 
 
-def _marker_expr_from(addopts: str):
-    """The `-m EXPR` value out of an `addopts` string, in the three spellings pytest accepts."""
+def _marker_expr_from(addopts: str, flag: str = "-m"):
+    """The `-m EXPR` (or `-k EXPR`) value out of an `addopts` string, in the three spellings pytest
+    accepts: `-m EXPR`, `-m=EXPR`, `-mEXPR`."""
     if not addopts:
         return None
     try:
@@ -1070,45 +1073,161 @@ def _marker_expr_from(addopts: str):
     except ValueError:  # noqa: BLE001 — unbalanced quotes; treat as no filter rather than guessing
         return None
     for i, arg in enumerate(argv):
-        if arg == "-m" and i + 1 < len(argv):
+        if arg == flag and i + 1 < len(argv):
             return argv[i + 1]
-        if arg.startswith("-m=") :
-            return arg[3:]
-        if arg.startswith("-m") and len(arg) > 2:
-            return arg[2:]
+        if arg.startswith(flag + "="):
+            return arg[len(flag) + 1:]
+        if arg.startswith(flag) and len(arg) > len(flag):
+            return arg[len(flag):]
     return None
+
+
+# pytest's identifier class for `-m` / `-k`: a keyword may be a parametrize id, `test_x[1-a]`.
+_SELECTION_IDENT = re.compile(r"[\w.:+\-\[\]\\/]+")
+
+
+def _parse_selection_expr(expr: str):
+    """pytest's selection grammar — identifiers, `and`, `or`, `not`, parentheses — as a tree.
+
+    Shared by `-m` and `-k` (TID-63): it is one grammar over two predicates. Parsed by hand rather
+    than with `ast`, which the `-m` path used to use: an `ast` identifier cannot contain `-` or
+    `[`, and `-k "test_x[1-a]"` is the ordinary way to name one parametrize case. Raises
+    `ValueError` on anything outside the grammar, so a filter we cannot read is reported once and
+    selects everything rather than silently deselecting the wrong tests.
+
+    Tree shape: `("ident", s)`, `("not", t)`, `("and", [ts])`, `("or", [ts])`."""
+    tokens: list = []
+    i = 0
+    while i < len(expr):
+        c = expr[i]
+        if c.isspace():
+            i += 1
+            continue
+        if c in "()":
+            tokens.append(c)
+            i += 1
+            continue
+        m = _SELECTION_IDENT.match(expr, i)
+        if not m:
+            raise ValueError(f"unexpected character {c!r} at position {i}")
+        tokens.append(m.group(0))
+        i = m.end()
+    pos = 0
+
+    def peek():
+        return tokens[pos] if pos < len(tokens) else None
+
+    def take():
+        nonlocal pos
+        pos += 1
+        return tokens[pos - 1]
+
+    def parse_or():
+        items = [parse_and()]
+        while peek() == "or":
+            take()
+            items.append(parse_and())
+        return items[0] if len(items) == 1 else ("or", items)
+
+    def parse_and():
+        items = [parse_not()]
+        while peek() == "and":
+            take()
+            items.append(parse_not())
+        return items[0] if len(items) == 1 else ("and", items)
+
+    def parse_not():
+        if peek() == "not":
+            take()
+            return ("not", parse_not())
+        t = peek()
+        if t is None:
+            raise ValueError("expected an identifier")
+        if t == "(":
+            take()
+            inner = parse_or()
+            if peek() != ")":
+                raise ValueError("missing ')'")
+            take()
+            return inner
+        if t in (")", "and", "or"):
+            raise ValueError(f"unexpected {t!r}")
+        return ("ident", take())
+
+    tree = parse_or()
+    if pos != len(tokens):
+        raise ValueError(f"unexpected {tokens[pos]!r}")
+    return tree
+
+
+def _evaluate_selection(tree, resolve):
+    """Evaluate a selection tree; `resolve(ident)` is True, False, or None for "cannot tell yet".
+
+    Three-valued so a node can be decided *before* its parametrize cases exist (TID-63). A `-k`
+    identifier that does not match the plain node id might still match a case id — `-k 1-a` against
+    `test_x[1-a]` — so at node level a non-match is "unknown", not "no". Kleene's rules: `not` of
+    unknown is unknown; `and` is False on any False, else unknown on any unknown; `or` is True on
+    any True, else unknown on any unknown. A False here is a False for every case that node could
+    produce, which is what makes deselecting it up front — before any fixture is built — sound."""
+    kind = tree[0]
+    if kind == "ident":
+        return resolve(tree[1])
+    if kind == "not":
+        v = _evaluate_selection(tree[1], resolve)
+        return None if v is None else not v
+    values = [_evaluate_selection(t, resolve) for t in tree[1]]
+    if kind == "and":
+        if any(v is False for v in values):
+            return False
+        return None if any(v is None for v in values) else True
+    if any(v is True for v in values):
+        return True
+    return None if any(v is None for v in values) else False
+
+
+def _compile_selection_tree(expr: str, flag: str):
+    try:
+        return _parse_selection_expr(expr)
+    except ValueError as exc:
+        print(f"tiderace: ignoring {flag} {expr!r}: {exc}", file=sys.stderr, flush=True)
+        return None
+
+
+def _keyword_names(node_id: str, marks: set) -> list:
+    """What pytest's `-k` matches against: the module's file name, every `::` segment — class,
+    function, the function with its parametrize id — and the node's mark names."""
+    parts = node_id.split("::")
+    return [os.path.basename(parts[0]), *parts[1:], *sorted(marks)]
+
+
+def _keyword_matches(ident: str, names: list) -> bool:
+    """pytest's rule: a case-insensitive substring of any of the names."""
+    needle = ident.lower()
+    return any(needle in name.lower() for name in names)
+
+
+def _keyword_verdict(node_id: str, marks: set, final: bool):
+    """`_KEYWORD_EXPR` applied to a node: True (run it), False (deselect it), or None (decide per
+    case). `final=True` — the id is a complete case id, or the node has no cases — turns every
+    non-match into a No."""
+    names = _keyword_names(node_id, marks)
+
+    def resolve(ident: str):
+        if _keyword_matches(ident, names):
+            return True
+        return False if final else None
+
+    return _evaluate_selection(_KEYWORD_EXPR, resolve)
 
 
 def _compile_marker_expr(expr: str):
     """A predicate over a set of mark names for one pytest `-m` expression.
 
-    Evaluated over the parsed AST rather than with `eval`: the expression comes from a config file,
-    and the grammar pytest actually supports here is only names, `and`, `or`, `not` and parentheses.
-    An expression using anything else returns None — a filter we cannot read correctly must select
-    everything rather than silently deselect the wrong tests."""
-    try:
-        tree = ast.parse(expr, mode="eval")
-    except SyntaxError:
+    The same grammar `-k` uses (TID-63), over "is this identifier one of the node's marks"."""
+    tree = _compile_selection_tree(expr, "-m")
+    if tree is None:
         return None
-
-    def evaluate(node, marks: set) -> bool:
-        if isinstance(node, ast.BoolOp):
-            results = [evaluate(v, marks) for v in node.values]
-            return all(results) if isinstance(node.op, ast.And) else any(results)
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            return not evaluate(node.operand, marks)
-        if isinstance(node, ast.Name):
-            return node.id in marks
-        if isinstance(node, ast.Constant) and isinstance(node.value, bool):
-            return node.value
-        raise ValueError(f"unsupported marker expression node: {type(node).__name__}")
-
-    try:  # reject the whole expression now rather than per node at run time
-        evaluate(tree.body, set())
-    except ValueError as exc:
-        print(f"tiderace: ignoring -m {expr!r}: {exc}", file=sys.stderr, flush=True)
-        return None
-    return lambda marks: evaluate(tree.body, marks)
+    return lambda marks: bool(_evaluate_selection(tree, lambda ident: ident in marks))
 
 
 def _rootdir(root: str) -> str | None:
@@ -1279,6 +1398,10 @@ def _discover(root: str) -> Registry:
     expr = os.environ.get("TIDERACE_MARKER_EXPR") or _marker_expr_from(addopts)
     _MARKER_EXPR = _compile_marker_expr(expr) if expr else None
     _DECLARED_MARKS, _STRICT_MARKS = _registered_marks(addopts, config_dir)
+    # `-k EXPR`, same precedence (TID-63): the command line over the project's own `addopts`.
+    global _KEYWORD_EXPR
+    kexpr = os.environ.get("TIDERACE_KEYWORD_EXPR") or _marker_expr_from(addopts, "-k")
+    _KEYWORD_EXPR = _compile_selection_tree(kexpr, "-k") if kexpr else None
     # `asyncio_mode = "auto"` means pytest-asyncio claims *every* async test, including ones carrying
     # `@pytest.mark.anyio`. In that configuration pytest runs even a `[trio]`-labelled variant on an
     # asyncio loop — the id says trio and the loop never is. Emulating the suite's configured
@@ -1853,7 +1976,8 @@ def _watched_packages(module_key: str) -> tuple:
     return result
 
 
-_REGISTRY_TARGETS: dict = {}  # module key -> (sys.modules size, [(label, container), ...])
+# module key -> (sys.modules size, [(name, module)] watched, their namespace sizes, targets)
+_REGISTRY_TARGETS: dict = {}
 
 
 def _registry_targets(module_key: str) -> list:
@@ -1861,13 +1985,26 @@ def _registry_targets(module_key: str) -> list:
 
     Finding them means walking every module of the watched packages and every name in it, which
     measured at 7ms — far more than the tests it wraps, and paid twice per test. The containers
-    themselves are few (two, on one 4,500-test suite), so the scan is cached and redone only when
-    `sys.modules` has grown, which is the only way a new one can appear."""
+    themselves are few (two, on one 4,500-test suite), so the scan is cached.
+
+    The cache is valid while nothing that could add a container has happened (TID-68). Three things
+    can: `sys.modules` grew (a new module imported); a watched module was **replaced** (removed and
+    re-imported — TID-56's deletions do exactly that — so its containers are new objects and the
+    cached ones are stale references); or a watched module's namespace **grew** (a test or fixture
+    assigned `lib.REGISTRY = {}` onto a module that already existed). The first is one integer; the
+    other two are one identity check and one `len` per watched module, which is the packages the
+    test file imports rather than all of `sys.modules` — cheap enough to pay per test, which the
+    full scan is not. The earlier cache keyed on the first alone and its docstring called that "the
+    only way a new one can appear"; it was not."""
     size = len(sys.modules)
     cached = _REGISTRY_TARGETS.get(module_key)
     if cached is not None and cached[0] == size:
-        return cached[1]
+        _, watched, sizes, targets = cached
+        if (all(sys.modules.get(name) is module for name, module in watched)
+                and tuple(len(vars(module)) for _, module in watched) == sizes):
+            return targets
     roots = _watched_packages(module_key)
+    watched: list = []
     targets: list = []
     if roots:
         for name, module in list(sys.modules.items()):
@@ -1876,13 +2013,15 @@ def _registry_targets(module_key: str) -> list:
             namespace = getattr(module, "__dict__", None)
             if not namespace:
                 continue
+            watched.append((name, module))
             for attr, value in list(namespace.items()):
                 # Exact types only: a subclass may define `__len__` arbitrarily, and a proxy object
                 # can raise on access (TID-43's lazy proxies are exactly that shape).
                 if attr.startswith("__") or type(value) not in (dict, list, set):
                     continue
                 targets.append((f"{name}.{attr}", value))
-    _REGISTRY_TARGETS[module_key] = (size, targets)
+    sizes = tuple(len(vars(module)) for _, module in watched)
+    _REGISTRY_TARGETS[module_key] = (size, watched, sizes, targets)
     return targets
 
 
@@ -2477,7 +2616,9 @@ class Engine:
         # Deselected by the project's own `-m` filter (TID-32). Reported as an EMPTY expansion
         # rather than a skip: pytest deselects these, so they must not appear in the tally at all —
         # a skip would be a different, visible outcome.
-        names = _mark_names(node_id, style) if (_MARKER_EXPR is not None or _STRICT_MARKS) else set()
+        names = (_mark_names(node_id, style)
+                 if (_MARKER_EXPR is not None or _STRICT_MARKS or _KEYWORD_EXPR is not None)
+                 else set())
         if _STRICT_MARKS:
             # `--strict-markers`: a mark the project never declared is a typo far more often than an
             # intention, and pytest errors the item rather than running it. Silently ignoring the flag
@@ -2493,6 +2634,13 @@ class Engine:
                 return {"node_id": node_id, "outcome": "error",
                         "detail": f"{', '.join(unknown)} not found in `markers` configuration option"}
         if _MARKER_EXPR is not None and not _MARKER_EXPR(names):
+            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
+        # `-k` (TID-63), decided here when it can be: a No at node level is a No for every case the
+        # node could produce, so it is deselected before a fixture is built or a skip mark is read —
+        # pytest deselects at collection, and a deselected `@pytest.mark.skip` test is not a skip.
+        # An "unknown" is settled per case once the case ids exist, below.
+        keyword_verdict = _keyword_verdict(node_id, names, final=False) if _KEYWORD_EXPR is not None else True
+        if keyword_verdict is False:
             return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
         try:
             requested = self._requested(node_id, style)
@@ -2516,7 +2664,10 @@ class Engine:
         # (TID-20). Both short-circuit BEFORE any fixture setup — a test skipped for a missing
         # backend must not pay to build one.
         skip_reason = _skip_decision(marks) or _MARKER_SKIPS.get(node_id)
-        if skip_reason is not None:
+        # Deferred while `-k` is still undecided (TID-63): pytest deselects at collection, before it
+        # reads a skip mark, so a skip-marked test `-k` does not select is absent from the tally
+        # rather than a skip in it. Decided per case below, once the case ids exist.
+        if skip_reason is not None and keyword_verdict is True:
             return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason}
 
         # Split requested params: fixtures (resolved by the graph) vs. bare params filled positionally
@@ -2624,8 +2775,22 @@ class Engine:
                 for i, (combo, combo_ids, case_pos, case_kwargs) in enumerate(specs)
             ])
         ]
+        # The cases `-k` keeps (TID-63): every one when the node was already a Yes, else each case
+        # judged on its full id — `test_x[1-a]` is what `-k 1-a` was written to name.
+        selected = set(range(len(variant_ids)))
+        if keyword_verdict is None:
+            selected = {i for i, vid in enumerate(variant_ids)
+                        if _keyword_verdict(vid, names, final=True)}
+            if not selected:
+                return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
+            if skip_reason is not None:  # the skip deferred above: `-k` selected it, so it is one
+                return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason}
         variant_index = 0
+        per_combo = len(case_kwargs_list)
         for combo, combo_ids in zip(combos, combo_id_maps):
+            if not any(i in selected for i in range(variant_index, variant_index + per_combo)):
+                variant_index += per_combo  # nothing here survives `-k`: build none of its fixtures
+                continue
             try:
                 self._sync_wider(closure, node_id)
             except BaseException as exc:  # noqa: BLE001
@@ -2637,6 +2802,9 @@ class Engine:
                         "detail": "error setting up fixtures: "
                                   + "".join(traceback.format_exception_only(type(exc), exc))}
             for case_pos, case_kwargs in enumerate(case_kwargs_list):
+                if variant_index not in selected:
+                    variant_index += 1  # deselected by `-k`: absent from the tally, as in pytest
+                    continue
                 started = time.perf_counter()
                 self._state_disturbed = False
                 self._disturbance = None
@@ -3211,6 +3379,7 @@ class Engine:
     def teardown_all(self) -> None:
         while self.active:
             _teardown(self.active.pop().gen)
+        _xunit_class_teardown()  # tearDownClass / teardown_class, once per class (TID-64)
         _xunit_module_teardown()  # tearDownModule / teardown_module, once this worker is done
 
 
@@ -3588,6 +3757,15 @@ class _SkipAwareResult(unittest.TestResult):
 
 
 _XUNIT_DONE: set = set()  # (kind, qualified name) of module/class setups this process has run
+_XUNIT_CLASSES: dict = {}  # class key -> the class object, so its teardown can be found at worker end
+# class key -> (outcome, detail) when the class's own setup did not complete (TID-64). A setUpClass
+# that skips or raises decides the outcome of EVERY method in the class, not only the one that
+# happened to trigger it — which is what once-per-class means when the first attempt fails.
+_XUNIT_CLASS_FAILED: dict = {}
+
+
+def _xunit_class_key(cls) -> tuple:
+    return ("class", f"{_safe_getattr(cls, '__module__', '')}.{_safe_getattr(cls, '__name__', '')}")
 
 
 def _call_hook(owner, names: tuple, *args) -> bool:
@@ -3624,6 +3802,22 @@ def _xunit_module_setup(module) -> None:
     _call_hook(module, ("setUpModule", "setup_module"), module)
 
 
+def _xunit_class_teardown() -> None:
+    """`tearDownClass` / `teardown_class` for every class this process set up, once each (TID-64).
+
+    Runs before the module teardowns, since a class's teardown may still need its module. Only
+    classes whose setup *completed* are torn down: one that skipped or raised never acquired
+    whatever its teardown releases."""
+    for key, cls in list(_XUNIT_CLASSES.items()):
+        if key not in _XUNIT_CLASS_FAILED:
+            try:
+                _call_hook(cls, ("tearDownClass", "teardown_class"), cls)
+            except Exception:  # noqa: BLE001 — a teardown fault must not mask the run's results
+                pass
+        _XUNIT_CLASSES.pop(key, None)
+        _XUNIT_DONE.discard(key)
+
+
 def _xunit_module_teardown() -> None:
     """`tearDownModule` / `teardown_module` for every module this process set up."""
     for kind, name in list(_XUNIT_DONE):
@@ -3658,10 +3852,11 @@ def _xunit_test_hooks(module, style: str, node_id: str, target) -> tuple:
 def _xunit_class_setup(cls) -> None:
     """pytest's `setup_class`, once per class per process. unittest's `setUpClass` is run by
     `_invoke_unittest`, which needs it inside its own result handling."""
-    key = ("class", f"{_safe_getattr(cls, '__module__', '')}.{_safe_getattr(cls, '__name__', '')}")
+    key = _xunit_class_key(cls)
     if key in _XUNIT_DONE:
         return
     _XUNIT_DONE.add(key)
+    _XUNIT_CLASSES[key] = cls  # so `teardown_class` runs at worker end (TID-64) — it never did before
     _call_hook(cls, ("setup_class",), cls)
 
 
@@ -3670,24 +3865,34 @@ def _invoke_unittest(module, node_id: str) -> tuple[str, str]:
     `tearDownClass` (which `TestCase.run()` alone does NOT call), and map `@expectedFailure` /
     unexpected-success / `subTest` to the right node outcome.
 
-    Class setup/teardown run per test here (correctness over the once-per-class optimization — the
-    fork model would re-run them per child anyway; a class-scope mapping is a later refinement)."""
+    `setUpClass` runs once per class per *process* and `tearDownClass` once at worker end, the
+    contract unittest's own runner keeps (TID-64). They used to run around every method — right when
+    every test forked, since each child was its own process, and wrong under the in-process ladder,
+    where a class's methods share one process: N× the setup cost, and a `setUpClass` that opens a
+    database or counts its own calls behaved differently from `python -m unittest`. A forked child
+    inherits `_XUNIT_DONE`, so a class the parent set up is not set up again there either."""
     cls_name, method = _class_method(node_id)
     cls = module.__dict__[cls_name]
+    key = _xunit_class_key(cls)
+    if key in _XUNIT_CLASS_FAILED:
+        return _XUNIT_CLASS_FAILED[key]
+    if key not in _XUNIT_DONE:
+        _XUNIT_DONE.add(key)
+        _XUNIT_CLASSES[key] = cls
+        try:
+            cls.setUpClass()
+        except _SKIP_EXCEPTIONS as exc:  # setUpClass may skip the whole class
+            _XUNIT_CLASS_FAILED[key] = ("skipped", str(exc))
+            return _XUNIT_CLASS_FAILED[key]
+        except Exception as exc:  # noqa: BLE001 — unittest errors every method of the class
+            _XUNIT_CLASS_FAILED[key] = (
+                "error", "".join(traceback.format_exception_only(type(exc), exc)))
+            return _XUNIT_CLASS_FAILED[key]
     result = _SkipAwareResult()
-    ran_setup = False
     try:
-        cls.setUpClass()
-        ran_setup = True
         cls(method).run(result)
-    except _SKIP_EXCEPTIONS as exc:  # setUpClass may skip the whole class
+    except _SKIP_EXCEPTIONS as exc:
         return "skipped", str(exc)
-    finally:
-        if ran_setup:
-            try:
-                cls.tearDownClass()
-            except Exception:  # noqa: BLE001 — teardown error must not mask the test outcome
-                pass
 
     if result.errors:
         # unittest files body, setUp and tearDown exceptions all under `errors`, and pytest reports
