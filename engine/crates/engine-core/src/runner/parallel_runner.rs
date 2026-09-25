@@ -71,12 +71,21 @@ fn run_batched(
         .iter()
         .map(|i| (i.node_id.to_string(), i.clone()))
         .collect();
-    // Cold run ⇒ no timing history; weight each test equally and group by module for locality. The
-    // equal weights are exactly why the assignment must not be static (TID-52): a weight of 1 per
-    // test says nothing about a suite whose per-test cost spans four orders of magnitude.
+    // Weight each collected item by what it cost last time (TID-62), or 1 on a cold run. The cold
+    // weight is why the assignment must not be static (TID-52): one-per-test says nothing about a
+    // suite whose per-test cost spans four orders of magnitude. The recorded weight is what turns
+    // the queue's order from "most tests first" into "most time first", which is what keeps a heavy
+    // module off the tail of the run.
+    let recorded = RecordedWeights::new(&plan.durations);
     let scheduled: Vec<ScheduledTest> = items
         .iter()
-        .map(|i| ScheduledTest::new(i.node_id.clone(), locality_key(i.node_id.as_str()), 1))
+        .map(|i| {
+            ScheduledTest::new(
+                i.node_id.clone(),
+                locality_key(i.node_id.as_str()),
+                recorded.weight_of(i.node_id.as_str()),
+            )
+        })
         .collect();
     let units = plan
         .scheduler
@@ -337,6 +346,45 @@ fn new_worker(
     }
 }
 
+/// Recorded durations, indexed so a *collected* item can be charged for every node it expands into.
+///
+/// The scheduler packs collected items — what the regex collector found — but durations are
+/// recorded against the ids results *report*, and those differ whenever the engine expands a node
+/// at runtime: a parametrized test reports one id per case (`mod.py::test_x[3-b]`), an inherited
+/// class one per method (`mod.py::Class::test_y`). Charging the collected item the sum of its cases
+/// is what makes a 40-case test weigh like 40 tests rather than one, which on pirn-agents is the
+/// difference between 4,019 collected items and 4,657 reported nodes all weighing 1.
+///
+/// A `BTreeMap` so each lookup is one range scan from the item's id, not a pass over every record.
+struct RecordedWeights<'a> {
+    by_id: std::collections::BTreeMap<&'a str, u64>,
+}
+
+impl<'a> RecordedWeights<'a> {
+    fn new(durations: &'a HashMap<String, u64>) -> Self {
+        Self {
+            by_id: durations.iter().map(|(k, v)| (k.as_str(), *v)).collect(),
+        }
+    }
+
+    /// The item's own recorded duration plus that of every node expanded from it; `1` when nothing
+    /// was recorded, so a cold item still counts and a measured-0ms one still sorts.
+    fn weight_of(&self, item: &str) -> u64 {
+        let total: u64 = self
+            .by_id
+            .range(item..)
+            .take_while(|(id, _)| id.starts_with(item))
+            .filter(|(id, _)| {
+                // `item` itself, or an expansion of it — never a sibling that merely shares a
+                // prefix (`test_a` must not be charged for `test_ab`).
+                id.len() == item.len() || matches!(id.as_bytes()[item.len()], b'[' | b':')
+            })
+            .map(|(_, ms)| *ms)
+            .sum();
+        total.max(1)
+    }
+}
+
 /// A test's locality key for scheduling — its module (the file part of the node id), so a module's
 /// tests co-locate on one worker and reuse its module/session snapshot.
 pub fn locality_key(node_id: &str) -> String {
@@ -345,11 +393,46 @@ pub fn locality_key(node_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{locality_key, run_parallel};
+    use super::{locality_key, run_parallel, RecordedWeights};
     use crate::runner::RunPlan;
     #[cfg(not(unix))]
     use crate::runner::WorkerStrategy;
+    use std::collections::HashMap;
     use std::path::Path;
+
+    #[test]
+    fn a_collected_item_is_charged_for_every_node_it_expanded_into() {
+        let durations: HashMap<String, u64> = [
+            ("m.py::test_a", 5),
+            ("m.py::test_a[1]", 100),
+            ("m.py::test_a[2]", 200),
+            ("m.py::test_ab", 1_000), // shares a prefix; is not an expansion
+            ("m.py::Klass::test_x", 40),
+            ("m.py::Klass::test_y", 60),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let w = RecordedWeights::new(&durations);
+        assert_eq!(w.weight_of("m.py::test_a"), 305, "own time plus both cases");
+        assert_eq!(
+            w.weight_of("m.py::test_ab"),
+            1_000,
+            "a sibling is not a case"
+        );
+        assert_eq!(
+            w.weight_of("m.py::Klass"),
+            100,
+            "an inherited class is charged for the methods it expanded into"
+        );
+        assert_eq!(w.weight_of("m.py::test_unknown"), 1, "cold items weigh 1");
+    }
+
+    #[test]
+    fn a_zero_recording_still_weighs_one() {
+        let durations: HashMap<String, u64> = [("m.py::t".to_string(), 0)].into_iter().collect();
+        assert_eq!(RecordedWeights::new(&durations).weight_of("m.py::t"), 1);
+    }
 
     #[test]
     fn locality_key_is_the_module_path() {

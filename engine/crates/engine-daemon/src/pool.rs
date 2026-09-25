@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use engine_core::domain::{TestItem, TestResult};
@@ -24,6 +24,7 @@ pub fn run_parallel(
     optimistic_no_fork: bool,
     trusted: &HashSet<String>,
     must_fork: &HashSet<String>,
+    durations: &HashMap<String, u64>,
 ) -> Result<Vec<TestResult>, String> {
     let plan = RunPlan {
         strategy: WorkerStrategy::platform_default(),
@@ -32,6 +33,7 @@ pub fn run_parallel(
         optimistic_no_fork,
         trusted_pure: trusted.clone(),
         must_fork: must_fork.clone(),
+        durations: durations.clone(), // TID-62: last run's per-node cost, the scheduler's weights
         ..RunPlan::default()
     };
     core_run_parallel(python, shim, root, items, &plan)
@@ -46,6 +48,7 @@ mod tests {
     use engine_core::domain::{NodeId, ScopePath, TestItem, TestStyle};
     use engine_core::runner::locality_key;
     use engine_core::testing::skip_live;
+    use std::collections::HashMap;
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
@@ -112,6 +115,7 @@ mod tests {
             false,
             &HashSet::new(),
             &HashSet::new(),
+            &HashMap::new(),
         )
         .expect("empty batch is Ok");
         assert!(out.is_empty());
@@ -154,6 +158,7 @@ mod tests {
             false,
             &HashSet::new(),
             &HashSet::new(),
+            &HashMap::new(),
         )
         .expect("pool run succeeds");
 
@@ -213,6 +218,7 @@ mod tests {
             false,
             &HashSet::new(),
             &HashSet::new(),
+            &HashMap::new(),
         )
         .expect("pool run succeeds");
 
