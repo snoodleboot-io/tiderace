@@ -161,6 +161,13 @@ impl EngineHandler {
         // sub-interp-**safe** modules through a parallel sub-interpreter pool (no fork; sound because
         // both module globals and os.environ are per-interpreter) and everything else through the fork
         // pool. Sub-interpreters are the only parallelism Windows (no fork) has. Off ⇒ fork pool only.
+        // Every collected node id: what the planner will be asked about next time, so a candidate
+        // that executes and produces nothing can be recorded as deselected (TID-73).
+        let all_candidates: Vec<String> = self
+            .collect()?
+            .iter()
+            .map(|i| i.node_id.to_string())
+            .collect();
         let fresh = if subinterp_enabled() {
             let items = self.collect()?;
             let modules: Vec<String> = {
@@ -199,7 +206,7 @@ impl EngineHandler {
             self.run_items_parallel(&[], &trusted, &must_fork, &durations)?
         };
 
-        self.persist_results(&mut state, &fresh);
+        self.persist_results(&mut state, &all_candidates, &fresh);
         state
             .save(&state_path)
             .map_err(|e| format!("state save failed: {e}"))?;
@@ -224,8 +231,48 @@ impl EngineHandler {
 
     /// Fold a batch of results into the persisted state (outcome + detail + deps + purity verdict) and
     /// rebaseline the content hashes of every touched file. Shared by the impact-aware + full runs.
-    fn persist_results(&self, state: &mut PersistedState, results: &[TestResult]) {
+    fn persist_results(
+        &self,
+        state: &mut PersistedState,
+        executed: &[String],
+        results: &[TestResult],
+    ) {
         state.record_durations(results); // TID-62: the next run's scheduler weights
+                                         // A candidate that ran and produced nothing is one the project's own `addopts` deselects
+                                         // or ignores: the shim answers it with an empty expansion, so it never had a record, so
+                                         // the planner called it "never seen" on every warm run — 55 phantoms on pirn-core, each a
+                                         // request, together forcing a wellspring launch to run nothing (TID-73). Record what was
+                                         // learned: it is deselected, and that verdict depends on its own module and on the config
+                                         // that deselected it. A candidate that produces results again drops the record.
+        let config_deps = self.config_deps();
+        let deselected = deselected_candidates(executed, results);
+        for cand in executed {
+            // Selected again — it produced results of its own this time, so those are the record
+            // now. Same rule as `deselected_candidates`, or a class whose own methods are their own
+            // candidates would be recorded as deselected and un-recorded in the same breath.
+            if !deselected.contains(cand)
+                && state
+                    .tests
+                    .get(cand)
+                    .is_some_and(|rec| rec.outcome == DESELECTED)
+            {
+                state.tests.remove(cand);
+            }
+        }
+        for cand in deselected {
+            let mut deps = vec![engine_core::runner::locality_key(&cand)];
+            deps.extend(config_deps.iter().cloned());
+            state.tests.insert(
+                cand,
+                TestRecord {
+                    outcome: DESELECTED.to_string(),
+                    detail: String::new(),
+                    deps,
+                    pure: None,
+                    must_fork: false,
+                },
+            );
+        }
         for r in results {
             let prior = state.tests.get(r.node_id.as_str());
             state.tests.insert(
@@ -285,20 +332,26 @@ impl EngineHandler {
         let current = self.hash_known_files(&state);
         let changed = changed_files(&state, &current);
         let p = plan(&state, &candidates, &changed);
-        let cached_count = p.cached.len();
 
-        // impact-skip: serve locally-unchanged tests from the persisted record (no execution).
+        // impact-skip: serve locally-unchanged tests from the persisted record (no execution). A
+        // `deselected` record is a verdict with nothing to serve — the node is absent from the
+        // tally, as it is in pytest (TID-73) — so it is neither a result nor a cached count.
         let mut results: Vec<RpcResult> = p
             .cached
             .iter()
             .filter_map(|node| {
-                state.tests.get(node).map(|rec| RpcResult {
-                    node_id: node.clone(),
-                    outcome: rec.outcome.clone(),
-                    duration_ms: 0,
-                })
+                state
+                    .tests
+                    .get(node)
+                    .filter(|rec| rec.outcome != DESELECTED)
+                    .map(|rec| RpcResult {
+                        node_id: node.clone(),
+                        outcome: rec.outcome.clone(),
+                        duration_ms: 0,
+                    })
             })
             .collect();
+        let cached_count = results.len();
 
         // Preference order (ADR-E004): **cache hit → impact-skip → run**. impact-skip handled the
         // locally-unchanged set above; for the impacted set, consult the content-addressed cache before
@@ -363,7 +416,7 @@ impl EngineHandler {
                 for r in &fresh {
                     results.push(to_rpc(r.clone()));
                 }
-                self.persist_results(&mut state, &fresh);
+                self.persist_results(&mut state, &to_execute, &fresh);
                 // Populate the shared cache with fresh **pure** outcomes (impure is never cached —
                 // ADR-E004 soundness). The key is the executed-source closure from this run's coverage.
                 if let Some(cache) = &self.cache {
@@ -412,6 +465,16 @@ impl EngineHandler {
             }
         }
         state.files = files;
+    }
+
+    /// The config files at the root that can deselect a test (`addopts`, `markers`) — the deps a
+    /// `deselected` verdict carries, so a change to the config re-evaluates it (TID-73).
+    fn config_deps(&self) -> Vec<String> {
+        ["pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini"]
+            .into_iter()
+            .filter(|name| self.root.join(name).exists())
+            .map(str::to_string)
+            .collect()
     }
 
     /// Hex content hash of `<root>/rel`; a sentinel for a missing/unreadable file (⇒ counts as changed).
@@ -490,6 +553,38 @@ fn module_of(node: &engine_core::domain::NodeId) -> String {
     node.as_str().split("::").next().unwrap_or("").to_string()
 }
 
+/// The outcome recorded for a candidate the project's own `addopts` deselects or ignores (TID-73).
+/// A verdict, not a result: the planner judges it like any test, and nothing is ever served for it.
+const DESELECTED: &str = "deselected";
+
+/// Whether `id` is `cand` itself or one of its runtime expansions — a parametrize case
+/// (`cand[…]`) or an inherited method (`cand::…`) — and not a sibling sharing a prefix.
+fn expands(cand: &str, id: &str) -> bool {
+    id == cand
+        || (id.starts_with(cand)
+            && (id.as_bytes()[cand.len()] == b'[' || id[cand.len()..].starts_with("::")))
+}
+
+/// The executed candidates that produced no result at all: the shim answered each with an empty
+/// expansion, which is how a node the project deselects or ignores reports itself.
+fn deselected_candidates(executed: &[String], results: &[TestResult]) -> Vec<String> {
+    // A result that is itself a candidate counts for nobody but itself: a class's own methods are
+    // collected and judged as their own candidates, so they are not the class's results. The same
+    // rule `plan()` applies — or the two disagree, and a class with only own methods is "never
+    // seen" on the first warm run.
+    let direct: HashSet<&str> = executed.iter().map(String::as_str).collect();
+    executed
+        .iter()
+        .filter(|cand| {
+            !results.iter().any(|r| {
+                let id = r.node_id.as_str();
+                id == cand.as_str() || (expands(cand, id) && !direct.contains(id))
+            })
+        })
+        .cloned()
+        .collect()
+}
+
 fn to_rpc(r: TestResult) -> RpcResult {
     RpcResult {
         node_id: r.node_id.to_string(),
@@ -563,6 +658,45 @@ fn recorded_durations(state: &PersistedState) -> HashMap<String, u64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_candidate_with_no_result_of_its_own_or_of_its_expansions_is_deselected() {
+        use super::{deselected_candidates, expands};
+        use engine_core::domain::{NodeId, Outcome, TestResult};
+        let r = |id: &str| TestResult::new(NodeId::new(id), Outcome::Passed, 1, "");
+        let results = [
+            r("t.py::a[1]"),
+            r("t.py::Klass::test_inherited"),
+            r("t.py::Own::test_own"),
+            r("t.py::plain"),
+        ];
+        let executed: Vec<String> = [
+            "t.py::a",
+            "t.py::Klass",
+            "t.py::Own",
+            "t.py::Own::test_own",
+            "t.py::plain",
+            "t.py::gone",
+            "t.py::pla",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            deselected_candidates(&executed, &results),
+            vec![
+                "t.py::Own".to_string(),
+                "t.py::gone".to_string(),
+                "t.py::pla".to_string()
+            ],
+            "a case and an inherited method count for their candidate; an own method that is \
+             itself a candidate counts only for itself, so a class with only own methods is \
+             deselected; a prefix counts for nothing"
+        );
+        assert!(expands("t.py::a", "t.py::a[1]"));
+        assert!(expands("t.py::Klass", "t.py::Klass::test_x"));
+        assert!(!expands("t.py::pla", "t.py::plain"));
+    }
+
     use super::*;
     use engine_core::domain::{NodeId, Outcome};
     use engine_core::testing::skip_live;
@@ -594,11 +728,11 @@ mod tests {
         let handler = handler_for(&dir);
         let mut state = PersistedState::default();
 
-        handler.persist_results(&mut state, &[result("t.py::a", Some(true), &["t.py"])]);
+        handler.persist_results(&mut state, &[], &[result("t.py::a", Some(true), &["t.py"])]);
         assert_eq!(state.tests["t.py::a"].pure, Some(true));
 
         // The bare run: nothing measured.
-        handler.persist_results(&mut state, &[result("t.py::a", None, &["t.py"])]);
+        handler.persist_results(&mut state, &[], &[result("t.py::a", None, &["t.py"])]);
         assert_eq!(
             state.tests["t.py::a"].pure,
             Some(true),
@@ -616,8 +750,12 @@ mod tests {
         let handler = handler_for(&dir);
         let mut state = PersistedState::default();
 
-        handler.persist_results(&mut state, &[result("t.py::a", Some(true), &["t.py"])]);
-        handler.persist_results(&mut state, &[result("t.py::a", Some(false), &["t.py"])]);
+        handler.persist_results(&mut state, &[], &[result("t.py::a", Some(true), &["t.py"])]);
+        handler.persist_results(
+            &mut state,
+            &[],
+            &[result("t.py::a", Some(false), &["t.py"])],
+        );
         assert_eq!(
             state.tests["t.py::a"].pure,
             Some(false),
@@ -641,9 +779,10 @@ mod tests {
 
         handler.persist_results(
             &mut state,
+            &[],
             &[result("t.py::a", Some(true), &["t.py", "src.py"])],
         );
-        handler.persist_results(&mut state, &[result("t.py::a", None, &[])]);
+        handler.persist_results(&mut state, &[], &[result("t.py::a", None, &[])]);
         assert_eq!(
             state.tests["t.py::a"].deps,
             vec!["t.py".to_string(), "src.py".to_string()],
