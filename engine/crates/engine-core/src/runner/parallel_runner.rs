@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::domain::{TestItem, TestResult};
@@ -41,7 +42,17 @@ pub fn run_parallel(
     run_batched(python, shim, root, items, plan, plan.strategy)
 }
 
-/// Schedule `items` into batches and run each on its own thread with `strategy`.
+/// Schedule `items` into work units and drain them through a pool of `workers` threads (TID-52).
+///
+/// The unit granularity is the scheduler's choice: the locality scheduler yields one unit per module
+/// (heaviest first), the round-robin baseline one per worker, which is the static partition this
+/// used to do unconditionally. A worker that finishes its unit takes the next one instead of idling.
+///
+/// That distinction is worth most of the gap against pytest-xdist. A static partition has to predict
+/// each worker's total cost up front, and on a cold run the only weight available is one-per-test —
+/// so on pirn-agents, whose per-test cost spans four orders of magnitude, bins balanced by test
+/// count ran 121/97/66/34/31/25/23/19 seconds: the machine 57% idle, and 2.32x the makespan a
+/// perfectly balanced run would take. Nothing about the execution tier was wrong; the prediction was.
 fn run_batched(
     python: &str,
     shim: &Path,
@@ -55,7 +66,47 @@ fn run_batched(
     }
     let workers = plan.effective_workers(items.len());
 
-    // TID-4: one imported image, forked per worker. Stood up before the batch loop so the import is
+    // node id -> item, to rebuild each unit's TestItems from the scheduler's NodeId batches.
+    let mut by_node: HashMap<String, TestItem> = items
+        .iter()
+        .map(|i| (i.node_id.to_string(), i.clone()))
+        .collect();
+    // Cold run ⇒ no timing history; weight each test equally and group by module for locality. The
+    // equal weights are exactly why the assignment must not be static (TID-52): a weight of 1 per
+    // test says nothing about a suite whose per-test cost spans four orders of magnitude.
+    let scheduled: Vec<ScheduledTest> = items
+        .iter()
+        .map(|i| ScheduledTest::new(i.node_id.clone(), locality_key(i.node_id.as_str()), 1))
+        .collect();
+    let units = plan
+        .scheduler
+        .build()
+        .units(&ScheduleInput::new(scheduled, workers));
+
+    // The queue. `units` come heaviest first and `pop` takes from the back, so the list is built
+    // reversed once here rather than searched on every take. Handing out the heaviest unit first is
+    // what keeps a long module off the end of the run: started last, it *is* the tail.
+    let pending: Vec<Vec<TestItem>> = units
+        .iter()
+        .rev()
+        .map(|u| {
+            u.items()
+                .iter()
+                .filter_map(|n| by_node.remove(n.as_str()))
+                .collect::<Vec<TestItem>>()
+        })
+        .filter(|u| !u.is_empty())
+        .collect();
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Never more threads than units: a thread with nothing to take is a worker process launched for
+    // nothing. Known before anything is forked, which is why the pool is sized from it below rather
+    // than from the requested worker count.
+    let threads = workers.min(pending.len());
+    let queue = Arc::new(Mutex::new(pending));
+
+    // TID-4: one imported image, forked per worker. Stood up before the thread loop so the import is
     // finished — and paid once — before any worker starts. Fork-tier only: the subprocess and
     // sub-interpreter tiers have no wellspring to share, by construction.
     #[cfg(unix)]
@@ -63,54 +114,26 @@ fn run_batched(
         // Launched with restore unconditionally, exactly as `ForkWorker::launch_optimistic` does:
         // it costs nothing when the ladder is off, and it makes the unsound combination — in-process
         // execution with no snapshot — unreachable rather than merely unused.
-        Some(WellspringPool::launch(python, shim, root, true, workers).map_err(|e| e.to_string())?)
+        Some(WellspringPool::launch(python, shim, root, true, threads).map_err(|e| e.to_string())?)
     } else {
         None
     };
 
-    // node id -> item, to rebuild each batch's TestItems from the scheduler's NodeId batches.
-    let mut by_node: HashMap<String, TestItem> = items
-        .iter()
-        .map(|i| (i.node_id.to_string(), i.clone()))
-        .collect();
-    // Cold run ⇒ no timing history; weight each test equally and group by module for locality.
-    let scheduled: Vec<ScheduledTest> = items
-        .iter()
-        .map(|i| ScheduledTest::new(i.node_id.clone(), locality_key(i.node_id.as_str()), 1))
-        .collect();
-    let batches = plan
-        .scheduler
-        .build()
-        .plan(&ScheduleInput::new(scheduled, workers));
+    let exec = BatchExec {
+        strategy,
+        deadline_ms: plan.deadline_ms,
+        optimistic_no_fork: plan.optimistic_no_fork,
+    };
+    // The whole run's sets, not one unit's slice: a thread now runs many units and cannot know in
+    // advance which node ids it will see. Membership is what both are used for, so a larger set
+    // costs a hash lookup and nothing else.
+    let trusted: HashSet<String> = plan.trusted_pure.clone();
+    let must_fork: HashSet<String> = plan.must_fork.clone();
 
     let mut handles = Vec::new();
-    for batch in batches {
-        let batch_items: Vec<TestItem> = batch
-            .items()
-            .iter()
-            .filter_map(|n| by_node.remove(n.as_str()))
-            .collect();
-        if batch_items.is_empty() {
-            continue;
-        }
+    for _ in 0..threads {
         let (py, sh, rt) = (python.to_string(), shim.to_path_buf(), root.to_path_buf());
-        // Only this batch's trusted-pure node ids (the shim only sees this batch).
-        let batch_trusted: HashSet<String> = batch_items
-            .iter()
-            .filter(|it| plan.trusted_pure.contains(it.node_id.as_str()))
-            .map(|it| it.node_id.to_string())
-            .collect();
-        // Likewise only this batch's recorded offenders (TID-33).
-        let batch_must_fork: HashSet<String> = batch_items
-            .iter()
-            .filter(|it| plan.must_fork.contains(it.node_id.as_str()))
-            .map(|it| it.node_id.to_string())
-            .collect();
-        let exec = BatchExec {
-            strategy,
-            deadline_ms: plan.deadline_ms,
-            optimistic_no_fork: plan.optimistic_no_fork,
-        };
+        let (queue, trusted, must_fork) = (queue.clone(), trusted.clone(), must_fork.clone());
         // A pooled transport is owned outright, so it moves into the thread without borrowing the
         // pool. The pool itself must outlive the threads — it is dropped after the joins below,
         // because its parent process only exits once every worker connection has closed.
@@ -120,27 +143,38 @@ fn run_batched(
         let pooled: Option<()> = None;
 
         handles.push(thread::spawn(move || -> Result<Vec<TestResult>, String> {
-            #[cfg(unix)]
-            if let Some(transport) = pooled {
-                let mut worker = PooledWorker::new(transport, exec.deadline_ms)
-                    .with_optimistic_no_fork(exec.optimistic_no_fork)
-                    .with_trusted_pure(batch_trusted)
-                    .with_must_fork(batch_must_fork);
-                return worker
-                    .run(&batch_items)
-                    .map_err(|e| format!("execution failed: {e}"));
+            // One worker per thread, built once and reused across every unit it takes. Building it
+            // per unit would trade the idle time this removes for a process launch per module.
+            let mut worker: Box<dyn Worker> = {
+                #[cfg(unix)]
+                {
+                    match pooled {
+                        Some(transport) => Box::new(
+                            PooledWorker::new(transport, exec.deadline_ms)
+                                .with_optimistic_no_fork(exec.optimistic_no_fork)
+                                .with_trusted_pure(trusted)
+                                .with_must_fork(must_fork),
+                        ),
+                        None => new_worker(exec, &py, &sh, &rt, trusted, must_fork)?,
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = pooled;
+                    new_worker(exec, &py, &sh, &rt, trusted, must_fork)?
+                }
+            };
+            let mut mine = Vec::new();
+            loop {
+                let Some(unit) = queue.lock().expect("the work queue is not poisoned").pop() else {
+                    return Ok(mine);
+                };
+                mine.extend(
+                    worker
+                        .run(&unit)
+                        .map_err(|e| format!("execution failed: {e}"))?,
+                );
             }
-            #[cfg(not(unix))]
-            let _ = pooled;
-            run_batch(
-                exec,
-                &py,
-                &sh,
-                &rt,
-                &batch_items,
-                batch_trusted,
-                batch_must_fork,
-            )
         }));
     }
 
@@ -241,16 +275,20 @@ struct BatchExec {
     optimistic_no_fork: bool,
 }
 
-/// Run one scheduler batch on this thread with the named tier.
-fn run_batch(
+/// Build this thread's worker for the named tier, once, to be reused across every unit it takes.
+///
+/// Was `run_batch`, which launched a worker and ran exactly one batch on it. Under the work queue a
+/// thread runs an unknown number of units, so construction is separated from execution — otherwise
+/// every module would cost a fresh interpreter on the subprocess tier, which is more than the idle
+/// time the queue removes.
+fn new_worker(
     exec: BatchExec,
     py: &str,
     sh: &Path,
     rt: &Path,
-    batch_items: &[TestItem],
-    batch_trusted: HashSet<String>,
-    batch_must_fork: HashSet<String>,
-) -> Result<Vec<TestResult>, String> {
+    trusted: HashSet<String>,
+    must_fork: HashSet<String>,
+) -> Result<Box<dyn Worker>, String> {
     let BatchExec {
         strategy,
         deadline_ms,
@@ -267,32 +305,30 @@ fn run_batch(
                 } else {
                     ForkWorker::launch(py, sh, rt)
                 };
-                let mut worker = launched
-                    .map_err(|e| format!("failed to launch wellspring: {e}"))?
-                    .with_deadline_ms(deadline_ms)
-                    .with_trusted_pure(batch_trusted)
-                    .with_must_fork(batch_must_fork);
-                worker
-                    .run(batch_items)
-                    .map_err(|e| format!("execution failed: {e}"))
+                Ok(Box::new(
+                    launched
+                        .map_err(|e| format!("failed to launch wellspring: {e}"))?
+                        .with_deadline_ms(deadline_ms)
+                        .with_trusted_pure(trusted)
+                        .with_must_fork(must_fork),
+                ))
             }
             #[cfg(not(unix))]
             {
                 // The optimistic ladder and the trusted-pure set are fork-only knobs; name them here
                 // so this arm consumes them on platforms where the fork branch is compiled out.
-                let _ = (optimistic_no_fork, batch_trusted, batch_must_fork);
+                let _ = (optimistic_no_fork, trusted, must_fork);
                 Err("fork is unavailable on this platform".to_string())
             }
         }
         // The no-fork path always snapshots/restores (its only isolation without COW); the fork-only
-        // knobs (optimistic ladder, trusted-pure bare no-fork) do not apply. One process per batch.
+        // knobs (optimistic ladder, trusted-pure bare no-fork) do not apply.
         WorkerStrategy::Subprocess => {
             // Nothing to demote to: this tier runs in-process by configuration, not by guess.
-            let _ = batch_must_fork;
-            let mut worker = SubprocessWorker::new(deadline_ms, 1).with_target(py, sh, rt);
-            worker
-                .run(batch_items)
-                .map_err(|e| format!("execution failed: {e}"))
+            let _ = (must_fork, trusted);
+            Ok(Box::new(
+                SubprocessWorker::new(deadline_ms, 1).with_target(py, sh, rt),
+            ))
         }
         // Routed before batching; reaching here would mean a nested pool.
         WorkerStrategy::SubInterp => {

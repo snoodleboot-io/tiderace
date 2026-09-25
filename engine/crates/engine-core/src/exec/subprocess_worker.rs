@@ -23,7 +23,6 @@ use crate::exec::worker::Worker;
 use crate::exec::worker_caps::WorkerCaps;
 
 /// No-fork fallback executor: a warm `python`+shim process, scope setup re-run (not snapshotted).
-#[derive(Debug)]
 pub struct SubprocessWorker {
     /// Per-test wall-clock budget (ms) before an `Outcome::Error`.
     deadline_ms: u64,
@@ -31,6 +30,27 @@ pub struct SubprocessWorker {
     pool_size: usize,
     /// The interpreter, shim, and corpus root to launch against (set via [`Self::with_target`]).
     target: Option<Target>,
+    /// The live process, launched on first use and **kept** for this worker's lifetime (TID-52).
+    ///
+    /// It used to be launched and torn down inside every `run`, which was invisible while a worker
+    /// ran exactly one batch. Under the work queue a worker runs many units, and relaunching per
+    /// unit would mean one interpreter per module — on pirn-core, 529 process launches in place of
+    /// 8. Keeping it also makes this tier's warmth match the fork tier's, where the wellspring has
+    /// always outlived the batch.
+    proc: Option<NoForkProc>,
+}
+
+impl std::fmt::Debug for SubprocessWorker {
+    /// Hand-written because the live process holds pipe handles that are not `Debug`; the fields
+    /// worth printing are the configuration, plus whether a process is up.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubprocessWorker")
+            .field("deadline_ms", &self.deadline_ms)
+            .field("pool_size", &self.pool_size)
+            .field("target", &self.target)
+            .field("launched", &self.proc.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +67,7 @@ impl SubprocessWorker {
             deadline_ms,
             pool_size,
             target: None,
+            proc: None,
         }
     }
 
@@ -106,10 +127,13 @@ impl SubprocessWorker {
 
 impl Worker for SubprocessWorker {
     fn run(&mut self, items: &[TestItem]) -> Result<Vec<TestResult>> {
-        let target = self.target.clone().ok_or_else(|| {
-            EngineError::Exec("SubprocessWorker has no target; call with_target".into())
-        })?;
-        let mut proc = SubprocessWorker::launch(&target)?;
+        if self.proc.is_none() {
+            let target = self.target.clone().ok_or_else(|| {
+                EngineError::Exec("SubprocessWorker has no target; call with_target".into())
+            })?;
+            self.proc = Some(SubprocessWorker::launch(&target)?);
+        }
+        let proc = self.proc.as_mut().expect("just launched");
         run_batch(
             &mut proc.transport,
             items,
