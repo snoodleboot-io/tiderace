@@ -156,17 +156,43 @@ def tag(*names: str):
     return deco
 
 
+_REGISTERED_MARKS: dict[str, str] = {}  # name -> description, from `tiderace.mark.register`
+
+
 class _MarkNamespace:
     """`@tiderace.mark.<name>` — a custom mark by attribute, pytest's ergonomics on native marks.
 
     `tag("slow")` and `mark.slow` produce the identical mark; this spelling exists because it is the
-    one people already know, and because it reads better stacked with other decorators. A project
-    declares its marks in `[tool.tiderace] markers` (or pytest's `markers`) and turns on
-    `--strict-markers` to have undeclared ones rejected — declaration is what makes a typo an error
-    rather than a test that silently stops matching its filter (TID-59).
+    one people already know, and because it reads better stacked with other decorators.
+
+    A project declares its marks so that a typo is an error rather than a test that silently stops
+    matching its filter (TID-59). Three places count, and `--strict-markers` checks against their
+    union: `[tool.tiderace] markers` or pytest's `markers` in the config, whatever a pytest plugin
+    registers, and — for a suite that has no pytest config block at all — `tiderace.mark.register`
+    in a conftest (TID-67):
+
+    ```python
+    # conftest.py
+    tiderace.mark.register("slow", "takes more than a second")
+    ```
     """
 
     __slots__ = ()
+
+    def register(self, name: str, description: str = "") -> None:
+        """Declare a custom mark in code, the native counterpart of a `markers` config entry.
+
+        Call it at import time in a conftest — the runner imports every conftest before it decides
+        which marks are declared, so a registration there is visible to `--strict-markers` and to
+        `-m` alike. The names `register` and `registered` are the namespace's own and cannot be
+        marks; everything else is."""
+        if not isinstance(name, str) or not name or name.startswith("_"):
+            raise ValueError(f"a mark name must be a non-empty identifier, got {name!r}")
+        _REGISTERED_MARKS[name] = description
+
+    def registered(self) -> dict[str, str]:
+        """Every mark declared through `register`, name to description."""
+        return dict(_REGISTERED_MARKS)
 
     def __getattr__(self, name: str):
         if name.startswith("_"):
