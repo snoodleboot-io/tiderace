@@ -55,18 +55,62 @@ Two levers compound, and they matter in different scenarios:
     ladder closed and then reversed that gap. But the impact loop is still where the order-of-magnitude
     wins live — fork-vs-no-fork is in the noise there because impact-skip already ran (almost) nothing.
 
-## Real-world libraries
+## Real suites: parity first, then the second run
 
-`benchmarks/real_world.sh` runs the comparison against the *actual* test suites of common OSS
-libraries (cachetools, jmespath, toolz, inflection) — it clones them, installs them into a throwaway
-venv, and times pytest vs the engine cold, warm (no change), and warm after editing one source file:
+`benchmarks/harness/` runs the comparison against **real** test suites — the vendored public
+projects under `conformance/vendor/` and a pinned snapshot of the internal monorepo — and, before
+it times anything, checks that tiderace agrees with pytest on them test for test. The published
+benchmark document is produced from it.
 
 ```bash
-benchmarks/real_world.sh
+python benchmarks/harness/parity.py             # pytest vs tiderace tallies, per corpus
+python benchmarks/harness/nodediff.py click     # per-node outcome diff — the only sound comparison
+python benchmarks/harness/timing_rr.py          # pytest / xdist / tiderace, interleaved, medians
+PIRN_SNAPSHOT=... python benchmarks/harness/second_run.py pirn-core   # the run after an edit
 ```
 
-The shape is the same: the warm/impact loop is dramatically faster where tests have real cost; the
-cold full run is competitive-to-faster depending on import weight. Exact numbers vary by machine.
+The method — pinned inputs, parity before speed, interleaved rounds, load recorded, node-id
+comparison — is in that directory's README. `second_run.py` is the benchmark the cold numbers above
+do not cover: a warm run with nothing edited, one edit to a leaf module, one to a hub module, and an
+edit that must produce a failure (the stale-pass check). Its numbers are in the section below.
+
+### The second run, measured
+
+`second_run.py` on the two ~5k-test monorepo suites (pinned snapshot, machine shared — one-minute
+load 7–15 throughout, recorded with every sample; three rounds, medians). pytest has no warm mode,
+so its number is the same full run every time — that is the comparison.
+
+| scenario | pirn-core | pirn-agents |
+| -- | -- | -- |
+| pytest, full run | 98.4s | 111.0s |
+| tiderace, cold `run --all` (coverage on, footprints recorded) | 51.8s | 58.9s |
+| tiderace, warm, **nothing edited** | **7.6s** — 55 ran, 5,602 cached | **2.3s** — 41 ran, 4,657 cached |
+| edit one leaf module (4 / 1 dependents) | 8.1s — 59 ran | 2.3s — 42 ran |
+| edit the hub module (3,953 / 2,428 dependents) | 32.3s — 3,843 ran | 23.6s — 2,357 ran |
+| leaf module made to raise on import | 4 failing, **reported** | 23 failing, **reported** |
+
+Read with the same care as the cold numbers:
+
+- **The warm path is 13× and 48× pytest's full run, and most of what is left is a bug.** The
+  55 and 41 "tests" that run with nothing edited are exactly the candidates the projects' own
+  `addopts` deselects or ignores — they produce no result (the tally does not add up by precisely
+  their count) but they force a wellspring launch on every warm run. That is
+  [TID-73](https://linear.app/snoodleboot/issue/TID-73). With it fixed the no-change run is the
+  hash pass alone. Its sibling for parametrized tests ([TID-71](https://linear.app/snoodleboot/issue/TID-71))
+  was found and fixed by the same benchmark the day before these numbers were taken.
+- **Impact selection is right-sized.** A leaf edit re-runs its four dependents; a hub edit that
+  3,953 tests depend on re-runs 3,843 of them and takes a third of the cold run. Selection is by
+  recorded footprint, not by guess, and the hub case degrades to a large run rather than pretending.
+- **The stale-pass check passes.** A leaf module made to raise on import produces failures in the
+  next run on both suites — the check [TID-40](https://linear.app/snoodleboot/issue/TID-40) was
+  filed for. The same scenario on fx_corpus found [TID-72](https://linear.app/snoodleboot/issue/TID-72):
+  a *conftest* that raised was letting 508 of 511 tests pass without it.
+- **Coverage capture costs the cold run about 1.9×** against the CLI's cold run without it (27.9s
+  on pirn-core in the cold benchmark). That is the price of the footprints the warm path runs on,
+  paid once per cold run.
+- **A cached failure stays failed.** pirn-agents' warm runs report `2 failing` from cache: the
+  order-dependent test the cold benchmark names, plus one more under the daemon's scheduling. A
+  cached verdict is served until its dependencies change, which is the contract.
 
 ## Reproduce
 
@@ -74,8 +118,11 @@ cold full run is competitive-to-faster depending on import weight. Exact numbers
 # Build both engines first
 cargo build --release --manifest-path engine/Cargo.toml   # native engine
 
-# Then run the three-way harness
+# Then run the three-way harness on the generated fixture
 benchmarks/bench_3way.sh
+
+# And the real-suite harness (see above; one venv per vendored corpus)
+python benchmarks/harness/parity.py cachetools
 ```
 
 Full result tables and methodology live in
