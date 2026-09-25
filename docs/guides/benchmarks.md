@@ -96,7 +96,8 @@ Read with the same care as the cold numbers:
   `addopts` deselects or ignores — they produce no result (the tally does not add up by precisely
   their count) but they force a wellspring launch on every warm run. That is
   [TID-73](https://linear.app/snoodleboot/issue/TID-73). With it fixed the no-change run is the
-  hash pass alone. Its sibling for parametrized tests ([TID-71](https://linear.app/snoodleboot/issue/TID-71))
+  hash pass alone: measured after the fix, **0.14s** on pirn-core and **0.13s** on pirn-agents,
+  `0 ran`, every result served from cache. Its sibling for parametrized tests ([TID-71](https://linear.app/snoodleboot/issue/TID-71))
   was found and fixed by the same benchmark the day before these numbers were taken.
 - **Impact selection is right-sized.** A leaf edit re-runs its four dependents; a hub edit that
   3,953 tests depend on re-runs 3,843 of them and takes a third of the cold run. Selection is by
