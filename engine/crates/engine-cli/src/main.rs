@@ -47,6 +47,8 @@ Options for `run`:
       --report <PATH>     also write a machine-readable JSON run report to PATH: one record per
                           node with its id, outcome, duration and flags. Compare runs by node id;
                           tallies hide two errors that cancel
+      --strict-markers    error on a mark nothing declared — in the config, by a plugin, or
+                          with tiderace.mark.register() in a conftest
   -q, --quiet             suppress the per-test lines; print only the tally
   -h, --help              show this message
 
@@ -107,6 +109,12 @@ fn main() -> ExitCode {
                     // SAFETY: as above.
                     unsafe { std::env::set_var("TIDERACE_KEYWORD_EXPR", expr) };
                 }
+                if opts.strict_markers {
+                    // The same route `-m` takes (TID-67): a project with no config file has
+                    // nowhere else to say it, and the shim is what enforces it.
+                    // SAFETY: as above.
+                    unsafe { std::env::set_var("TIDERACE_STRICT_MARKERS", "1") };
+                }
                 cmd_run(&opts.root, &opts.plan, opts.quiet, opts.report.as_deref())
             }
             Err(e) => usage_error(&e),
@@ -139,6 +147,8 @@ struct Options {
     marker_expr: Option<String>,
     /// `-k EXPR`: the name expression for this run, same precedence (TID-63).
     keyword_expr: Option<String>,
+    /// `--strict-markers`: an undeclared mark is an error (TID-67).
+    strict_markers: bool,
     /// `--report PATH`: where to write the per-node JSON report, if asked for.
     report: Option<PathBuf>,
 }
@@ -164,6 +174,7 @@ impl Options {
         let mut quiet = false;
         let mut marker_expr: Option<String> = None;
         let mut keyword_expr: Option<String> = None;
+        let mut strict_markers = false;
         let mut report: Option<PathBuf> = None;
         let mut root: Option<PathBuf> = None;
         let mut strategy_set = false;
@@ -230,6 +241,7 @@ impl Options {
                 "--no-shared-import" => plan.shared_import = false,
                 "-m" | "--markers" => marker_expr = Some(value("--markers")?),
                 "-k" | "--keyword" => keyword_expr = Some(value("--keyword")?),
+                "--strict-markers" => strict_markers = true,
                 "--report" => report = Some(PathBuf::from(value("--report")?)),
                 "-q" | "--quiet" => quiet = true,
                 other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
@@ -257,6 +269,7 @@ impl Options {
             quiet,
             marker_expr,
             keyword_expr,
+            strict_markers,
             report,
         })
     }
@@ -469,6 +482,16 @@ mod tests {
             assert_eq!(o.keyword_expr.as_deref(), Some("TestClient and not slow"));
         }
         assert!(parse(&["tests"]).unwrap().keyword_expr.is_none());
+    }
+
+    #[test]
+    fn strict_markers_is_a_bare_flag_off_by_default() {
+        assert!(!parse(&["tests"]).unwrap().strict_markers);
+        assert!(
+            parse(&["--strict-markers", "tests"])
+                .unwrap()
+                .strict_markers
+        );
     }
 
     #[test]
