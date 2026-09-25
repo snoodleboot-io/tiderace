@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use engine_core::cache::{Cache, CacheKey, CacheKeyBuilder, CachedOutcome, DirCache};
@@ -103,6 +103,7 @@ impl EngineHandler {
         requested: &[String],
         trusted: &HashSet<String>,
         must_fork: &HashSet<String>,
+        durations: &HashMap<String, u64>,
     ) -> Result<Vec<TestResult>, String> {
         let all = self.collect()?;
         let items: Vec<TestItem> = if requested.is_empty() {
@@ -122,6 +123,7 @@ impl EngineHandler {
             optimistic_no_fork(), // no-fork + restore by default (TIDERACE_FORCE_FORK=1 to disable)
             trusted,
             must_fork, // TID-33: recorded state-disturbers skip the in-process ladder entirely
+            durations, // TID-62: what each node cost last time, so the heaviest module goes first
         )
     }
 
@@ -153,6 +155,7 @@ impl EngineHandler {
             .filter(|(_, rec)| rec.must_fork)
             .map(|(node, _)| node.clone())
             .collect();
+        let durations = recorded_durations(&state);
 
         // ADR-E015 / TID-11: with the sub-interpreter tier on (`TIDERACE_SUBINTERP=1`), route the
         // sub-interp-**safe** modules through a parallel sub-interpreter pool (no fork; sound because
@@ -184,11 +187,16 @@ impl EngineHandler {
             if !fork_items.is_empty() {
                 let fork_nodes: Vec<String> =
                     fork_items.iter().map(|it| it.node_id.to_string()).collect();
-                fresh.extend(self.run_items_parallel(&fork_nodes, &trusted, &must_fork)?);
+                fresh.extend(self.run_items_parallel(
+                    &fork_nodes,
+                    &trusted,
+                    &must_fork,
+                    &durations,
+                )?);
             }
             fresh
         } else {
-            self.run_items_parallel(&[], &trusted, &must_fork)?
+            self.run_items_parallel(&[], &trusted, &must_fork, &durations)?
         };
 
         self.persist_results(&mut state, &fresh);
@@ -217,6 +225,7 @@ impl EngineHandler {
     /// Fold a batch of results into the persisted state (outcome + detail + deps + purity verdict) and
     /// rebaseline the content hashes of every touched file. Shared by the impact-aware + full runs.
     fn persist_results(&self, state: &mut PersistedState, results: &[TestResult]) {
+        state.record_durations(results); // TID-62: the next run's scheduler weights
         for r in results {
             let prior = state.tests.get(r.node_id.as_str());
             state.tests.insert(
@@ -348,7 +357,9 @@ impl EngineHandler {
                     .filter(|(_, rec)| rec.must_fork)
                     .map(|(node, _)| node.clone())
                     .collect();
-                let fresh = self.run_items_parallel(&to_execute, &HashSet::new(), &disturbers)?;
+                let durations = recorded_durations(&state);
+                let fresh =
+                    self.run_items_parallel(&to_execute, &HashSet::new(), &disturbers, &durations)?;
                 for r in &fresh {
                     results.push(to_rpc(r.clone()));
                 }
@@ -538,6 +549,16 @@ fn outcome_token(outcome: Outcome) -> &'static str {
         Outcome::XPass => "xpass",
         Outcome::Error => "error",
     }
+}
+
+/// The last run's per-node cost, as the scheduler's weights (TID-62). Kept as a `HashMap` for the
+/// `RunPlan`; the state stores a `BTreeMap` so the file is stable across saves.
+fn recorded_durations(state: &PersistedState) -> HashMap<String, u64> {
+    state
+        .durations
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect()
 }
 
 #[cfg(test)]

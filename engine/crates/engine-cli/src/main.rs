@@ -16,7 +16,9 @@ use std::process::ExitCode;
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, RunReport};
 use engine_core::reporter::{JsonReporter, Reporter};
-use engine_core::runner::{run_parallel, RunPlan, SchedulerKind, VerdictStore, WorkerStrategy};
+use engine_core::runner::{
+    record_durations, run_parallel, RunPlan, SchedulerKind, VerdictStore, WorkerStrategy,
+};
 
 const USAGE: &str = "\
 usage: tiderace <command> [options] <path>
@@ -285,15 +287,27 @@ fn effective_plan(plan: &RunPlan, item_count: usize, root: &Path) -> (RunPlan, S
     //
     // So `trusted_pure` stays unwired until TID-40 lands. Waiting costs nothing measurable: on the
     // reference fixture, reading it changed wall clock by 0.01s.
-    let must_fork = VerdictStore::load(root).must_fork();
-    let learned = if must_fork.is_empty() {
+    let store = VerdictStore::load(root);
+    let must_fork = store.must_fork();
+    // Durations too (TID-62). Safe from a file nobody re-verified for the same reason `must_fork`
+    // is: they only order work, so a stale one costs a little balance and never a wrong answer.
+    let durations = store.durations();
+    let mut learned: Vec<String> = Vec::new();
+    if !must_fork.is_empty() {
+        learned.push(format!("{} forced-fork", must_fork.len()));
+    }
+    if !durations.is_empty() {
+        learned.push(format!("{} durations", durations.len()));
+    }
+    let learned = if learned.is_empty() {
         String::new()
     } else {
-        format!(" learned={} forced-fork", must_fork.len())
+        format!(" learned={}", learned.join(","))
     };
     let effective = RunPlan {
         workers: plan.effective_workers(item_count),
         must_fork,
+        durations,
         ..plan.clone()
     };
     (effective, learned)
@@ -343,6 +357,17 @@ fn cmd_run(root: &Path, plan: &RunPlan, quiet: bool, report_path: Option<&Path>)
         }
     };
 
+    // The one thing `run` writes back (TID-62, ADR-E016): how long each node took, so the next
+    // run's scheduler hands out the heaviest module first instead of the one with the most tests.
+    // Not a verdict — the verdict store's "reading only" contract still holds for everything that
+    // can change an answer — and best-effort: a tree that cannot be written runs cold next time,
+    // which is not a failure of this run.
+    if let Err(e) = record_durations(root, &results) {
+        eprintln!(
+            "warning: could not record durations in {}: {e}",
+            root.display()
+        );
+    }
     let report = RunReport::new(results);
     if !quiet {
         for result in &report.results {

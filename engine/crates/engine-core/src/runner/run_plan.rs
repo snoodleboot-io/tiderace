@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::runner::{SchedulerKind, WorkerStrategy};
 
@@ -105,6 +105,13 @@ pub struct RunPlan {
     /// depend on this set being populated. What it buys is not paying for that discovery — a wasted
     /// in-process run plus a fork — on every subsequent run.
     pub must_fork: HashSet<String>,
+    /// Recorded wall-clock ms per reported node id, from earlier runs (TID-62, ADR-E016).
+    ///
+    /// The scheduler's weights. Empty on a cold run, where every collected item weighs 1 and the
+    /// queue's order is by test count — which on a suite whose per-test cost spans four orders of
+    /// magnitude is barely better than no order at all. With these, the heaviest module goes out
+    /// first, which is what keeps it off the tail of the run.
+    pub durations: HashMap<String, u64>,
 }
 
 impl Default for RunPlan {
@@ -118,6 +125,7 @@ impl Default for RunPlan {
             shared_import: true,
             trusted_pure: HashSet::new(),
             must_fork: HashSet::new(),
+            durations: HashMap::new(),
         }
     }
 }
