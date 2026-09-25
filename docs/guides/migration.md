@@ -61,6 +61,11 @@ rather than guessed:
    mark the provider `autouse=True`.
 6. **pytest builtins** (`tmp_path`, `monkeypatch`, `capsys`, …) — provide your own resource.
 7. **`pytest_*` hooks / `from pytest import …`** — port manually.
+8. **Order-dependent tests** — not flagged, because they are not visible in the source. A test that
+   passes under pytest only because of what an earlier test imported or left behind fails under
+   tiderace, whose execution order is not pytest's and is not promised to be (see
+   [What the engine does not promise](../design/parallel-execution.md#what-the-engine-does-not-promise)).
+   The failure names the dependence when it reads `sys.modules`; the fix is in the test.
 
 ## After migrating
 
