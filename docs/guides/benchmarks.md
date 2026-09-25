@@ -106,9 +106,6 @@ Read with the same care as the cold numbers:
   next run on both suites — the check [TID-40](https://linear.app/snoodleboot/issue/TID-40) was
   filed for. The same scenario on fx_corpus found [TID-72](https://linear.app/snoodleboot/issue/TID-72):
   a *conftest* that raised was letting 508 of 511 tests pass without it.
-- **Coverage capture costs the cold run about 1.9×** against the CLI's cold run without it (27.9s
-  on pirn-core in the cold benchmark). That is the price of the footprints the warm path runs on,
-  paid once per cold run.
 - **On the second run, tiderace beats xdist on the suite it lost.** `warm_vs_xdist.py` on
   pirn-agents: after one run has recorded every test's duration, the work units are ordered by
   cost, and interleaved against `pytest -n auto` at the same load the medians are **xdist 55.2s,
@@ -120,6 +117,23 @@ Read with the same care as the cold numbers:
   from **3.6s to 1.4s on pirn-core** and 2.2s to 1.9s on pirn-agents — the latter's floor is the
   project's own import graph, which importing even one test module pulls in, and which pytest pays
   too.
+- **Coverage capture cost a third of the cold run, and the reason was not coverage.** The daemon
+  records every test's dependency footprint, and with capture on a cold pirn-core run was **45.8s
+  against 34.1s** without it (+34%, per-test CPU 1.62×). Splitting that on the same binary, none of
+  the suspects moved it: `LINE` events and `PY_START` events cost the same, sending file names
+  without line numbers cost the same, instrumenting once per process instead of toggling
+  `sys.monitoring` around every test cost the same. What every capture arm did and the "off" arm
+  skipped was the static import closure (the TID-40 half of the footprint): each test module's
+  closure re-parsed and re-resolved ~100 files, 230ms per module, 575 modules, once per worker.
+  Skipping only that put capture-on level with capture-off. [TID-76](https://linear.app/snoodleboot/issue/TID-76)
+  memoises the per-file parse and resolution and parses only the import statements (exact, with a
+  full parse for anything that sits inside a string): all 537 closures take 0.46s instead of 73s,
+  and the cold run with capture on is **34.1s against 31.9s** (+7%; 0 failures, 5,602 nodes). The
+  same ticket found that `sys.monitoring.DISABLE` outlives the tool id, so on the in-process path
+  only the first test in a worker to enter a function was ever credited with its file: 147
+  pirn-core tests were missing dependencies, `test_agent_loop`'s up to 43 files each, and one
+  parametrized case its own file. Diffing per-node footprints between the old and new shim shows
+  the new one a strict superset on every one of the 147.
 - **A cached failure stays failed.** pirn-agents' warm runs report `2 failing` from cache: the
   order-dependent test the cold benchmark names, plus one more under the daemon's scheduling. A
   cached verdict is served until its dependencies change, which is the contract.
