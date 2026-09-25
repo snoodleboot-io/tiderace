@@ -2597,6 +2597,8 @@ class Engine:
         # `force_no_fork`: run THIS test in-process (no fork). On a trivial test that is ~90× cheaper than a
         # fork; on a real suite the win is smaller and depends on the parent's size (TID-18, TID-41).
         # The caller asserts it's pure (purity guard); the guard re-checks and flags any escapee.
+        global _NODES_RUN
+        _NODES_RUN += 1
         module_key = _module_key(node_id)
         # Under a directory whose conftest skipped itself (TID-48): pytest never collects these, so
         # nothing about the node — its class, its marks, its module — may be touched.
@@ -2887,8 +2889,8 @@ class Engine:
                 clean["pure"] = False
                 if self._disturbance:
                     clean["impurity"] = f"disturbed interpreter state: {self._disturbance}"
-                return clean
-        return resp
+                return _note_import_history(clean, pristine=True)
+        return _note_import_history(resp)
 
     def _run_inherited(self, node_id: str, deadline_ms: int, force_no_fork: bool,
                        trusted_pure: bool, own_too: bool = False) -> dict:
@@ -3592,6 +3594,19 @@ def _registered_marks(addopts: str, config_dir: str) -> tuple:
             names.add(name.partition("(")[0].strip())  # `name(args)` in a few suites
     if _config_values(config_dir, "strict_markers"):
         strict = True
+    # The native declaration surface (TID-67): `tiderace.mark.register("slow", ...)` in a conftest.
+    # Every conftest has been imported by the time this runs, so whatever they registered is here.
+    # Without it a suite written natively — no `import pytest` anywhere — still needed a *pytest*
+    # config block to declare its own marks, or strict checking rejected them.
+    try:
+        import tiderace
+        names.update(tiderace.mark.registered())
+    except Exception:  # noqa: BLE001 — no native package on this interpreter ⇒ no native marks
+        pass
+    # `--strict-markers` on the command line (TID-67), for the same reason `-m` and `-k` travel
+    # this way: a project with no config file at all has nowhere else to say it.
+    if os.environ.get("TIDERACE_STRICT_MARKERS") == "1":
+        strict = True
     return frozenset(names), strict
 
 
@@ -3741,6 +3756,36 @@ class _SkipAwareResult(unittest.TestResult):
             self.addSkip(test, str(err[1]))
             return
         super().addError(test, err)
+
+
+_NODES_RUN = 0  # how many nodes this process has run — whether a test here has neighbours (TID-70)
+
+_IMPORT_HISTORY_NOTE = (
+    "\n(tiderace) this assertion reads import history — which tests ran earlier in this process, and "
+    "in what order, is not pytest's file order and is not promised to be; a test that depends on it "
+    "is order-dependent under pytest too. See the execution-model docs, \"What the engine does not "
+    "promise\"."
+)
+
+
+def _note_import_history(result: dict, *, pristine: bool = False) -> dict:
+    """Append a one-line explanation to a failure that reads `sys.modules` (TID-70).
+
+    The one pirn-agents divergence in the whole benchmark was `assert "chromadb" not in sys.modules`
+    — true only if no earlier test in the same process imported it. That is not a defect in the
+    runner; it is a test asserting on something no runner promises, and pytest's own `-p randomly`
+    breaks it the same way. But a bare `AssertionError` against a runner the author has just
+    switched to reads as the runner's bug, so the failure now says what it depends on. Only when the
+    dependence is real: this process ran other tests before this one, or it is the clean room's
+    re-run of a demoted test, where the image is pristine and nothing was ever imported."""
+    if not pristine and _NODES_RUN <= 1:
+        return result
+    for record in [result, *result.get("variants", ())]:
+        detail = record.get("detail") or ""
+        if record.get("outcome") in ("failed", "error") and "sys.modules" in detail \
+                and _IMPORT_HISTORY_NOTE not in detail:
+            record["detail"] = detail + _IMPORT_HISTORY_NOTE
+    return result
 
 
 _XUNIT_DONE: set = set()  # (kind, qualified name) of module/class setups this process has run

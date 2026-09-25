@@ -28,6 +28,26 @@ flowchart TB
 - **WatermarkStack** — tracks fixture setup/teardown across scopes so finalizers run in the right
   order as the engine moves between modules and classes.
 
+## What the engine does not promise
+
+Two things a pytest suite may lean on without noticing, stated here so a divergence is read for
+what it is.
+
+**Execution order.** Tests are grouped by module for snapshot locality and handed to workers from a
+queue; which tests share a process, and in what order, is not pytest's file order and is not
+promised to be. A test that asserts on what an earlier test left behind — the canonical case is
+`assert "chromadb" not in sys.modules`, true only if nothing before it imported the package — is
+order-dependent under pytest too (`pytest -p randomly` breaks it the same way), and the fix belongs
+in the test. When such a failure mentions `sys.modules`, the engine appends a line saying so rather
+than leaving a bare `AssertionError` to read as the runner's bug. This was the single divergence on
+a 4,652-test suite in the benchmark, and it stays in that count: a real difference, not a defect.
+
+**Being a plugin host.** Parametrisation a pytest plugin injects — anyio's backends — is expanded so
+the node ids match, but a suite whose purpose is to test a pytest plugin through `pytester` is
+testing pytest, and running it means becoming pytest. See
+[12-plugin-host](../../planning/current/pure-rust-test-engine/design/12-plugin-host.md) for the
+boundary.
+
 ## The parallel pool
 
 The daemon runs **N wellsprings, one per core** (`engine-daemon/pool.rs`), each with its own warm
