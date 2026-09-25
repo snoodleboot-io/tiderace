@@ -114,9 +114,12 @@ Read with the same care as the cold numbers:
   cost, and interleaved against `pytest -n auto` at the same load the medians are **xdist 55.2s,
   tiderace 35.5s — 1.56×** (the cold, count-ordered first run is 45.4s). Of the 35.5s, about 4.2s
   is the run's fixed start-up — importing every test module once, before any worker exists — and
-  against a perfect-balance floor of 31.9s the second run sits at 1.11×. The start-up is the next
-  lever ([TID-75](https://linear.app/snoodleboot/issue/TID-75)): a one-test run after an edit is
-  2.5s, nearly all of it that import.
+  against a perfect-balance floor of 31.9s the second run sits at 1.11×. The start-up was the next
+  lever, and [TID-75](https://linear.app/snoodleboot/issue/TID-75) took it: a run now imports only
+  the test modules it executes (every conftest still, as pytest does). A one-dependent edit went
+  from **3.6s to 1.4s on pirn-core** and 2.2s to 1.9s on pirn-agents — the latter's floor is the
+  project's own import graph, which importing even one test module pulls in, and which pytest pays
+  too.
 - **A cached failure stays failed.** pirn-agents' warm runs report `2 failing` from cache: the
   order-dependent test the cold benchmark names, plus one more under the daemon's scheduling. A
   cached verdict is served until its dependencies change, which is the contract.
