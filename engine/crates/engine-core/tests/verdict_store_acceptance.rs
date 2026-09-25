@@ -216,3 +216,91 @@ fn a_missing_or_corrupt_state_file_is_a_cold_start() {
     assert!(store.is_empty() && store.trusted_pure().is_empty() && store.must_fork().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------------------------
+// TID-62 — durations are recorded by `run`, read back as weights, and are never a verdict.
+
+use engine_core::domain::{NodeId, Outcome, TestResult};
+use engine_core::runner::record_durations;
+
+fn timed(node: &str, ms: u64) -> TestResult {
+    TestResult::new(NodeId::new(node), Outcome::Passed, ms, "")
+}
+
+/// The round trip a `run` makes: write durations, and the next run's store reads them back.
+#[test]
+fn durations_round_trip_through_the_state_file() {
+    let dir = temp("durations");
+    record_durations(
+        &dir,
+        &[timed("t.py::fast", 3), timed("t.py::slow[case]", 1_200)],
+    )
+    .expect("a writable tree records durations");
+
+    let got = VerdictStore::load(&dir).durations();
+    assert_eq!(got.get("t.py::fast"), Some(&3));
+    assert_eq!(
+        got.get("t.py::slow[case]"),
+        Some(&1_200),
+        "recorded against the id the result reports — the case, not the collected item"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The soundness point of keeping durations off `TestRecord`: a `run` that has never seen the
+/// daemon must not leave behind anything the impact planner would read as "this test is up to
+/// date". A record with no changed deps is exactly that, and a record written just to carry a
+/// duration would have empty deps.
+#[test]
+fn recording_durations_never_creates_a_verdict() {
+    let dir = temp("no_verdict");
+    record_durations(&dir, &[timed("t.py::a", 10), timed("t.py::b", 20)]).unwrap();
+
+    let state = PersistedState::load(&dir.join(STATE_FILE));
+    assert!(
+        state.tests.is_empty(),
+        "durations are a hint, not a record — got records for {:?}",
+        state.tests.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        state.files.is_empty(),
+        "and no content hashes were baselined"
+    );
+    assert_eq!(state.durations.len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Everything the daemon wrote survives a `run` writing durations over it: verdicts, deps, hashes.
+#[test]
+fn recording_durations_preserves_every_other_field() {
+    let dir = temp("preserve");
+    seed(
+        &dir,
+        &[("t.py::a", record(&["src.py"], Some(true), false))],
+        &[("src.py", "x = 1\n")],
+    );
+    let before = PersistedState::load(&dir.join(STATE_FILE));
+    assert_eq!(before.tests.len(), 1, "seeded");
+
+    record_durations(&dir, &[timed("t.py::a", 7), timed("t.py::new", 9)]).unwrap();
+
+    let after = PersistedState::load(&dir.join(STATE_FILE));
+    assert_eq!(after.tests.len(), 1, "no record added for the unseen node");
+    assert_eq!(after.tests["t.py::a"].pure, Some(true));
+    assert_eq!(after.tests["t.py::a"].deps, vec!["src.py".to_string()]);
+    assert_eq!(after.files, before.files, "content hashes untouched");
+    assert_eq!(after.durations["t.py::a"], 7);
+    assert_eq!(after.durations["t.py::new"], 9);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The most recent measurement wins. A test that got slower must be re-ranked next run, not
+/// dragged by its history; averaging would keep a one-off 20-second hang in the weights for runs.
+#[test]
+fn the_latest_duration_replaces_the_earlier_one() {
+    let dir = temp("latest");
+    record_durations(&dir, &[timed("t.py::a", 1_000)]).unwrap();
+    record_durations(&dir, &[timed("t.py::a", 5)]).unwrap();
+    assert_eq!(VerdictStore::load(&dir).durations()["t.py::a"], 5);
+    let _ = std::fs::remove_dir_all(&dir);
+}

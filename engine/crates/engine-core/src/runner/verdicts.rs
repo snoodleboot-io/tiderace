@@ -18,11 +18,12 @@
 //! The two verdicts are **not** equally safe to trust, and this module treats them differently.
 //! See [`VerdictStore::trusted_pure`] and [`VerdictStore::must_fork`].
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::TestResult;
 use crate::exec::SafeModule;
 use crate::fixtures::ClosureHasher;
 
@@ -44,6 +45,19 @@ pub struct PersistedState {
     /// consumed by TID-11 routing). Re-probed only when the module's content hash changes.
     #[serde(default)]
     pub safe_modules: BTreeMap<String, SafeModule>,
+    /// reported node id -> wall-clock ms the last time it ran (TID-62, ADR-E016).
+    ///
+    /// A scheduling hint, kept apart from [`tests`](Self::tests) on purpose. A `TestRecord` is a
+    /// *verdict*: the impact planner treats a node with a record and no changed deps as up to date,
+    /// so a front end that wrote a record just to carry a duration would silently turn the next
+    /// impact-aware run into a stale pass. This map carries no such meaning. It orders work; a
+    /// wrong or stale value costs a little balance and cannot produce a wrong answer, which is what
+    /// lets `tiderace run` write it while still never writing a verdict.
+    ///
+    /// Keyed by the id the *result* reports — a parametrize case keeps its `[params]` — because that
+    /// is what was measured. The scheduler folds cases back onto the collected item it packs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub durations: BTreeMap<String, u64>,
 }
 
 /// One test's persisted result + dependency footprint.
@@ -64,6 +78,17 @@ pub struct TestRecord {
 }
 
 impl PersistedState {
+    /// Remember how long each of `results` took, for the next run's scheduler (TID-62).
+    ///
+    /// Overwrites rather than averages: the most recent measurement is the one most likely to
+    /// describe the next run, and a test that got faster or slower should be re-ranked on the next
+    /// run rather than dragged by history. Nothing else in the state is touched.
+    pub fn record_durations(&mut self, results: &[TestResult]) {
+        for r in results {
+            self.durations.insert(r.node_id.to_string(), r.duration_ms);
+        }
+    }
+
     /// Load from `path`; a missing or unparseable file yields empty state (cold start).
     pub fn load(path: &Path) -> Self {
         std::fs::read_to_string(path)
@@ -106,6 +131,23 @@ pub fn hash_file(root: &Path, rel: &str) -> String {
         }
         Err(_) => "missing".to_string(),
     }
+}
+
+/// Write **only** the durations of `results` into the state file beside `root` (TID-62).
+///
+/// This is the one thing `tiderace run` writes, and the module doc's "reading only" still holds for
+/// everything that is a verdict: the file is loaded, the durations map is updated, and the file is
+/// saved with every other field exactly as it was. A `run` on a tree the daemon has never seen
+/// creates the file with nothing but durations in it, which the daemon then reads as an empty
+/// verdict store plus ordering hints — the same thing it would have derived on its own first run.
+///
+/// Best-effort by contract: the caller warns and moves on if this fails. Losing the hint must not
+/// turn a green run red, and an unwritable tree is a tree that runs cold next time, not a failure.
+pub fn record_durations(root: &Path, results: &[TestResult]) -> std::io::Result<()> {
+    let path = root.join(STATE_FILE);
+    let mut state = PersistedState::load(&path);
+    state.record_durations(results);
+    state.save(&path)
 }
 
 /// Read-only view of what previous runs learned, for a front end that does not persist.
@@ -166,6 +208,20 @@ impl VerdictStore {
                     && !rec.deps.iter().any(|d| changed.contains(d))
             })
             .map(|(node, _)| node.clone())
+            .collect()
+    }
+
+    /// Every recorded duration, keyed by reported node id (TID-62).
+    ///
+    /// No staleness guard, for the same reason [`must_fork`](Self::must_fork) has none: a duration
+    /// only orders work. A stale one costs a little balance and cannot produce a wrong answer, so it
+    /// is safe to take from a file nobody re-verified. A node that no longer exists is simply never
+    /// looked up.
+    pub fn durations(&self) -> HashMap<String, u64> {
+        self.state
+            .durations
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
             .collect()
     }
 
