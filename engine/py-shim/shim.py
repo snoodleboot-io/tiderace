@@ -66,6 +66,48 @@ def _read_exactly(fd: int, n: int) -> bytes | None:
     return buf
 
 
+# The modules this run will execute, suite-relative (`tests/x/test_y.py`), or None for all of them
+# (TID-75). Set from `--modules <file>` before anything is imported. `_preimport` and `_discover`
+# import only these and the conftests above them: a run that executes one test used to pay the
+# import of every test module in the suite — 4s on pirn-agents, which was the whole of a one-test
+# run after an edit. A full run passes every module and is unchanged.
+_SELECTED_MODULES: set | None = None
+_SKIPPED_AT_DISCOVERY = 0  # test modules discovery did not import, for `TIDERACE_TIMING=1`
+
+
+class _PhaseTimer:
+    """Start-up phase timings to stderr under `TIDERACE_TIMING=1`; silent otherwise."""
+
+    def __init__(self) -> None:
+        self.on = os.environ.get("TIDERACE_TIMING") == "1"
+        self.last = time.perf_counter()
+
+    def mark(self, label: str) -> None:
+        if not self.on:
+            return
+        now = time.perf_counter()
+        print(f"tiderace: start-up: {label}: {now - self.last:.2f}s", file=sys.stderr, flush=True)
+        self.last = now
+
+
+def _select_modules(path: str) -> None:
+    global _SELECTED_MODULES
+    with open(path, encoding="utf-8") as fh:
+        _SELECTED_MODULES = {line.strip() for line in fh if line.strip()}
+    if os.environ.get("TIDERACE_TIMING") == "1":
+        print(f"tiderace: start-up: {len(_SELECTED_MODULES)} modules selected",
+              file=sys.stderr, flush=True)
+
+
+def _module_selected(rel: str) -> bool:
+    """Whether this run executes tests from `rel`. Only test *modules* are ever skipped: every
+    conftest in the tree is still imported, exactly as pytest imports every conftest at collection
+    whatever it later deselects — a conftest can carry a side effect the rest of the suite relies
+    on, and pruning the directories without selected modules cost 50 tests their isolation on
+    pirn-agents before this was understood."""
+    return _SELECTED_MODULES is None or rel in _SELECTED_MODULES
+
+
 def _flag_value(name: str) -> str | None:
     """The value of `--flag value` or `--flag=value` in argv, or None. Deliberately tiny: the shim
     takes a handful of flags and pulling in argparse would cost more at startup than it saves."""
@@ -1363,12 +1405,16 @@ def _discover(root: str) -> Registry:
                 # also a latent double-import: when the two spellings disagreed, the same file was
                 # imported twice under two names, so a module-level fixture could register against
                 # one copy while the test ran against the other.
-                rel = _module_name(os.path.relpath(path, root).replace(os.sep, "/"))
+                location = os.path.relpath(path, root).replace(os.sep, "/")
+                if not _module_selected(location):
+                    global _SKIPPED_AT_DISCOVERY
+                    _SKIPPED_AT_DISCOVERY += 1
+                    continue  # this run will not execute it (TID-75)
+                rel = _module_name(location)
                 try:
                     module = importlib.import_module(rel)
                 except (Exception, *_skip_exceptions()):  # noqa: BLE001 — surfaces per-test, not at discovery
                     continue
-                location = os.path.relpath(path, root).replace(os.sep, "/")
                 test_modules.append((module, location))
             else:
                 continue
@@ -4190,6 +4236,8 @@ def _preimport(root: str) -> None:
                 if _is_ignored(os.path.join(current, name)):
                     continue
                 rel = os.path.relpath(os.path.join(current, name), root).replace(os.sep, "/")
+                if not _module_selected(rel):
+                    continue  # this run will not execute it (TID-75)
                 try:
                     # Named as `_discover` and execution name it (TID-37); a module-level
                     # `importorskip` is a skip, not a reason to take the pool parent down (TID-48).
@@ -4508,9 +4556,22 @@ def serve() -> int:
     # Ancestor conftests before `_preimport` (TID-19): a root conftest exists to set things up that
     # must already be true when test modules import — env defaults, warning filters, `sys.path`. pytest
     # loads conftests first for the same reason. `_discover` reads the memoised result back.
+    modules_file = _flag_value("--modules")
+    if modules_file:
+        _select_modules(modules_file)  # before anything is imported (TID-75)
+    # `TIDERACE_TIMING=1` prints how long each start-up phase took, to stderr. The start-up is a
+    # fixed cost every run pays before a worker exists; knowing which phase is the cost is what
+    # decides what to do about it (TID-75).
+    _phase = _PhaseTimer()
     _load_ancestor_conftests(root)
+    _phase.mark("ancestor conftests")
     _preimport(root)
+    _phase.mark("pre-import test modules")
     reg = _discover(root)
+    _phase.mark("discover (conftests, fixtures, hooks, marks)")
+    if _phase.on and _SKIPPED_AT_DISCOVERY:
+        print(f"tiderace: start-up: {_SKIPPED_AT_DISCOVERY} test modules not imported (unselected)",
+              file=sys.stderr, flush=True)
     engine_args = dict(reg=reg, no_fork=no_fork, root=root, coverage=coverage,
                        purity_guard=purity, restore=restore)
     # Pool mode (TID-4): fork the workers from this one imported image instead of importing per

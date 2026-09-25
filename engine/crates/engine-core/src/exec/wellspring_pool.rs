@@ -66,6 +66,19 @@ impl WellspringPool {
         restore: bool,
         size: usize,
     ) -> Result<Self> {
+        Self::launch_selected(python, shim, root, restore, size, None)
+    }
+
+    /// As [`launch`](Self::launch), with the parent importing only the modules named in `modules`
+    /// (a file of suite-relative paths, one per line) and the conftests above them (TID-75).
+    pub fn launch_selected(
+        python: &str,
+        shim: &Path,
+        root: &Path,
+        restore: bool,
+        size: usize,
+        modules: Option<&Path>,
+    ) -> Result<Self> {
         let size = size.max(1);
         let socket_path = Self::socket_path();
         // A stale socket from a killed run would make `bind` fail; the path is unique per process
@@ -83,6 +96,9 @@ impl WellspringPool {
             .arg(&socket_path);
         if restore {
             cmd.arg("--restore");
+        }
+        if let Some(file) = modules {
+            cmd.arg("--modules").arg(file);
         }
         let parent = cmd
             // Pin native thread pools — threaded BLAS/OMP + fork() is a known hazard, and this
