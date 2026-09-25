@@ -1853,7 +1853,8 @@ def _watched_packages(module_key: str) -> tuple:
     return result
 
 
-_REGISTRY_TARGETS: dict = {}  # module key -> (sys.modules size, [(label, container), ...])
+# module key -> (sys.modules size, [(name, module)] watched, their namespace sizes, targets)
+_REGISTRY_TARGETS: dict = {}
 
 
 def _registry_targets(module_key: str) -> list:
@@ -1861,13 +1862,26 @@ def _registry_targets(module_key: str) -> list:
 
     Finding them means walking every module of the watched packages and every name in it, which
     measured at 7ms — far more than the tests it wraps, and paid twice per test. The containers
-    themselves are few (two, on one 4,500-test suite), so the scan is cached and redone only when
-    `sys.modules` has grown, which is the only way a new one can appear."""
+    themselves are few (two, on one 4,500-test suite), so the scan is cached.
+
+    The cache is valid while nothing that could add a container has happened (TID-68). Three things
+    can: `sys.modules` grew (a new module imported); a watched module was **replaced** (removed and
+    re-imported — TID-56's deletions do exactly that — so its containers are new objects and the
+    cached ones are stale references); or a watched module's namespace **grew** (a test or fixture
+    assigned `lib.REGISTRY = {}` onto a module that already existed). The first is one integer; the
+    other two are one identity check and one `len` per watched module, which is the packages the
+    test file imports rather than all of `sys.modules` — cheap enough to pay per test, which the
+    full scan is not. The earlier cache keyed on the first alone and its docstring called that "the
+    only way a new one can appear"; it was not."""
     size = len(sys.modules)
     cached = _REGISTRY_TARGETS.get(module_key)
     if cached is not None and cached[0] == size:
-        return cached[1]
+        _, watched, sizes, targets = cached
+        if (all(sys.modules.get(name) is module for name, module in watched)
+                and tuple(len(vars(module)) for _, module in watched) == sizes):
+            return targets
     roots = _watched_packages(module_key)
+    watched: list = []
     targets: list = []
     if roots:
         for name, module in list(sys.modules.items()):
@@ -1876,13 +1890,15 @@ def _registry_targets(module_key: str) -> list:
             namespace = getattr(module, "__dict__", None)
             if not namespace:
                 continue
+            watched.append((name, module))
             for attr, value in list(namespace.items()):
                 # Exact types only: a subclass may define `__len__` arbitrarily, and a proxy object
                 # can raise on access (TID-43's lazy proxies are exactly that shape).
                 if attr.startswith("__") or type(value) not in (dict, list, set):
                     continue
                 targets.append((f"{name}.{attr}", value))
-    _REGISTRY_TARGETS[module_key] = (size, targets)
+    sizes = tuple(len(vars(module)) for _, module in watched)
+    _REGISTRY_TARGETS[module_key] = (size, watched, sizes, targets)
     return targets
 
 
