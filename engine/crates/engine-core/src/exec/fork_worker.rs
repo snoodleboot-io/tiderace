@@ -41,10 +41,21 @@ impl ForkWorker {
     /// shim's `must_fork` restorability check is itself gated on restore, so an unrestorable module
     /// would run in-process too. Pairing them here makes that combination unconstructible.
     pub fn launch_optimistic(python: &str, shim: &Path, root: &Path) -> Result<Self> {
+        Self::launch_selected(python, shim, root, true, None)
+    }
+
+    /// Launch with the ladder on or off, importing only the modules named in `modules` (TID-75).
+    pub fn launch_selected(
+        python: &str,
+        shim: &Path,
+        root: &Path,
+        optimistic: bool,
+        modules: Option<&Path>,
+    ) -> Result<Self> {
         Ok(Self {
-            wellspring: Wellspring::launch_with(python, shim, root, true)?,
+            wellspring: Wellspring::launch_selected(python, shim, root, optimistic, modules)?,
             deadline_ms: 5_000,
-            optimistic_no_fork: true,
+            optimistic_no_fork: optimistic,
             trusted: HashSet::new(),
             must_fork: HashSet::new(),
         })

@@ -58,6 +58,8 @@ struct Target {
     python: String,
     shim: PathBuf,
     root: PathBuf,
+    /// A file naming the modules this run executes, for a selective start-up (TID-75).
+    modules: Option<PathBuf>,
 }
 
 impl SubprocessWorker {
@@ -78,7 +80,16 @@ impl SubprocessWorker {
             python: python.into(),
             shim: shim.to_path_buf(),
             root: root.to_path_buf(),
+            modules: None,
         });
+        self
+    }
+
+    /// Import only the modules named in `file` at start-up (TID-75). Requires [`with_target`].
+    pub fn with_modules(mut self, file: &Path) -> Self {
+        if let Some(t) = self.target.as_mut() {
+            t.modules = Some(file.to_path_buf());
+        }
         self
     }
 
@@ -101,6 +112,12 @@ impl SubprocessWorker {
             // silently ran with no isolation at all (an appended module-level list stayed appended).
             // Set it explicitly — correctness here must not depend on the caller's environment.
             .arg("--restore")
+            .args(target.modules.iter().flat_map(|m| {
+                [
+                    std::ffi::OsString::from("--modules"),
+                    m.clone().into_os_string(),
+                ]
+            }))
             // Pin native thread pools (threaded BLAS/OMP is a hazard even without fork).
             .env("OPENBLAS_NUM_THREADS", "1")
             .env("OMP_NUM_THREADS", "1")

@@ -31,10 +31,29 @@ impl Wellspring {
     /// passing the flag explicitly is what keeps correctness off the caller's environment — the same
     /// reasoning `SubprocessWorker` already applies to its own launch.
     pub fn launch_with(python: &str, shim: &Path, root: &Path, restore: bool) -> Result<Self> {
+        Self::launch_selected(python, shim, root, restore, None)
+    }
+
+    /// As [`launch_with`](Wellspring::launch_with), importing only the modules named in `modules`
+    /// — a file of suite-relative paths, one per line — and the conftests above them (TID-75).
+    ///
+    /// The shim's start-up imports every test module before a worker exists: 4s on pirn-agents,
+    /// which was the whole of a one-test run after an edit. `None` keeps the full import, which is
+    /// what a full run needs and what every caller that has no selection gets.
+    pub fn launch_selected(
+        python: &str,
+        shim: &Path,
+        root: &Path,
+        restore: bool,
+        modules: Option<&Path>,
+    ) -> Result<Self> {
         let mut cmd = Command::new(python);
         cmd.arg(shim).arg(root);
         if restore {
             cmd.arg("--restore");
+        }
+        if let Some(file) = modules {
+            cmd.arg("--modules").arg(file);
         }
         let mut child = cmd
             // Pin native thread pools — threaded BLAS/OMP + fork() is a known hazard (Phase-1

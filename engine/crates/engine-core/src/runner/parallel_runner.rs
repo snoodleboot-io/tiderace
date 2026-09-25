@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -115,6 +115,11 @@ fn run_batched(
     let threads = workers.min(pending.len());
     let queue = Arc::new(Mutex::new(pending));
 
+    // The modules this run executes, for the shim's selective start-up (TID-75). Written to a
+    // file rather than passed on the command line: a suite can name thousands of modules, and one
+    // argument is capped well below that. Removed once every worker has started and finished.
+    let modules_file = ModulesFile::write(&items)?;
+
     // TID-4: one imported image, forked per worker. Stood up before the thread loop so the import is
     // finished — and paid once — before any worker starts. Fork-tier only: the subprocess and
     // sub-interpreter tiers have no wellspring to share, by construction.
@@ -123,7 +128,17 @@ fn run_batched(
         // Launched with restore unconditionally, exactly as `ForkWorker::launch_optimistic` does:
         // it costs nothing when the ladder is off, and it makes the unsound combination — in-process
         // execution with no snapshot — unreachable rather than merely unused.
-        Some(WellspringPool::launch(python, shim, root, true, threads).map_err(|e| e.to_string())?)
+        Some(
+            WellspringPool::launch_selected(
+                python,
+                shim,
+                root,
+                true,
+                threads,
+                Some(&modules_file.path),
+            )
+            .map_err(|e| e.to_string())?,
+        )
     } else {
         None
     };
@@ -133,6 +148,7 @@ fn run_batched(
         deadline_ms: plan.deadline_ms,
         optimistic_no_fork: plan.optimistic_no_fork,
     };
+    let modules_path = modules_file.path.clone();
     // The whole run's sets, not one unit's slice: a thread now runs many units and cannot know in
     // advance which node ids it will see. Membership is what both are used for, so a larger set
     // costs a hash lookup and nothing else.
@@ -143,6 +159,7 @@ fn run_batched(
     for _ in 0..threads {
         let (py, sh, rt) = (python.to_string(), shim.to_path_buf(), root.to_path_buf());
         let (queue, trusted, must_fork) = (queue.clone(), trusted.clone(), must_fork.clone());
+        let modules_path = modules_path.clone();
         // A pooled transport is owned outright, so it moves into the thread without borrowing the
         // pool. The pool itself must outlive the threads — it is dropped after the joins below,
         // because its parent process only exits once every worker connection has closed.
@@ -164,13 +181,13 @@ fn run_batched(
                                 .with_trusted_pure(trusted)
                                 .with_must_fork(must_fork),
                         ),
-                        None => new_worker(exec, &py, &sh, &rt, trusted, must_fork)?,
+                        None => new_worker(exec, &py, &sh, &rt, &modules_path, trusted, must_fork)?,
                     }
                 }
                 #[cfg(not(unix))]
                 {
                     let _ = pooled;
-                    new_worker(exec, &py, &sh, &rt, trusted, must_fork)?
+                    new_worker(exec, &py, &sh, &rt, &modules_path, trusted, must_fork)?
                 }
             };
             let mut mine = Vec::new();
@@ -295,6 +312,7 @@ fn new_worker(
     py: &str,
     sh: &Path,
     rt: &Path,
+    modules: &Path,
     trusted: HashSet<String>,
     must_fork: HashSet<String>,
 ) -> Result<Box<dyn Worker>, String> {
@@ -309,11 +327,8 @@ fn new_worker(
             {
                 // The ladder and restore are launched together or not at all — see
                 // `ForkWorker::launch_optimistic`.
-                let launched = if optimistic_no_fork {
-                    ForkWorker::launch_optimistic(py, sh, rt)
-                } else {
-                    ForkWorker::launch(py, sh, rt)
-                };
+                let launched =
+                    ForkWorker::launch_selected(py, sh, rt, optimistic_no_fork, Some(modules));
                 Ok(Box::new(
                     launched
                         .map_err(|e| format!("failed to launch wellspring: {e}"))?
@@ -326,7 +341,7 @@ fn new_worker(
             {
                 // The optimistic ladder and the trusted-pure set are fork-only knobs; name them here
                 // so this arm consumes them on platforms where the fork branch is compiled out.
-                let _ = (optimistic_no_fork, trusted, must_fork);
+                let _ = (optimistic_no_fork, trusted, must_fork, modules);
                 Err("fork is unavailable on this platform".to_string())
             }
         }
@@ -336,7 +351,9 @@ fn new_worker(
             // Nothing to demote to: this tier runs in-process by configuration, not by guess.
             let _ = (must_fork, trusted);
             Ok(Box::new(
-                SubprocessWorker::new(deadline_ms, 1).with_target(py, sh, rt),
+                SubprocessWorker::new(deadline_ms, 1)
+                    .with_target(py, sh, rt)
+                    .with_modules(modules),
             ))
         }
         // Routed before batching; reaching here would mean a nested pool.
@@ -382,6 +399,41 @@ impl<'a> RecordedWeights<'a> {
             .map(|(_, ms)| *ms)
             .sum();
         total.max(1)
+    }
+}
+
+/// The file naming the modules a run executes, handed to every worker's start-up (TID-75).
+///
+/// Removed on drop, which is after every worker thread has been joined: a worker reads it when it
+/// starts, and the last thread may start after the first has already finished.
+struct ModulesFile {
+    path: PathBuf,
+}
+
+impl ModulesFile {
+    fn write(items: &[TestItem]) -> Result<Self, String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let mut modules: Vec<String> = items
+            .iter()
+            .map(|i| locality_key(i.node_id.as_str()))
+            .collect();
+        modules.sort();
+        modules.dedup();
+        let path = std::env::temp_dir().join(format!(
+            "tiderace-modules-{}-{}.txt",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, modules.join("\n") + "\n")
+            .map_err(|e| format!("could not write the module selection: {e}"))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for ModulesFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
