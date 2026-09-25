@@ -1515,6 +1515,10 @@ def _register_anyio_backend(reg: Registry) -> None:
 
 
 _DIR_SKIPS: dict[str, str] = {}  # suite-relative dir ("" = everything) -> why its conftest skipped it
+# suite-relative dir ("" = everything) -> the traceback of its conftest's failed import (TID-72).
+# pytest stops at collection with one error and runs nothing; every test under that conftest is
+# reported here with the conftest's own traceback, which is the same verdict per test.
+_DIR_ERRORS: dict[str, str] = {}
 
 
 def _dir_skip(rel_path: str) -> str | None:
@@ -1528,6 +1532,20 @@ def _dir_skip(rel_path: str) -> str | None:
         reason = _DIR_SKIPS.get("/".join(parts[:depth]))
         if reason is not None:
             return reason
+    return None
+
+
+def _dir_error(rel_path: str) -> str | None:
+    """The conftest import failure covering `rel_path`, if one of its conftests did not import."""
+    if not _DIR_ERRORS:
+        return None
+    if "" in _DIR_ERRORS:
+        return _DIR_ERRORS[""]
+    parts = rel_path.split("/")
+    for depth in range(len(parts), 0, -1):
+        detail = _DIR_ERRORS.get("/".join(parts[:depth]))
+        if detail is not None:
+            return detail
     return None
 
 
@@ -1553,11 +1571,17 @@ def _import_conftest(path: str, rel_dir: str):
         # parent, and the entire run failed before a single test started.
         _DIR_SKIPS["" if rel_dir.startswith("..") else rel_dir] = _skip_reason(exc)
         return None
-    except Exception as exc:  # noqa: BLE001 — a broken conftest costs its fixtures, not the run
-        # Say so. A conftest that fails to import takes its fixtures and its side effects with it, and
-        # the tests below it then fail for reasons that name something else entirely — the exact
-        # confusion TID-19 was filed about.
+    except Exception as exc:  # noqa: BLE001 — a broken conftest is every test under it, not the run
+        # A conftest that fails to import takes its fixtures and its side effects with it. The tests
+        # below it used to run anyway and mostly pass — 508 of 511 on fx_corpus with a conftest that
+        # raised on import — while the few that needed a fixture failed naming the fixture rather than
+        # the cause (TID-72). pytest stops at collection with the conftest's error and runs nothing;
+        # the per-test equivalent is every test under that conftest erroring with that traceback,
+        # which `run()` reports the way it reports a conftest-level skip (TID-48).
         print(f"tiderace: could not import {path}: {exc!r}", file=sys.stderr, flush=True)
+        _DIR_ERRORS["" if rel_dir.startswith("..") else rel_dir] = (
+            f"conftest {path} failed to import:\n"
+            + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
         return None
 
 
@@ -2602,6 +2626,11 @@ class Engine:
         # nothing about the node — its class, its marks, its module — may be touched.
         if _is_ignored(os.path.join(_ROOT or ".", module_key)):
             return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
+        # A conftest that did not import (TID-72), before the skip: a directory whose setup is broken
+        # is broken for every test in it, and that is an error pytest would have stopped on.
+        dir_error = _dir_error(module_key)
+        if dir_error is not None:
+            return {"node_id": node_id, "outcome": "error", "detail": dir_error}
         dir_skip = _dir_skip(module_key)
         if dir_skip is not None:
             # `skip_origin` names the module that never imported, so the summary can report skips in
