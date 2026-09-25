@@ -1976,7 +1976,8 @@ def _watched_packages(module_key: str) -> tuple:
     return result
 
 
-_REGISTRY_TARGETS: dict = {}  # module key -> (sys.modules size, [(label, container), ...])
+# module key -> (sys.modules size, [(name, module)] watched, their namespace sizes, targets)
+_REGISTRY_TARGETS: dict = {}
 
 
 def _registry_targets(module_key: str) -> list:
@@ -1984,13 +1985,26 @@ def _registry_targets(module_key: str) -> list:
 
     Finding them means walking every module of the watched packages and every name in it, which
     measured at 7ms — far more than the tests it wraps, and paid twice per test. The containers
-    themselves are few (two, on one 4,500-test suite), so the scan is cached and redone only when
-    `sys.modules` has grown, which is the only way a new one can appear."""
+    themselves are few (two, on one 4,500-test suite), so the scan is cached.
+
+    The cache is valid while nothing that could add a container has happened (TID-68). Three things
+    can: `sys.modules` grew (a new module imported); a watched module was **replaced** (removed and
+    re-imported — TID-56's deletions do exactly that — so its containers are new objects and the
+    cached ones are stale references); or a watched module's namespace **grew** (a test or fixture
+    assigned `lib.REGISTRY = {}` onto a module that already existed). The first is one integer; the
+    other two are one identity check and one `len` per watched module, which is the packages the
+    test file imports rather than all of `sys.modules` — cheap enough to pay per test, which the
+    full scan is not. The earlier cache keyed on the first alone and its docstring called that "the
+    only way a new one can appear"; it was not."""
     size = len(sys.modules)
     cached = _REGISTRY_TARGETS.get(module_key)
     if cached is not None and cached[0] == size:
-        return cached[1]
+        _, watched, sizes, targets = cached
+        if (all(sys.modules.get(name) is module for name, module in watched)
+                and tuple(len(vars(module)) for _, module in watched) == sizes):
+            return targets
     roots = _watched_packages(module_key)
+    watched: list = []
     targets: list = []
     if roots:
         for name, module in list(sys.modules.items()):
@@ -1999,13 +2013,15 @@ def _registry_targets(module_key: str) -> list:
             namespace = getattr(module, "__dict__", None)
             if not namespace:
                 continue
+            watched.append((name, module))
             for attr, value in list(namespace.items()):
                 # Exact types only: a subclass may define `__len__` arbitrarily, and a proxy object
                 # can raise on access (TID-43's lazy proxies are exactly that shape).
                 if attr.startswith("__") or type(value) not in (dict, list, set):
                     continue
                 targets.append((f"{name}.{attr}", value))
-    _REGISTRY_TARGETS[module_key] = (size, targets)
+    sizes = tuple(len(vars(module)) for _, module in watched)
+    _REGISTRY_TARGETS[module_key] = (size, watched, sizes, targets)
     return targets
 
 
@@ -3363,6 +3379,7 @@ class Engine:
     def teardown_all(self) -> None:
         while self.active:
             _teardown(self.active.pop().gen)
+        _xunit_class_teardown()  # tearDownClass / teardown_class, once per class (TID-64)
         _xunit_module_teardown()  # tearDownModule / teardown_module, once this worker is done
 
 
@@ -3727,6 +3744,15 @@ class _SkipAwareResult(unittest.TestResult):
 
 
 _XUNIT_DONE: set = set()  # (kind, qualified name) of module/class setups this process has run
+_XUNIT_CLASSES: dict = {}  # class key -> the class object, so its teardown can be found at worker end
+# class key -> (outcome, detail) when the class's own setup did not complete (TID-64). A setUpClass
+# that skips or raises decides the outcome of EVERY method in the class, not only the one that
+# happened to trigger it — which is what once-per-class means when the first attempt fails.
+_XUNIT_CLASS_FAILED: dict = {}
+
+
+def _xunit_class_key(cls) -> tuple:
+    return ("class", f"{_safe_getattr(cls, '__module__', '')}.{_safe_getattr(cls, '__name__', '')}")
 
 
 def _call_hook(owner, names: tuple, *args) -> bool:
@@ -3763,6 +3789,22 @@ def _xunit_module_setup(module) -> None:
     _call_hook(module, ("setUpModule", "setup_module"), module)
 
 
+def _xunit_class_teardown() -> None:
+    """`tearDownClass` / `teardown_class` for every class this process set up, once each (TID-64).
+
+    Runs before the module teardowns, since a class's teardown may still need its module. Only
+    classes whose setup *completed* are torn down: one that skipped or raised never acquired
+    whatever its teardown releases."""
+    for key, cls in list(_XUNIT_CLASSES.items()):
+        if key not in _XUNIT_CLASS_FAILED:
+            try:
+                _call_hook(cls, ("tearDownClass", "teardown_class"), cls)
+            except Exception:  # noqa: BLE001 — a teardown fault must not mask the run's results
+                pass
+        _XUNIT_CLASSES.pop(key, None)
+        _XUNIT_DONE.discard(key)
+
+
 def _xunit_module_teardown() -> None:
     """`tearDownModule` / `teardown_module` for every module this process set up."""
     for kind, name in list(_XUNIT_DONE):
@@ -3797,10 +3839,11 @@ def _xunit_test_hooks(module, style: str, node_id: str, target) -> tuple:
 def _xunit_class_setup(cls) -> None:
     """pytest's `setup_class`, once per class per process. unittest's `setUpClass` is run by
     `_invoke_unittest`, which needs it inside its own result handling."""
-    key = ("class", f"{_safe_getattr(cls, '__module__', '')}.{_safe_getattr(cls, '__name__', '')}")
+    key = _xunit_class_key(cls)
     if key in _XUNIT_DONE:
         return
     _XUNIT_DONE.add(key)
+    _XUNIT_CLASSES[key] = cls  # so `teardown_class` runs at worker end (TID-64) — it never did before
     _call_hook(cls, ("setup_class",), cls)
 
 
@@ -3809,24 +3852,34 @@ def _invoke_unittest(module, node_id: str) -> tuple[str, str]:
     `tearDownClass` (which `TestCase.run()` alone does NOT call), and map `@expectedFailure` /
     unexpected-success / `subTest` to the right node outcome.
 
-    Class setup/teardown run per test here (correctness over the once-per-class optimization — the
-    fork model would re-run them per child anyway; a class-scope mapping is a later refinement)."""
+    `setUpClass` runs once per class per *process* and `tearDownClass` once at worker end, the
+    contract unittest's own runner keeps (TID-64). They used to run around every method — right when
+    every test forked, since each child was its own process, and wrong under the in-process ladder,
+    where a class's methods share one process: N× the setup cost, and a `setUpClass` that opens a
+    database or counts its own calls behaved differently from `python -m unittest`. A forked child
+    inherits `_XUNIT_DONE`, so a class the parent set up is not set up again there either."""
     cls_name, method = _class_method(node_id)
     cls = module.__dict__[cls_name]
+    key = _xunit_class_key(cls)
+    if key in _XUNIT_CLASS_FAILED:
+        return _XUNIT_CLASS_FAILED[key]
+    if key not in _XUNIT_DONE:
+        _XUNIT_DONE.add(key)
+        _XUNIT_CLASSES[key] = cls
+        try:
+            cls.setUpClass()
+        except _SKIP_EXCEPTIONS as exc:  # setUpClass may skip the whole class
+            _XUNIT_CLASS_FAILED[key] = ("skipped", str(exc))
+            return _XUNIT_CLASS_FAILED[key]
+        except Exception as exc:  # noqa: BLE001 — unittest errors every method of the class
+            _XUNIT_CLASS_FAILED[key] = (
+                "error", "".join(traceback.format_exception_only(type(exc), exc)))
+            return _XUNIT_CLASS_FAILED[key]
     result = _SkipAwareResult()
-    ran_setup = False
     try:
-        cls.setUpClass()
-        ran_setup = True
         cls(method).run(result)
-    except _SKIP_EXCEPTIONS as exc:  # setUpClass may skip the whole class
+    except _SKIP_EXCEPTIONS as exc:
         return "skipped", str(exc)
-    finally:
-        if ran_setup:
-            try:
-                cls.tearDownClass()
-            except Exception:  # noqa: BLE001 — teardown error must not mask the test outcome
-                pass
 
     if result.errors:
         # unittest files body, setUp and tearDown exceptions all under `errors`, and pytest reports
