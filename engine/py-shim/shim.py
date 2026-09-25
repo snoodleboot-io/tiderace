@@ -2970,6 +2970,12 @@ class Engine:
             if res.get("variants"):
                 variants.extend(res["variants"])
                 continue
+            # A child that expanded to nothing was deselected — `-m` or `-k` said no, and `run()`
+            # answered with the empty expansion pytest's absence-from-the-tally means. Building a
+            # variant from that answer's placeholder outcome reported every deselected inherited
+            # method as a pass that never ran: 101 of them on pirn-agents under `-k nomatch` (TID-74).
+            if res.get("expanded"):
+                continue
             variant = {
                 "node_id": child,
                 "outcome": res["outcome"],
@@ -2983,6 +2989,12 @@ class Engine:
             if res.get("must_fork"):
                 variant["must_fork"] = True
             variants.append(variant)
+        # Every child deselected ⇒ the class contributes nothing, exactly as an inherited-nothing
+        # class does above. `_aggregate` of an empty list is `max()` of nothing, and that exception
+        # escaping `run()` took the whole worker down — "shim closed mid-run" for a `-k` that matched
+        # no inherited method (TID-74, the shape TID-43 was about).
+        if not variants:
+            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
         worst = _aggregate([(v["outcome"], v.get("detail", "")) for v in variants])
         return {"node_id": node_id, "outcome": worst[0], "detail": worst[1],
                 "expanded": True, "variants": variants}

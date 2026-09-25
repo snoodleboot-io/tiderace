@@ -60,6 +60,14 @@ fn write_project() -> PathBuf {
          class TestGroup:\n    def test_three(self):\n        assert True\n",
     )
     .unwrap();
+    // An inherited method: collected as the class, expanded at runtime. Under `-k`, its
+    // deselection used to come back as a phantom pass (TID-74).
+    std::fs::write(
+        tests.join("test_gamma.py"),
+        "class Base:\n    def test_inherited(self):\n        assert True\n\n\
+         class TestDerived(Base):\n    pass\n",
+    )
+    .unwrap();
     std::fs::write(
         tests.join("test_beta.py"),
         "import pytest\n\n\
@@ -141,6 +149,7 @@ fn k_selects_exactly_what_pytest_selects() {
         "slow",                 // a mark name is a keyword too
         "test_cases[1-a]",      // the whole case id, brackets and all
         "beta and not skipped", // a deselected skip is not a skip
+        "inherited",            // an inherited method, collected as its class (TID-74)
     ] {
         let want = pytest_selects(&python, &tests, expr);
         assert!(
@@ -164,8 +173,16 @@ fn an_expression_that_selects_nothing_is_an_empty_run_not_an_error() {
     };
     let dir = write_project();
     let tests = dir.join("tests");
-    let (got, stderr) = tiderace_selects(&python, &tests, "nomatch");
-    assert!(got.is_empty(), "{got:?}");
-    assert!(stderr.contains("0 total"), "{stderr}");
+    // The second expression deselects the only method of an inherited-methods class. Every child of
+    // such a class deselected used to come back as a phantom pass — and then as a dead worker, once
+    // the empty expansion reached an aggregate of nothing (TID-74).
+    for expr in ["nomatch", "TestDerived and not inherited"] {
+        let (got, stderr) = tiderace_selects(&python, &tests, expr);
+        assert!(
+            got.is_empty(),
+            "-k {expr:?} selects nothing in pytest — got {got:?}"
+        );
+        assert!(stderr.contains("0 total"), "{stderr}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
