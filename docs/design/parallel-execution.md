@@ -33,14 +33,29 @@ flowchart TB
 Two things a pytest suite may lean on without noticing, stated here so a divergence is read for
 what it is.
 
-**Execution order.** Tests are grouped by module for snapshot locality and handed to workers from a
-queue; which tests share a process, and in what order, is not pytest's file order and is not
-promised to be. A test that asserts on what an earlier test left behind — the canonical case is
-`assert "chromadb" not in sys.modules`, true only if nothing before it imported the package — is
-order-dependent under pytest too (`pytest -p randomly` breaks it the same way), and the fix belongs
-in the test. When such a failure mentions `sys.modules`, the engine appends a line saying so rather
-than leaving a bare `AssertionError` to read as the runner's bug. This was the single divergence on
-a 4,652-test suite in the benchmark, and it stays in that count: a real difference, not a defect.
+**Execution order across modules.** A module's tests run in one process, in file order, as
+pytest runs them (TID-80): a file whose tests hand each other state through a fixture, a library or
+a mock's backend — an object uploaded in one test and listed in the next — works as it does under
+pytest. One difference stays, and is stated: on the in-process tier a test module's *own* globals
+are put back after each test, because that restore is what stands in for a fork; a counter a test
+increments in its module is back to its value for the next test. What is *not* promised is the order
+*between* modules, or that two modules share a process: modules are units handed to workers from a
+queue, heaviest first. A test that asserts on what an earlier *module* left behind — the canonical
+case is `assert "chromadb" not in sys.modules`, true only if nothing before it imported the
+package — is order-dependent under pytest too (`pytest -p randomly` breaks it the same way), and
+the fix belongs in the test. When such a failure mentions `sys.modules`, the engine appends a line
+saying so rather than leaving a bare `AssertionError` to read as the runner's bug. This was the
+single divergence on a 4,652-test suite in the benchmark, and it stays in that count: a real
+difference, not a defect. `--shard-modules` gives the old behaviour back — a file heavier than one
+worker's share split across workers, every core busy on a single-file suite, and such files may
+break — the trade `pytest-xdist` makes between `--dist loadfile` and `--dist load`.
+
+**Isolation inside a module.** On the fork tier — a module holding a global that cannot be
+snapshotted, such as a client or a lock — the module's tests run sequentially in *one* forked child
+rather than one child each (TID-80). The child is the boundary between that module and the rest of
+the run, which is what opacity requires; inside it the file behaves as under pytest, including a
+generator one test advanced being advanced for the next. A child that dies mid-file is reported on
+the test that killed it and the file's remaining tests run in a fresh one.
 
 **A run shorter than its longest test.** Units are drained from a shared queue heaviest-first, and
 on the second run (durations recorded) the schedule reaches its ideal: on pirn-core seven of eight

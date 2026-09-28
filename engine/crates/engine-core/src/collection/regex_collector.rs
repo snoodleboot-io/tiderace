@@ -255,11 +255,25 @@ fn has_opaque_base(bases: &str) -> bool {
         .any(|b| !INERT.contains(&b))
 }
 
+/// The file part of a node id — everything before the first `::`.
+fn module_of(node_id: &crate::domain::NodeId) -> &str {
+    node_id
+        .as_str()
+        .split("::")
+        .next()
+        .unwrap_or(node_id.as_str())
+}
+
 impl Collector for RegexCollector {
     fn collect(&self, root: &Path) -> Result<Vec<TestItem>> {
         let mut out = Vec::new();
         self.walk(root, root, &mut out)?;
-        out.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        // Files in a fixed order; within a file, definition order. pytest runs a file top to
+        // bottom and order-dependent modules — "upload in one test, list it in the next" — rely on
+        // it. Sorting by node id put `test_two` before `test_one`... alphabetically, which is how a
+        // moto module that passes under pytest lost its objects here (TID-80). A stable sort on the
+        // module alone keeps each file's own order.
+        out.sort_by(|a, b| module_of(&a.node_id).cmp(module_of(&b.node_id)));
         Ok(out)
     }
 }

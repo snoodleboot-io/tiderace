@@ -147,6 +147,15 @@ Read with the same care as the cold numbers:
   (One thing to keep an eye on: warm test time is 154s against 139s cold; the 8–23s "identity" tests
   loop until an address is reused and run slower on the bare tier. A test property, not a scheduler
   one.)
+- **A file runs top to bottom in one process now.** The runs above were taken with module
+  sharding on: a module heavier than one worker's share was split across workers, and the
+  collector ordered tests alphabetically. Neither is pytest's behaviour, and a file whose tests
+  build on each other's state failed here and passed there ([TID-80](https://linear.app/snoodleboot/issue/TID-80),
+  found through a moto suite). Both are fixed — file order, one process per file — and sharding is
+  opt-in (`--shard-modules`). It costs something on pirn-core: the one module above the cap holds the
+  22.9s test and 18 others, and running it whole makes the critical path 25.7s instead of 22.9s —
+  warm **26.0s → 28.8s** (single runs, not load-gated). `--shard-modules` buys that back for a suite
+  whose files are known independent; a single-file suite now runs on one worker unless it asks.
 - **A cached failure stays failed.** pirn-agents' warm runs report `2 failing` from cache: the
   order-dependent test the cold benchmark names, plus one more under the daemon's scheduling. A
   cached verdict is served until its dependencies change, which is the contract.
