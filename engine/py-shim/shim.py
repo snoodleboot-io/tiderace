@@ -136,6 +136,52 @@ def _write_frame(fd: int, obj: dict) -> None:
     os.write(fd, struct.pack("<I", len(payload)) + payload)
 
 
+def _read_exactly_by(fd: int, n: int, deadline_at: float) -> tuple:
+    """`n` bytes from `fd` by `deadline_at` (monotonic): `(bytes, False)`, `(None, True)` on timeout,
+    `(None, False)` on EOF."""
+    buf = b""
+    while len(buf) < n:
+        remaining = deadline_at - time.monotonic()
+        if remaining <= 0:
+            return None, True
+        ready, _, _ = select.select([fd], [], [], remaining)
+        if not ready:
+            return None, True
+        chunk = os.read(fd, n - len(buf))
+        if not chunk:
+            return None, False
+        buf += chunk
+    return buf, False
+
+
+def _read_frame_by(fd: int, deadline_at: float) -> tuple:
+    """One frame's payload by `deadline_at`; same triple as `_read_exactly_by`."""
+    header, timed_out = _read_exactly_by(fd, 4, deadline_at)
+    if header is None:
+        return None, timed_out
+    (length,) = struct.unpack("<I", header)
+    return _read_exactly_by(fd, length, deadline_at)
+
+
+def _exit_text(status: int) -> str:
+    """How a reaped process ended, for a diagnostic."""
+    if os.WIFSIGNALED(status):
+        return f"killed by signal {os.WTERMSIG(status)}"
+    code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else None
+    if code == _EXIT_UNREPORTABLE:
+        return "it ran the test but could not serialise its result frame"
+    return f"exited {code}"
+
+
+class _ModuleChild:
+    """The forked process running one opaque module's tests (TID-80)."""
+
+    __slots__ = ("module_key", "pid", "req_w", "resp_r")
+
+    def __init__(self, module_key: str, pid: int, req_w: int, resp_r: int):
+        self.module_key, self.pid, self.req_w, self.resp_r = module_key, pid, req_w, resp_r
+
+
 # --------------------------------------------------------------------------- node ids
 def _module_key(node_id: str) -> str:
     """The module path of a node id: 'tests/m.py::C::t' -> 'tests/m.py'."""
@@ -2774,6 +2820,8 @@ class Engine:
         self._state_disturbed = False  # …and whether the node should be forked from now on
         self._disturbance = None  # what moved, kept for the verdict the clean-room handoff reports
         self.restore = restore  # snapshot/restore shared state around no-fork tests (isolation w/o fork)
+        self._module_child = None  # the live child running an opaque module's tests, if any (TID-80)
+        self._in_module_child = False  # set in that child: run everything in-process, never fork
         self.active: list[_Active] = []  # in setup order (widest → narrowest)
 
     def _value(self, name: str, module_key: str):
@@ -2787,13 +2835,7 @@ class Engine:
         _node_for(node_id)  # a wider-scope fixture is built for the test that first needed it
         """Tear down active wider fixtures whose scope-instance no longer matches this test, then set
         up any missing wider fixtures the test needs (each exactly once per scope-instance)."""
-        # Teardown stale from the narrow end (active is ordered widest → narrowest).
-        while self.active:
-            top = self.active[-1]
-            if top.key == _instance_key(top.fdef, node_id):
-                break
-            _teardown(top.gen)
-            self.active.pop()
+        self._teardown_stale(node_id)
         # pytest runs xunit `setup_module` / `setUpModule` as the first module-scoped autouse fixture,
         # so it precedes every module-scoped fixture of the file: a client a fixture builds sees what
         # the hook put in place — a started mock's credentials, a stub in `sys.modules`. It ran on the
@@ -2814,6 +2856,16 @@ class Engine:
             value, gen = _setup_fixture(d, args, None)
             self.active.append(_Active(d, key, value, gen))
             live.add(key)
+
+    def _teardown_stale(self, node_id: str) -> None:
+        """Tear down active wider fixtures whose scope-instance no longer matches this test, from the
+        narrow end (active is ordered widest → narrowest)."""
+        while self.active:
+            top = self.active[-1]
+            if top.key == _instance_key(top.fdef, node_id):
+                break
+            _teardown(top.gen)
+            self.active.pop()
 
     def run(self, node_id: str, style: str, deadline_ms: int, force_no_fork: bool = False,
             trusted_pure: bool = False) -> dict:
@@ -2945,6 +2997,14 @@ class Engine:
                 must_fork = True
             if must_fork:
                 force_no_fork = False
+        # An opaque module's tests run in ONE forked child, sequentially, for as long as the batch
+        # stays on that module (TID-80). Forking per test kept the module's own tests apart, which
+        # pytest never does: an object one test put into a module-scoped moto mock was gone for the
+        # next, because it lived and died in that test's child. The child is the isolation boundary
+        # between modules, which is what opacity is about; inside it the file behaves as under
+        # pytest. Fewer forks, too.
+        if must_fork and _FORK_AVAILABLE and not self._in_module_child:
+            return self._module_child_run(node_id, style, deadline_ms)
 
         uses = self._uses(node_id, style)  # @tiderace.uses: set up by type, not injected (B2)
         # A marker can imply a fixture request. `@pytest.mark.anyio` means "run me on the backends
@@ -3197,6 +3257,139 @@ class Engine:
         worst = _aggregate([(v["outcome"], v.get("detail", "")) for v in variants])
         return {"node_id": node_id, "outcome": worst[0], "detail": worst[1],
                 "expanded": True, "variants": variants}
+
+    # ------------------------------------------------------------------ module child (TID-80)
+    def _module_child_run(self, node_id: str, style: str, deadline_ms: int) -> dict:
+        """Run this node in the live child for its module, forking one if there is none (or the live
+        one serves another module). Everything the child does not report is reported here: a death
+        names its exit, a hang its timeout, and either drops the child so the next node gets a fresh
+        one rather than a dead pipe."""
+        module_key = _module_key(node_id)
+        child = self._module_child
+        if child is not None and child.module_key != module_key:
+            self._module_child_close()
+            child = None
+        if child is None:
+            # Stale wider fixtures go before the fork, in the process that owns them: the child must
+            # never tear down what the parent will tear down again.
+            self._teardown_stale(node_id)
+            child = self._module_child_spawn(module_key)
+        try:
+            _write_frame(child.req_w, {"node_id": node_id, "style": style, "deadline_ms": deadline_ms})
+        except OSError:
+            status = self._module_child_reap()
+            return {"node_id": node_id, "outcome": "error",
+                    "detail": "the module's child process was gone before this test could be sent to "
+                              f"it ({_exit_text(status)})"}
+        data, timed_out = _read_frame_by(child.resp_r, time.monotonic() + deadline_ms / 1000.0)
+        if timed_out:
+            self._module_child_kill()
+            return {"node_id": node_id, "outcome": "error", "detail": "timeout"}
+        if data is None:  # EOF without a frame: the child died on this test
+            status = self._module_child_reap()
+            return {"node_id": node_id, "outcome": "error",
+                    "detail": f"the module's child process died running this test ({_exit_text(status)}); "
+                              "the module's remaining tests run in a fresh one"}
+        try:
+            return json.loads(data.decode())
+        except (ValueError, UnicodeDecodeError) as exc:
+            self._module_child_kill()
+            return {"node_id": node_id, "outcome": "error",
+                    "detail": f"child sent an unreadable result frame ({exc}); {len(data)} bytes received"}
+
+    def _module_child_spawn(self, module_key: str):
+        req_r, req_w = os.pipe()
+        resp_r, resp_w = os.pipe()
+        pid = os.fork()
+        if pid == 0:  # ---- CHILD: this module's tests, in-process, until the parent closes the pipe
+            os.close(req_w)
+            os.close(resp_r)
+            self._in_module_child = True
+            self.restore = False  # pytest's semantics inside the file: nothing is undone between tests
+            self.purity_guard = False
+            self._module_child = None
+            inherited = len(self.active)  # the parent's fixtures: its to tear down, not ours
+            done_before = set(_XUNIT_DONE)  # likewise the parent's xunit hooks
+            code = 0
+            try:
+                while True:
+                    req = _read_frame(req_r)
+                    if req is None:
+                        break
+                    try:
+                        resp = self.run(req["node_id"], req["style"], req.get("deadline_ms", 5000),
+                                        force_no_fork=True)
+                    except BaseException as exc:  # noqa: BLE001 — report it; never die silently
+                        resp = {"node_id": req["node_id"], "outcome": "error",
+                                "detail": _child_fault_detail(exc)[:4000]}
+                    _write_frame(resp_w, resp)
+            except BaseException:  # noqa: BLE001 — an unsendable frame or a closed parent
+                code = _EXIT_UNREPORTABLE
+            finally:
+                try:
+                    while len(self.active) > inherited:
+                        _teardown(self.active.pop().gen)
+                    for key in done_before:
+                        _XUNIT_DONE.discard(key)
+                    _xunit_class_teardown()
+                    _xunit_module_teardown()
+                except BaseException:  # noqa: BLE001 — a teardown fault must not mask the results
+                    pass
+                os._exit(code)
+        os.close(req_r)
+        os.close(resp_w)
+        self._module_child = _ModuleChild(module_key, pid, req_w, resp_r)
+        return self._module_child
+
+    def _module_child_close(self) -> None:
+        """End the live child gracefully: EOF on its request pipe, its teardown, its exit."""
+        child = self._module_child
+        if child is None:
+            return
+        try:
+            os.close(child.req_w)
+        except OSError:
+            pass
+        deadline_at = time.monotonic() + 30.0
+        while time.monotonic() < deadline_at:
+            pid, status = os.waitpid(child.pid, os.WNOHANG)
+            if pid:
+                break
+            time.sleep(0.01)
+        else:
+            try:
+                os.kill(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(child.pid, 0)
+        try:
+            os.close(child.resp_r)
+        except OSError:
+            pass
+        self._module_child = None
+
+    def _module_child_kill(self) -> int:
+        child = self._module_child
+        if child is None:
+            return 0
+        try:
+            os.kill(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        return self._module_child_reap()
+
+    def _module_child_reap(self) -> int:
+        child = self._module_child
+        if child is None:
+            return 0
+        _, status = os.waitpid(child.pid, 0)
+        for fd in (child.req_w, child.resp_r):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._module_child = None
+        return status
 
     def _fork_run(self, node_id, style, requested, closure, combo, deadline_ms, case_kwargs=None,
                   force_no_fork=False, trusted_pure=False, must_fork=False, variant_id=None) -> tuple:
@@ -3619,6 +3812,7 @@ class Engine:
         return _parametrize_cases(func, *(o for o in (owner, module) if o is not None))
 
     def teardown_all(self) -> None:
+        self._module_child_close()  # its module's tests are done: its fixtures, hooks and exit (TID-80)
         while self.active:
             _teardown(self.active.pop().gen)
         _xunit_class_teardown()  # tearDownClass / teardown_class, once per class (TID-64)

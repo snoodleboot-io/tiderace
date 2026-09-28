@@ -44,6 +44,11 @@ pub struct RunPlan {
     pub workers: usize,
     /// Per-test deadline in milliseconds.
     pub deadline_ms: u64,
+    /// Split a module heavier than one perfect bin across workers (TID-52). Off by default since
+    /// TID-80: a module's tests then share one process and run in file order, as under pytest, so
+    /// a file whose tests build on each other's state keeps working. On, a single-file suite uses
+    /// every worker and such files may break — `pytest-xdist --dist load`'s trade.
+    pub shard_modules: bool,
     /// Whether the fork tier may take the optimistic in-process ladder for restorable tests.
     ///
     /// **On by default**, as of TID-33. It has been on before and was reverted, so the history is
@@ -121,6 +126,7 @@ impl Default for RunPlan {
             scheduler: SchedulerKind::default(),
             workers: default_workers(),
             deadline_ms: DEFAULT_DEADLINE_MS,
+            shard_modules: false,
             optimistic_no_fork: true,
             shared_import: true,
             trusted_pure: HashSet::new(),
@@ -163,6 +169,9 @@ impl RunPlan {
         } else {
             " import-per-worker"
         });
+        if self.shard_modules {
+            s.push_str(" shard-modules");
+        }
         s
     }
 

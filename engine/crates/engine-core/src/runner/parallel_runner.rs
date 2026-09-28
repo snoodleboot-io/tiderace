@@ -90,7 +90,7 @@ fn run_batched(
     let units = plan
         .scheduler
         .build()
-        .units(&ScheduleInput::new(scheduled, workers));
+        .units(&ScheduleInput::new(scheduled, workers).with_module_sharding(plan.shard_modules));
 
     // The queue. `units` come heaviest first and `pop` takes from the back, so the list is built
     // reversed once here rather than searched on every take. Handing out the heaviest unit first is

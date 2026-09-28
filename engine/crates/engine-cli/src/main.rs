@@ -37,6 +37,8 @@ Options for `run`:
       --optimistic        let restorable tests skip the fork (the default; kept for scripts)
       --no-optimistic     fork every test, even the restorable ones (see the note below)
       --shared-import     import the project once and fork the workers from it (the default)
+      --shard-modules     split a module heavier than one worker's share across workers; a file
+                          whose tests build on each other's state may then break (off by default)
       --no-shared-import  give every worker its own interpreter, each importing the project
   -m, --markers <EXPR>    run only tests matching a marker expression, e.g. 'not slow and db'.
                           Matches pytest marks and tiderace tags alike, and overrides any -m the
@@ -238,6 +240,7 @@ impl Options {
                 "--optimistic" => plan.optimistic_no_fork = true,
                 "--no-optimistic" => plan.optimistic_no_fork = false,
                 "--shared-import" => plan.shared_import = true,
+                "--shard-modules" => plan.shard_modules = true,
                 "--no-shared-import" => plan.shared_import = false,
                 "-m" | "--markers" => marker_expr = Some(value("--markers")?),
                 "-k" | "--keyword" => keyword_expr = Some(value("--keyword")?),
