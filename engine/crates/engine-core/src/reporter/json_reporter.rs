@@ -48,6 +48,16 @@ struct JsonTest<'a> {
     /// This test disturbed interpreter state nothing undid, so later runs fork it from the start.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     must_fork: bool,
+    /// The schedule slot (TID-78): worker lane, unit, and the unit's start/end from the run's start.
+    /// Absent when the test did not go through the parallel runner's work queue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worker: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unit: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unit_started_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unit_ended_ms: Option<u64>,
 }
 
 impl Reporter for JsonReporter {
@@ -78,6 +88,10 @@ fn json_test(r: &TestResult) -> JsonTest<'_> {
         expanded: r.expanded,
         pure: r.pure,
         must_fork: r.must_fork,
+        worker: r.worker,
+        unit: r.unit,
+        unit_started_ms: r.unit_started_ms,
+        unit_ended_ms: r.unit_ended_ms,
     }
 }
 

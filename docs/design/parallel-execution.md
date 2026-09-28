@@ -42,6 +42,13 @@ in the test. When such a failure mentions `sys.modules`, the engine appends a li
 than leaving a bare `AssertionError` to read as the runner's bug. This was the single divergence on
 a 4,652-test suite in the benchmark, and it stays in that count: a real difference, not a defect.
 
+**A run shorter than its longest test.** Units are drained from a shared queue heaviest-first, and
+on the second run (durations recorded) the schedule reaches its ideal: on pirn-core seven of eight
+workers finish within 0.1s of each other while the eighth runs one 22.9s test from t=0, and the wall
+is that test plus ~3s of start-up. `tiderace run --report` records each node's worker, unit and
+unit start/end, and `benchmarks/harness/timeline.py` draws them, so a slow run can be read as what
+it is — a schedule, a start-up, or a test — rather than guessed at (TID-78).
+
 **Being a plugin host.** Parametrisation a pytest plugin injects — anyio's backends — is expanded so
 the node ids match, but a suite whose purpose is to test a pytest plugin through `pytester` is
 testing pytest, and running it means becoming pytest. See

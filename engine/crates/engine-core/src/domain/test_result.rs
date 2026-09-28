@@ -42,6 +42,14 @@ pub struct TestResult {
     /// where those extra ids come from.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub expanded: bool,
+    /// Where and when the parallel runner ran this test (TID-78): the worker thread, the schedule
+    /// unit it belonged to, and that unit's start and end in milliseconds from the run's start. A
+    /// run draws as one lane per worker from these; absent on paths that do not go through the
+    /// work queue (a single worker, the daemon's warm RPC path).
+    pub worker: Option<usize>,
+    pub unit: Option<usize>,
+    pub unit_started_ms: Option<u64>,
+    pub unit_ended_ms: Option<u64>,
 }
 
 impl TestResult {
@@ -61,7 +69,26 @@ impl TestResult {
             must_fork: false,
             skip_origin: String::new(),
             expanded: false,
+            worker: None,
+            unit: None,
+            unit_started_ms: None,
+            unit_ended_ms: None,
         }
+    }
+
+    /// Stamp the schedule slot this result ran in (TID-78).
+    pub fn with_schedule(
+        mut self,
+        worker: usize,
+        unit: usize,
+        started_ms: u64,
+        ended_ms: u64,
+    ) -> Self {
+        self.worker = Some(worker);
+        self.unit = Some(unit);
+        self.unit_started_ms = Some(started_ms);
+        self.unit_ended_ms = Some(ended_ms);
+        self
     }
 
     /// Attach the touched-file footprint (builder style).

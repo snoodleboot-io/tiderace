@@ -15,6 +15,7 @@ anything, checks that tiderace agrees with pytest on them test for test.
 | `analyse_bins.py` | rebuild the scheduler's bins from a report and charge them measured durations |
 | `second_run.py` | the run after an edit: warm no-change, leaf edit, hub edit, injected failure (TID-65) |
 | `warm_vs_xdist.py` | tiderace on its second run (duration-ordered) against `pytest -n auto` (TID-52) |
+| `timeline.py` | draw a run's schedule from `--report`: one lane per worker, idle, critical path, ideal makespan (TID-78) |
 | `quiet_gate.sh` | wait for the machine to be quiet before a timed pass |
 
 ## Method
