@@ -155,10 +155,17 @@ fn run_batched(
     let trusted: HashSet<String> = plan.trusted_pure.clone();
     let must_fork: HashSet<String> = plan.must_fork.clone();
 
+    // The run's clock for the schedule stamps (TID-78): every unit's start and end is measured
+    // from here, so a report can be drawn as one lane per worker.
+    let run_started = std::time::Instant::now();
+    // Units are numbered in the order they are taken — heaviest first, so unit 0 is the schedule's
+    // first pick and the number reads as its rank.
+    let unit_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut handles = Vec::new();
-    for _ in 0..threads {
+    for worker_index in 0..threads {
         let (py, sh, rt) = (python.to_string(), shim.to_path_buf(), root.to_path_buf());
         let (queue, trusted, must_fork) = (queue.clone(), trusted.clone(), must_fork.clone());
+        let unit_counter = unit_counter.clone();
         let modules_path = modules_path.clone();
         // A pooled transport is owned outright, so it moves into the thread without borrowing the
         // pool. The pool itself must outlive the threads — it is dropped after the joins below,
@@ -195,10 +202,16 @@ fn run_batched(
                 let Some(unit) = queue.lock().expect("the work queue is not poisoned").pop() else {
                     return Ok(mine);
                 };
+                let unit_index = unit_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let started_ms = run_started.elapsed().as_millis() as u64;
+                let results = worker
+                    .run(&unit)
+                    .map_err(|e| format!("execution failed: {e}"))?;
+                let ended_ms = run_started.elapsed().as_millis() as u64;
                 mine.extend(
-                    worker
-                        .run(&unit)
-                        .map_err(|e| format!("execution failed: {e}"))?,
+                    results
+                        .into_iter()
+                        .map(|r| r.with_schedule(worker_index, unit_index, started_ms, ended_ms)),
                 );
             }
         }));

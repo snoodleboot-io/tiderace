@@ -134,6 +134,19 @@ Read with the same care as the cold numbers:
   pirn-core tests were missing dependencies, `test_agent_loop`'s up to 43 files each, and one
   parametrized case its own file. Diffing per-node footprints between the old and new shim shows
   the new one a strict superset on every one of the 147.
+- **Where the warm run's time goes, drawn rather than guessed.** `--report` now records each
+  node's worker, unit and unit start/end, and `timeline.py` draws the lanes
+  ([TID-78](https://linear.app/snoodleboot/issue/TID-78)). pirn-core warm, 26.0s: seven of eight
+  workers drain the queue and finish within 0.1s of each other at 19.1s; the eighth runs
+  `test_loop_sub_tapestry.py::…::test_runs_far_past_the_old_recursion_ceiling` alone for 22.9s from
+  t=0; the ideal makespan from the same spans is 22.9s. The wall is that test plus ~3s of start-up
+  and teardown, and the overhead inside units is 3.0s of 157s. The cold run is 3s above its ideal
+  only because, without durations, that unit was the 61st pick. So the floor on this suite is
+  *start-up + the longest test*, the second run sits on it, and the levers that remain are the
+  start-up and the tests themselves — the same floor `pytest -n auto` has, plus its own start-up.
+  (One thing to keep an eye on: warm test time is 154s against 139s cold; the 8–23s "identity" tests
+  loop until an address is reused and run slower on the bare tier. A test property, not a scheduler
+  one.)
 - **A cached failure stays failed.** pirn-agents' warm runs report `2 failing` from cache: the
   order-dependent test the cold benchmark names, plus one more under the daemon's scheduling. A
   cached verdict is served until its dependencies change, which is the contract.
