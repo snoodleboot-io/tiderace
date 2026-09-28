@@ -13,39 +13,7 @@
 //! Windows CI job runs a bare one, so the live test gates on unix like its siblings.
 
 use engine_core::collection::{Collector, RegexCollector};
-use engine_core::domain::Outcome;
-use engine_core::runner::{run_parallel, RunPlan, SchedulerKind, WorkerStrategy};
-use engine_core::testing::skip_live;
 use std::path::PathBuf;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    for cand in ["python3", "python"] {
-        let ok = std::process::Command::new(cand)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(cand.to_string());
-        }
-    }
-    None
-}
 
 /// Every test appends to a list a module-scoped fixture holds; the last one asserts the file ran
 /// top to bottom in one process. Named so that alphabetical order is not file order.
@@ -103,34 +71,75 @@ fn the_collector_keeps_definition_order_within_a_file() {
     );
 }
 
+/// The live half needs pytest on the interpreter (the corpus declares a fixture with it); the
+/// Windows CI job runs a bare one, so it gates on unix like its siblings.
 #[cfg(unix)]
-#[test]
-fn a_modules_tests_run_in_file_order_in_one_process_with_more_workers_than_tests() {
-    let Some(python) = any_python() else {
-        skip_live("no Python interpreter available");
-        return;
-    };
-    let dir = write_corpus("run");
-    let items = RegexCollector::new().collect(&dir).expect("collection");
-    let plan = RunPlan {
-        workers: 4,
-        strategy: WorkerStrategy::Subprocess,
-        scheduler: SchedulerKind::Locality,
-        shared_import: false,
-        ..RunPlan::default()
-    };
-    let results = run_parallel(&python, &shim(), &dir, items, &plan).expect("the corpus runs");
-    let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(results.len(), 4);
-    for r in &results {
-        assert_eq!(
-            r.outcome,
-            Outcome::Passed,
-            "TID-80: {} — the file must run top to bottom in one process: {}",
-            r.node_id,
-            r.detail
-        );
+mod live {
+    use super::write_corpus;
+    use engine_core::collection::{Collector, RegexCollector};
+    use engine_core::domain::Outcome;
+    use engine_core::runner::{run_parallel, RunPlan, SchedulerKind, WorkerStrategy};
+    use engine_core::testing::skip_live;
+    use std::path::PathBuf;
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("repo root")
     }
-    let workers: std::collections::HashSet<_> = results.iter().filter_map(|r| r.worker).collect();
-    assert_eq!(workers.len(), 1, "one module, one worker: {workers:?}");
+
+    fn shim() -> PathBuf {
+        repo_root().join("engine/py-shim/shim.py")
+    }
+
+    fn any_python() -> Option<String> {
+        let venv = repo_root().join(".tiderace-fx-venv/bin/python");
+        if venv.exists() {
+            return Some(venv.to_string_lossy().into_owned());
+        }
+        for cand in ["python3", "python"] {
+            let ok = std::process::Command::new(cand)
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if ok {
+                return Some(cand.to_string());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_modules_tests_run_in_file_order_in_one_process_with_more_workers_than_tests() {
+        let Some(python) = any_python() else {
+            skip_live("no Python interpreter available");
+            return;
+        };
+        let dir = write_corpus("run");
+        let items = RegexCollector::new().collect(&dir).expect("collection");
+        let plan = RunPlan {
+            workers: 4,
+            strategy: WorkerStrategy::Subprocess,
+            scheduler: SchedulerKind::Locality,
+            shared_import: false,
+            ..RunPlan::default()
+        };
+        let results = run_parallel(&python, &shim(), &dir, items, &plan).expect("the corpus runs");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(results.len(), 4);
+        for r in &results {
+            assert_eq!(
+                r.outcome,
+                Outcome::Passed,
+                "TID-80: {} — the file must run top to bottom in one process: {}",
+                r.node_id,
+                r.detail
+            );
+        }
+        let workers: std::collections::HashSet<_> =
+            results.iter().filter_map(|r| r.worker).collect();
+        assert_eq!(workers.len(), 1, "one module, one worker: {workers:?}");
+    }
 }
