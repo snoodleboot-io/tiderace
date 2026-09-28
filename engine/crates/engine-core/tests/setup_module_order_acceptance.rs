@@ -5,6 +5,11 @@
 //! path, after the wider fixtures were already live: a moto mock started in `setup_module` never
 //! reached the `boto3` client a module fixture had already built — `NoCredentialsError` on every
 //! test in the file, under a mock that was running.
+//!
+//! The corpus declares its fixture with `@pytest.fixture`, which needs pytest on the interpreter; the
+//! Windows CI job runs a bare one, so this gates on unix like its siblings.
+
+#![cfg(unix)]
 
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
