@@ -1896,6 +1896,16 @@ def _snapshot_shared(module) -> dict:
     for k, v in list(vars(module).items()):
         if k.startswith("__") or callable(v) or isinstance(v, type) or inspect.ismodule(v):
             continue
+        if type(v).__eq__ is object.__eq__:
+            # Compared by identity, so a deep copy could never equal the original: every test in a
+            # module holding such a value was judged impure, and the value was rebound to a fresh
+            # copy after each one. `from __future__ import annotations` binds one (`annotations`, a
+            # `__future__._Feature`) in almost every module — 4,491 of pirn-core's 4,499 impure
+            # verdicts were that one name (TID-77). Keep the object itself: the name is unchanged
+            # while it still refers to it, and mutation *inside* it is what the fingerprint and the
+            # opaque rule already leave to the differential gate.
+            out[k] = v
+            continue
         try:
             out[k] = copy.deepcopy(v)
         except Exception:  # noqa: BLE001

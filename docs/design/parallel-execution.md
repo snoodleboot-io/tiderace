@@ -99,8 +99,15 @@ flowchart TD
 | Tier | When | Isolation mechanism | Per-test cost ¹ |
 |---|---|---|---|
 | **bare no-fork** | test is *known pure* (recorded verdict) | nothing to isolate | ~0.05 ms (90×) |
-| **no-fork + restore** | *restorable* footprint, purity unknown/impure | deep-copy snapshot of module globals + `os.environ`, run, restore | ~0.4–0.9 ms (5–14×) |
+| **no-fork + restore** | *restorable* footprint, purity unknown/impure | deep-copy snapshot of module globals + `os.environ`, run, restore ² | ~0.4–0.9 ms (5–14×) |
 | **fork** | module has *opaque* (un-deep-copyable) globals | copy-on-write child | ~4.5 ms (1×) |
+
+² A global whose type compares by identity (no `__eq__`) is snapshotted as itself, not deep-copied: a
+copy of it could never compare equal, so every test in its module read as impure. `from __future__
+import annotations` binds one such global (`annotations`) in almost every module — on pirn-core it
+accounted for 4,491 of 4,499 impure verdicts and left 16 tests recorded pure; with the identity rule
+4,488 are (TID-77). The verdict still catches a rebinding; mutation *inside* such an object is left to
+the fingerprint, as it always was.
 
 ¹ **Microbenchmark figures** — one *trivial* test, against a fork from a *light* parent. They show the
 shape of each tier's overhead, not what a suite will see, and both halves of the ratio move:
