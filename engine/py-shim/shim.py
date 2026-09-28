@@ -2794,6 +2794,13 @@ class Engine:
                 break
             _teardown(top.gen)
             self.active.pop()
+        # pytest runs xunit `setup_module` / `setUpModule` as the first module-scoped autouse fixture,
+        # so it precedes every module-scoped fixture of the file: a client a fixture builds sees what
+        # the hook put in place — a started mock's credentials, a stub in `sys.modules`. It ran on the
+        # test's own path here, after the wider fixtures were already live, and a moto mock started
+        # in `setup_module` never reached the fixture-built client (TID-79). Before any wider fixture,
+        # once per module per process; the later call on the test path is then a no-op.
+        _xunit_module_setup(importlib.import_module(_module_name(_module_key(node_id))))
         # Set up missing wider fixtures in topo order.
         live = {a.key for a in self.active}
         for d in closure:
