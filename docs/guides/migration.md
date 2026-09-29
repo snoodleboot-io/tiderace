@@ -41,6 +41,7 @@ to. The codemod translates the mechanical parts of pytest to that model:
 | fixture with `-> T` return type | `@tiderace.provides` + inject-by `T` | the type is what tests wire to |
 | `def test(db)` where `db` is a typed fixture | `def test(db: Db)` | **type inferred** from the provider's return type |
 | `@pytest.mark.parametrize("a,b", [...])` | `@tiderace.cases([...])` | `ids=` preserved |
+| `pytest_generate_tests(metafunc)` in a conftest or module | — (honoured as written) | `metafunc.parametrize(...)` expands the tests it governs; hook axes precede decorator axes in the id, as in pytest (TID-85) |
 | `@pytest.mark.skipif(c, reason=r)` | `@tiderace.skip_if(c, reason=r)` | |
 | `@pytest.mark.skip` / `xfail` | `@tiderace.skip` / `@tiderace.xfail` | |
 | `@pytest.mark.<name>` (other) | `@tiderace.tag("<name>")` | selection metadata |

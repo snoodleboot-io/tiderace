@@ -1411,11 +1411,13 @@ def _discover(root: str) -> Registry:
     _IGNORED = _ignores_from(addopts, config_dir)
     native: list[tuple] = []  # (provider obj, location) — resolved in a second pass (see below)
     conftests: list = []  # every conftest module, for the collection hooks (TID-20)
+    _CONFTEST_SCOPES.clear()  # rebuilt with them: which directory each one governs (TID-85)
     test_modules: list = []  # (module, rel path) — the items those hooks inspect
     # Ancestor conftests first: their fixtures are the widest in the tree, and `serve()` has already
     # executed them ahead of `_preimport` so their side effects precede every test-module import.
     for module, location in _load_ancestor_conftests(root):
         conftests.append(module)
+        _CONFTEST_SCOPES.append((location, module))
         for obj in vars(module).values():
             if _is_native_provider(obj):
                 native.append((obj, location))
@@ -1444,6 +1446,7 @@ def _discover(root: str) -> Registry:
                 if module is not None:
                     _collect_addoption(module)
                     conftests.append(module)
+                    _CONFTEST_SCOPES.append((location, module))
             elif name.startswith("test_") or name.endswith("_test.py"):
                 # Named through `_module_name`, exactly as execution names it (TID-37). The old
                 # spelling was relative to the run *root*, which forced the run root itself onto
@@ -3115,6 +3118,8 @@ class Engine:
             # it was lost and the run reported `shim closed mid-run` (TID-43). Whatever the next unsafe
             # probe turns out to be, it now costs this node an error rather than costing the worker.
             raw_cases = self._cases(node_id, style)
+        except _GenerateTestsError as exc:
+            return {"node_id": node_id, "outcome": "error", "detail": str(exc)}
         except _skip_exceptions() as exc:
             # A module-level `pytest.importorskip` / `pytest.skip(allow_module_level=True)`. Not an
             # `Exception`, so without this it escaped `run()` and took the worker with it (TID-48).
@@ -3954,9 +3959,11 @@ class Engine:
             cls, method = _class_method(node_id)
             owner = getattr(module, cls)
             func = getattr(owner, method)
-            return _indirect_names(func, owner, module)
+            return _indirect_names(func, owner, module,
+                                   hook_marks=self._hook_marks(node_id, style, func, module, owner))
         func = getattr(module, node_id.partition("::")[2])
-        return _indirect_names(func, module)
+        return _indirect_names(func, module,
+                               hook_marks=self._hook_marks(node_id, style, func, module, None))
 
     def _uses(self, node_id: str, style: str) -> list:
         """Provider names a test depends on via `@tiderace.uses(Type, ...)` — resolved by type, set up
@@ -3995,7 +4002,29 @@ class Engine:
             return [(c, None) for c in native]  # native cases carry no author-supplied id
         # The class and the module too: pytest applies their marks to every test they hold (TID-53).
         owner = getattr(module, _class_method(node_id)[0], None) if style == "class_method" else None
-        return _parametrize_cases(func, *(o for o in (owner, module) if o is not None))
+        hook_marks = self._hook_marks(node_id, style, func, module, owner)
+        return _parametrize_cases(func, *(o for o in (owner, module) if o is not None),
+                                  hook_marks=hook_marks)
+
+    def _hook_marks(self, node_id: str, style: str, func, module, owner) -> list:
+        """The parametrize axes this node's `pytest_generate_tests` hooks declare (TID-85). Nothing
+        to run ⇒ nothing computed: a suite without the hook pays a dictionary lookup."""
+        if node_id in _HOOK_MARKS:
+            return _HOOK_MARKS[node_id]
+        if _safe_getattr(module, "pytest_generate_tests", None) is None and not any(
+                _safe_getattr(m, "pytest_generate_tests", None) is not None for _, m in _CONFTEST_SCOPES):
+            return []
+        requested = self._requested(node_id, style)  # param → provider (or the bare name)
+        names = list(requested)
+        try:
+            providers = {p: t for p, t in requested.items() if self.reg.is_provider(t)}
+            closure = _closure(self.reg, _module_key(node_id), providers, [],
+                               self._test_classes(node_id, style))
+            names = list(dict.fromkeys(names + [d.name for d in closure]))
+        except Exception:  # noqa: BLE001 — an unresolvable request is the test's problem, later
+            pass
+        return _generate_tests_marks(node_id, func, module, owner, names,
+                                     _own_markers(module, owner, func))
 
     def teardown_all(self) -> None:
         _save_file_deps_cache()  # what this worker parsed, for the next run (TID-82)
@@ -4006,8 +4035,100 @@ class Engine:
         _xunit_module_teardown()  # tearDownModule / teardown_module, once this worker is done
 
 
-def _indirect_names(func, *outer) -> set:
-    """Argnames a `parametrize` marks as **indirect**, anywhere in the owner chain.
+# Every conftest `_discover` imported, with the directory it governs: `""`/`"."` for the run root, a
+# `..`-relative location for an ancestor (which governs everything), else a root-relative directory.
+_CONFTEST_SCOPES: list = []
+_HOOK_MARKS: dict[str, list] = {}  # node id → the parametrize marks its generate_tests hooks produced
+
+
+class _GenerateTestsError(Exception):
+    """A `metafunc.parametrize` that pytest would refuse — reported on the test, as pytest reports it."""
+
+
+class _SyntheticMark:
+    """A `parametrize` mark that came from `metafunc.parametrize` rather than a decorator; the same
+    shape `_parametrize_cases` and `_indirect_names` already read."""
+
+    __slots__ = ("name", "args", "kwargs")
+
+    def __init__(self, argnames, argvalues, ids, indirect):
+        self.name = "parametrize"
+        self.args = (argnames, list(argvalues))
+        self.kwargs = {"ids": ids, "indirect": indirect}
+
+
+class _MetaFunc:
+    """What a `pytest_generate_tests(metafunc)` hook is handed (TID-85): the test's fixture names,
+    its function/module/class, a `definition` that answers marker queries, a `config`, and
+    `parametrize`, which records an axis for the test exactly as a `@pytest.mark.parametrize` would."""
+
+    def __init__(self, node_id: str, func, module, cls, fixturenames: list, markers: list):
+        self.function = func
+        self.module = module
+        self.cls = cls
+        self.fixturenames = list(fixturenames)
+        self.config = _Config()
+        self.definition = _HookItem(node_id, node_id.rsplit("::", 1)[-1], markers)
+        self._marks: list = []
+
+    def parametrize(self, argnames, argvalues, indirect=False, ids=None, scope=None, *,
+                    _param_mark=None):
+        names = ([n.strip() for n in argnames.split(",") if n.strip()]
+                 if isinstance(argnames, str) else list(argnames))
+        for name in names:
+            if name not in self.fixturenames:
+                raise _GenerateTestsError(
+                    f"In {self.definition.name}: function uses no argument '{name}'")
+        self._marks.append(_SyntheticMark(names, argvalues, ids, indirect))
+
+
+def _conftests_governing(module_key: str) -> list:
+    """The conftest modules whose directory holds `module_key`, deepest first — pytest's calling
+    order for their hooks (a later-registered plugin is called first)."""
+    module_dir = module_key.rsplit("/", 1)[0] if "/" in module_key else ""
+    governing = []
+    for location, module in _CONFTEST_SCOPES:
+        loc = "" if location in (".", "") else location.replace(os.sep, "/")
+        if loc.startswith(".."):
+            depth = -1  # an ancestor: governs everything, called after every in-tree conftest
+        elif loc == "" or module_dir == loc or module_dir.startswith(loc + "/"):
+            depth = loc.count("/") + 1 if loc else 0
+        else:
+            continue
+        governing.append((depth, module))
+    governing.sort(key=lambda d: -d[0])
+    return [m for _, m in governing]
+
+
+def _generate_tests_marks(node_id: str, func, module, cls, fixturenames: list, markers: list) -> list:
+    """Run the `pytest_generate_tests` hooks that apply to this test — its module's own first, then
+    its conftests deepest to root — and return the parametrize marks they declared, in pytest's
+    order (which is the order their ids appear in the node id). Cached per node: hooks are
+    deterministic and `_cases`/`_indirect` both ask."""
+    cached = _HOOK_MARKS.get(node_id)
+    if cached is not None:
+        return cached
+    hooks = []
+    own = _safe_getattr(module, "pytest_generate_tests", None)
+    if callable(own):
+        hooks.append(own)
+    for conftest in _conftests_governing(_module_key(node_id)):
+        hook = _safe_getattr(conftest, "pytest_generate_tests", None)
+        if callable(hook):
+            hooks.append(hook)
+    marks: list = []
+    if hooks:
+        metafunc = _MetaFunc(node_id, func, module, cls, fixturenames, markers)
+        for hook in hooks:
+            hook(metafunc)
+        marks = metafunc._marks
+    _HOOK_MARKS[node_id] = marks
+    return marks
+
+
+def _indirect_names(func, *outer, hook_marks=None) -> set:
+    """Argnames a `parametrize` marks as **indirect**, anywhere in the owner chain — or in a
+    `pytest_generate_tests` hook's call (TID-85).
 
     `indirect=True` (or a list of names) does not hand the value to the test: pytest gives it to the
     *fixture* of that name as `request.param`, and the test receives whatever the fixture returns. So
@@ -4015,7 +4136,7 @@ def _indirect_names(func, *outer) -> set:
     name (TID-57). Getting this backwards hands the test the raw parametrize value — typically the
     fixture function itself, which then fails on the first attribute the test touches."""
     out: set = set()
-    for mark in _own_markers(func, *outer):
+    for mark in list(hook_marks or ()) + _own_markers(func, *outer):
         if getattr(mark, "name", "") != "parametrize":
             continue
         indirect = (getattr(mark, "kwargs", None) or {}).get("indirect")
@@ -4029,7 +4150,7 @@ def _indirect_names(func, *outer) -> set:
     return out
 
 
-def _parametrize_cases(func, *outer) -> list[dict]:
+def _parametrize_cases(func, *outer, hook_marks=None) -> list[dict]:
     """Expand `@pytest.mark.parametrize` on ``func`` — and on its class and module — into cases.
 
     The corpus is authored against pytest, so a test whose arguments come from
@@ -4059,7 +4180,13 @@ def _parametrize_cases(func, *outer) -> list[dict]:
     generated cases. `_own_markers` reports widest first, which is why the chain is passed in reverse
     here.
     """
-    marks = [m for m in _own_markers(func, *outer) if getattr(m, "name", "") == "parametrize"]
+    # Hook-declared axes first: pytest calls `pytest_generate_tests` hooks before it applies the
+    # decorator marks (its own mark handling is one such hook, registered earliest and so called
+    # last), and an id is the axes in call order — `test_x[sqlite-1]` for a conftest's `backend` and
+    # the function's own `n` (TID-85).
+    marks = list(hook_marks or ()) + [
+        m for m in _own_markers(func, *outer) if getattr(m, "name", "") == "parametrize"
+    ]
     if not marks:
         return []
     axes: list[list[tuple]] = []
@@ -4091,11 +4218,19 @@ def _parametrize_cases(func, *outer) -> list[dict]:
     cases: list[tuple] = []
     for combo in itertools.product(*axes):
         merged: dict = {}
-        ids = []
+        pieces: list[tuple] = []  # per axis: (its argnames, the author's id or None)
         for piece, piece_id in combo:
             merged.update(piece)
-            ids.append(piece_id)
-        case_id = "-".join(ids) if ids and all(i is not None for i in ids) else None
+            pieces.append((tuple(piece), piece_id))
+        if pieces and all(pid is not None for _, pid in pieces):
+            case_id = "-".join(pid for _, pid in pieces)
+        elif any(pid is not None for _, pid in pieces):
+            # Mixed: an explicit id on some axes and none on others. pytest keeps the explicit
+            # piece and generates the rest per axis — `test_x[EU-sqlite]` for `ids=["EU", "US"]`
+            # on `region` and a bare `backend` (TID-85) — so hand `_variant_parts` the axes.
+            case_id = pieces
+        else:
+            case_id = None
         cases.append((merged, case_id))
     return cases
 
@@ -4730,17 +4865,25 @@ def _fixture_param_id(fdef, index: int, value):
 
 
 def _variant_parts(combo: dict, combo_ids: dict, case_kwargs: dict, index: int,
-                   explicit: str | None = None) -> str:
+                   explicit=None) -> str:
     """The inside of a variant's `[...]`, before duplicates are disambiguated.
 
     Parametrized-fixture values come first, then the test's own `parametrize` values, each in
-    declaration order, and an author-supplied id wins over anything generated."""
+    declaration order, and an author-supplied id wins over anything generated. `explicit` is the
+    whole case's id (a string), none (generate every part), or a list of per-axis
+    `(argnames, id-or-None)` — an explicit piece where the author gave one, generated where not."""
     parts = [
         combo_ids.get(k) if combo_ids.get(k) is not None else _id_part(v, k, index)
         for k, v in combo.items()
     ]
-    if explicit is not None:
+    if isinstance(explicit, str):
         parts.append(explicit)
+    elif explicit is not None:
+        for names, piece in explicit:
+            if piece is not None:
+                parts.append(piece)
+            else:
+                parts += [_id_part(case_kwargs[n], n, index) for n in names if n in case_kwargs]
     else:
         parts += [_id_part(v, k, index) for k, v in case_kwargs.items()]
     return "-".join(parts)
