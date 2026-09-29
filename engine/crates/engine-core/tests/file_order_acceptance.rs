@@ -40,6 +40,7 @@ def test_last_checks(order):
     assert order == [1, 2, 3], f\"not file order in one process: {order}\"
 ";
 
+#[cfg(unix)]
 /// The same file with its state in a module global: since TID-81 nothing is put back between a
 /// file's tests, so this accumulates as it does under pytest. The module after it, on the same
 /// worker, must not see what the first one changed in the environment.
@@ -59,6 +60,7 @@ def test_last_checks():
     assert ORDER == [1, 2], f\"a file's own globals must carry between its tests: {ORDER}\"
 ";
 
+#[cfg(unix)]
 const NEXT_MODULE: &str = "\
 import os
 
