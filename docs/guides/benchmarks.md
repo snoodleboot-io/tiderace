@@ -90,9 +90,17 @@ interleaved rounds after a discarded warm-up, medians.
 | pirn-core | 5,036 | 0 | pytest's `addopts` deselections (tiderace reports them as skipped) |
 | pirn-agents | 4,652 | 0 | the same |
 | cachetools | 215 | 0 | 0 |
-| click | 589 + 1 xfail | 0 | 3 Windows-only tests tiderace reports as skipped |
-| flask | 475 + 4 failed + 3 error (both sides) | 0 | 2 greenlet tests tiderace reports as skipped |
-| anyio | ~1,500 | plugin fixtures ([TID-87](https://linear.app/snoodleboot/issue/TID-87)) | 332 / 384 |
+| click | 589 + 1 xfail + 21 skipped | 0 | 0 |
+| flask | 475 + 4 failed + 3 error + 2 skipped (both sides) | 0 | 0 |
+| anyio | 1,479 | 10 tiderace-only failures, 8 of them `pytester`'s `testdir` (the plugin-host boundary) | 0 |
+
+The click and flask "skipped" rows read as tiderace-only until [TID-88](https://linear.app/snoodleboot/issue/TID-88):
+`nodediff.py` took pytest's side from `-rA`, whose summary folds every skip into a `SKIPPED [16]
+file:line` line with no node id, so pytest's own skipped variants were invisible to the diff. It now
+reads `-v`, one line per node. anyio went from 222 failed/error and 332 / 384 ids only one side has
+(TID-86) to 0 / 0 ids and 31 failed/error after TID-87 (plugin fixtures) and TID-88 (a parametrized
+fixture name not in the signature is indirect; duplicate ids take pytest 8's `_` suffix; a skip-marked
+parametrized test is skipped per variant; a fixture named `test*` is not a test).
 
 **Cold timings**, median wall clock in seconds. tiderace here is `tiderace run` with durations
 already recorded from an earlier run, so its work units are cost-ordered; xdist is `pytest -n auto`.
