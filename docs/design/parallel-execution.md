@@ -24,7 +24,10 @@ flowchart TB
 ```
 
 - **Import once, fork many** — the warm import is the expensive part; COW children share it.
-- **Per-test deadline** — a child exceeding its deadline is killed and reported `Error`.
+- **Per-test deadline** — a child exceeding its deadline is killed and reported `Error`. One
+  deadline, `DEFAULT_DEADLINE_MS` (60 s, `--timeout` to change it), for `tiderace run` and every
+  daemon mode alike: the daemon used to hand its pool 5 s, and a class whose set-up ran two worker
+  interpreters timed out under the daemon only (TID-89).
 - **WatermarkStack** — tracks fixture setup/teardown across scopes so finalizers run in the right
   order as the engine moves between modules and classes.
 
@@ -68,8 +71,10 @@ unit start/end, and `benchmarks/harness/timeline.py` draws them, so a slow run c
 it is — a schedule, a start-up, or a test — rather than guessed at (TID-78).
 
 **Being a plugin host.** Parametrisation a pytest plugin injects — anyio's backends — is expanded so
-the node ids match, but a suite whose purpose is to test a pytest plugin through `pytester` is
-testing pytest, and running it means becoming pytest. See
+the node ids match, and the **fixtures** a plugin defines (`mocker`, `anyio_backend_name`) are
+registered at the lowest precedence, as ordinary fixture functions in an importable module, which
+is all they are (TID-87). The plugin's hooks never run. A suite whose purpose is to test a pytest
+plugin through `pytester` is testing pytest, and running it means becoming pytest. See
 [12-plugin-host](../../planning/current/pure-rust-test-engine/design/12-plugin-host.md) for the
 boundary.
 
@@ -115,8 +120,9 @@ pytest config file (`pytest.ini`, `pyproject.toml`, `tox.ini`, `setup.cfg` — t
 the parent. A full run then launches a new one, which is the full import a full run pays anyway;
 an impacted run on a changed tree uses the one-shot pool and its selective import instead (TID-75),
 which is cheaper than re-importing everything into an image it may not need. So the warm image
-pays off for runs that change nothing — re-runs, gates on an unchanged tree — and the source-edit
-inner loop stays where TID-75 put it.
+pays off for runs that change nothing — re-runs, gates on an unchanged tree, and `-k` runs of one
+test by name, whose selection travels with the request and is applied by the workers after the
+fork (TID-90) — and the source-edit inner loop stays where TID-75 put it.
 
 ## The isolation ladder
 

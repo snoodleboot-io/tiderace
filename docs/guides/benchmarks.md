@@ -90,9 +90,17 @@ interleaved rounds after a discarded warm-up, medians.
 | pirn-core | 5,036 | 0 | pytest's `addopts` deselections (tiderace reports them as skipped) |
 | pirn-agents | 4,652 | 0 | the same |
 | cachetools | 215 | 0 | 0 |
-| click | 589 + 1 xfail | 0 | 3 Windows-only tests tiderace reports as skipped |
-| flask | 475 + 4 failed + 3 error (both sides) | 0 | 2 greenlet tests tiderace reports as skipped |
-| anyio | ~1,500 | plugin fixtures ([TID-87](https://linear.app/snoodleboot/issue/TID-87)) | 332 / 384 |
+| click | 589 + 1 xfail + 21 skipped | 0 | 0 |
+| flask | 475 + 4 failed + 3 error + 2 skipped (both sides) | 0 | 0 |
+| anyio | 1,479 | 10 tiderace-only failures, 8 of them `pytester`'s `testdir` (the plugin-host boundary) | 0 |
+
+The click and flask "skipped" rows read as tiderace-only until [TID-88](https://linear.app/snoodleboot/issue/TID-88):
+`nodediff.py` took pytest's side from `-rA`, whose summary folds every skip into a `SKIPPED [16]
+file:line` line with no node id, so pytest's own skipped variants were invisible to the diff. It now
+reads `-v`, one line per node. anyio went from 222 failed/error and 332 / 384 ids only one side has
+(TID-86) to 0 / 0 ids and 31 failed/error after TID-87 (plugin fixtures) and TID-88 (a parametrized
+fixture name not in the signature is indirect; duplicate ids take pytest 8's `_` suffix; a skip-marked
+parametrized test is skipped per variant; a fixture named `test*` is not a test).
 
 **Cold timings**, median wall clock in seconds. tiderace here is `tiderace run` with durations
 already recorded from an earlier run, so its work units are cost-ordered; xdist is `pytest -n auto`.
@@ -135,11 +143,13 @@ has no warm mode, so its number is the same full run every time — that is the 
 | edit the hub module (3,958 / 2,428 dependents) | 25.9s — 3,793 ran | 13.9s — 2,316 ran |
 | leaf module made to raise on import | 4 failing, **reported** | 1 failing, **reported** |
 
-pirn-agents' warm runs also carry one cached failure from the daemon's own cold run:
-`tests/llm/test_cross_process_provider_replay.py::TestCrossProcessProviderReplay::test_every_scenario_really_called_the_mock_server_while_recording`
-errors under the daemon's scheduling (it starts a mock HTTP server and replays recorded calls) and
-passes in the one-shot run of the same suite. A cached verdict is served until its dependencies
-change, which is the contract; the error itself is the next thing to look at on this suite.
+pirn-agents' warm rows carried one cached failure from the daemon's own cold run in this pass:
+`tests/llm/test_cross_process_provider_replay.py::TestCrossProcessProviderReplay::test_every_scenario_really_called_the_mock_server_while_recording`,
+which passes in the one-shot run of the same suite. Not scheduling: the daemon handed its pool a
+5 s per-test deadline where `tiderace run` allows 60 s, and that class's set-up starts a mock HTTP
+server and runs two worker interpreters. One deadline for both since
+[TID-89](https://linear.app/snoodleboot/issue/TID-89); the daemon's full run on pirn-agents is
+`4657 tests, 0 failing` and the warm run `0 ran, 4657 cached, 0 failing`.
 
 The first measurement of this table (20 September) read 7.6s / 2.3s for the no-change row and
 8.1s / 2.3s for a leaf edit; the bullets below record what each step found. The cold `run --all`

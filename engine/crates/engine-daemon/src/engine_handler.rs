@@ -5,6 +5,7 @@ use engine_core::cache::{Cache, CacheKey, CacheKeyBuilder, CachedOutcome, DirCac
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestItem, TestResult};
 use engine_core::exec::{ForkWorker, SubInterpWorker, Worker};
+use engine_core::runner::DEFAULT_DEADLINE_MS;
 
 use crate::persist::{changed_files, plan, PersistedState, TestRecord, STATE_FILE};
 use crate::rpc_method::{RpcRequest, RpcResponse, RpcResult};
@@ -35,6 +36,11 @@ pub struct EngineHandler {
     warm: Option<engine_core::exec::WellspringPool>,
     #[cfg(unix)]
     warm_stamp: Option<u64>,
+    /// The `-k` / `-m` / `--strict-markers` of the `RunFull` being served (TID-90): handed to the
+    /// warm image's workers, or to a one-shot pool through its environment. `None` between runs.
+    /// Read on the Unix path only; the non-Unix pool takes no selection (TID-90).
+    #[cfg_attr(not(unix), allow(dead_code))]
+    selection: Option<engine_core::exec::Selection>,
     /// Content-addressed result cache (ADR-E004, TID-7). Enabled by `TIDERACE_CACHE_DIR` pointing at a
     /// directory (a CI cache path / shared mount), which makes a result computed on one machine a free
     /// hit on any other with the same inputs. `None` ⇒ cache off (impact-skip only).
@@ -61,6 +67,7 @@ impl EngineHandler {
             warm: None,
             #[cfg(unix)]
             warm_stamp: None,
+            selection: None,
         }
     }
 
@@ -76,6 +83,7 @@ impl EngineHandler {
     fn worker(&mut self) -> Result<&mut ForkWorker, String> {
         if self.worker.is_none() {
             let w = ForkWorker::launch(&self.python, &self.shim, &self.root)
+                .map(|w| w.with_deadline_ms(DEFAULT_DEADLINE_MS))
                 .map_err(|e| format!("failed to launch wellspring: {e}"))?
                 .with_optimistic_no_fork(optimistic_no_fork());
             self.worker = Some(w);
@@ -219,7 +227,9 @@ impl EngineHandler {
         durations: &HashMap<String, u64>,
         full_run: bool,
     ) -> Result<Vec<TestResult>, String> {
+        let mut phase = PhaseTimer::start("run_items");
         let all = self.collect()?;
+        phase.mark("collect items");
         let items: Vec<TestItem> = if requested.is_empty() {
             all
         } else {
@@ -238,13 +248,25 @@ impl EngineHandler {
             } else {
                 None
             };
+            phase.mark("warm pool");
+            // This run's selection (TID-90): a warm image's workers apply it after the fork; a
+            // one-shot pool reads it the way `tiderace run` hands it over, from the environment,
+            // set for this run alone so the next request (or a later image launch) sees none of it.
+            let selection = self.selection.clone();
+            let env_guard = match pool.as_mut() {
+                Some(p) => {
+                    p.set_selection(selection);
+                    None
+                }
+                None => selection.map(SelectionEnv::set),
+            };
             let out = crate::pool::run_parallel(
                 &self.python,
                 &self.shim,
                 &self.root,
                 items,
                 crate::pool::default_workers(),
-                5000,
+                DEFAULT_DEADLINE_MS,
                 optimistic_no_fork(),
                 trusted,
                 must_fork,
@@ -252,6 +274,8 @@ impl EngineHandler {
                 pool.as_mut(),
             );
             self.warm = pool; // back for the next run, whatever this one's outcome
+            drop(env_guard);
+            phase.mark("run_parallel");
             out
         }
         #[cfg(not(unix))]
@@ -263,7 +287,7 @@ impl EngineHandler {
             &self.root,
             items,
             crate::pool::default_workers(),
-            5000,
+            DEFAULT_DEADLINE_MS,
             optimistic_no_fork(), // no-fork + restore by default (TIDERACE_FORCE_FORK=1 to disable)
             trusted,
             must_fork, // TID-33: recorded state-disturbers skip the in-process ladder entirely
@@ -282,12 +306,15 @@ impl EngineHandler {
 
     /// The same run, as the engine's own `TestResult`s — what a report is built from (TID-84).
     pub fn run_full_results(&mut self) -> Result<Vec<TestResult>, String> {
+        let mut phase = PhaseTimer::start("run_full");
         let state_path = self.root.join(STATE_FILE);
         let mut state = PersistedState::load(&state_path);
+        phase.mark("load state");
 
         // Trusted = recorded pure AND none of its recorded deps changed since it was last verified.
         let current = self.hash_known_files(&state);
         let changed = changed_files(&state, &current);
+        phase.mark("hash known files");
         let trusted: HashSet<String> = state
             .tests
             .iter()
@@ -306,6 +333,7 @@ impl EngineHandler {
             .map(|(node, _)| node.clone())
             .collect();
         let durations = recorded_durations(&state);
+        phase.mark("trusted / must-fork / durations");
 
         // ADR-E015 / TID-11: with the sub-interpreter tier on (`TIDERACE_SUBINTERP=1`), route the
         // sub-interp-**safe** modules through a parallel sub-interpreter pool (no fork; sound because
@@ -318,6 +346,7 @@ impl EngineHandler {
             .iter()
             .map(|i| i.node_id.to_string())
             .collect();
+        phase.mark("collect candidates");
         let fresh = if subinterp_enabled() {
             let items = self.collect()?;
             let modules: Vec<String> = {
@@ -333,7 +362,7 @@ impl EngineHandler {
 
             let mut fresh = Vec::new();
             if !si_items.is_empty() {
-                let mut w = SubInterpWorker::new(5000)
+                let mut w = SubInterpWorker::new(DEFAULT_DEADLINE_MS)
                     .with_target(self.python.clone(), &self.shim, &self.root)
                     .with_pool_size(crate::pool::default_workers());
                 fresh.extend(
@@ -356,11 +385,12 @@ impl EngineHandler {
         } else {
             self.run_items_parallel(&[], &trusted, &must_fork, &durations, true)?
         };
-
+        phase.mark("run");
         self.persist_results(&mut state, &all_candidates, &fresh);
         state
             .save(&state_path)
             .map_err(|e| format!("state save failed: {e}"))?;
+        phase.mark("persist");
         Ok(fresh)
     }
 
@@ -788,12 +818,25 @@ impl RpcHandler for EngineHandler {
                 Ok(results) => RpcResponse::Ran { results },
                 Err(message) => RpcResponse::Error { message },
             },
-            RpcRequest::RunFull => match self.run_full_results() {
-                Ok(results) => RpcResponse::RanFull {
-                    results: results.into_iter().map(to_rpc_full).collect(),
-                },
-                Err(message) => RpcResponse::Error { message },
-            },
+            RpcRequest::RunFull {
+                keyword,
+                marker,
+                strict_markers,
+            } => {
+                self.selection = Some(engine_core::exec::Selection {
+                    keyword,
+                    marker,
+                    strict_markers,
+                });
+                let out = self.run_full_results();
+                self.selection = None;
+                match out {
+                    Ok(results) => RpcResponse::RanFull {
+                        results: results.into_iter().map(to_rpc_full).collect(),
+                    },
+                    Err(message) => RpcResponse::Error { message },
+                }
+            }
             RpcRequest::Recycle => {
                 self.worker = None; // drop the stale warm interpreter; next Run relaunches it
                 match self.run(&[]) {
@@ -812,6 +855,94 @@ impl RpcHandler for EngineHandler {
                 warm: self.worker.is_some() || self.is_warm(),
             },
             RpcRequest::Shutdown => RpcResponse::ShuttingDown,
+        }
+    }
+}
+
+/// Where a daemon-served run's time goes, phase by phase, on stderr when `TIDERACE_TIMING=1` —
+/// the daemon's counterpart of the shim's start-up timer (TID-91). Silent otherwise.
+struct PhaseTimer {
+    on: bool,
+    name: &'static str,
+    started: std::time::Instant,
+    last: std::time::Instant,
+}
+
+impl PhaseTimer {
+    fn start(name: &'static str) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            on: std::env::var_os("TIDERACE_TIMING").is_some(),
+            name,
+            started: now,
+            last: now,
+        }
+    }
+
+    fn mark(&mut self, label: &str) {
+        if !self.on {
+            return;
+        }
+        let now = std::time::Instant::now();
+        eprintln!(
+            "tiderace-daemon: timing: {}: {label} {}ms (at {}ms)",
+            self.name,
+            now.duration_since(self.last).as_millis(),
+            now.duration_since(self.started).as_millis()
+        );
+        self.last = now;
+    }
+}
+
+/// The selection as the shim's environment, for a one-shot pool, restored on drop (TID-90).
+#[cfg(unix)]
+struct SelectionEnv {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+#[cfg(unix)]
+impl SelectionEnv {
+    const KEYS: [&'static str; 3] = [
+        "TIDERACE_KEYWORD_EXPR",
+        "TIDERACE_MARKER_EXPR",
+        "TIDERACE_STRICT_MARKERS",
+    ];
+
+    fn set(selection: engine_core::exec::Selection) -> Self {
+        let saved = Self::KEYS
+            .iter()
+            .map(|k| (*k, std::env::var_os(k)))
+            .collect();
+        let values = [
+            selection.keyword,
+            selection.marker,
+            selection.strict_markers.then(|| "1".to_string()),
+        ];
+        for (key, value) in Self::KEYS.iter().zip(values) {
+            // SAFETY: the daemon serves one request at a time on this thread, and no other
+            // thread reads the environment while a run is being set up.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        Self { saved }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SelectionEnv {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..) {
+            // SAFETY: as in `set`.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
         }
     }
 }
