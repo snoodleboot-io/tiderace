@@ -19,6 +19,7 @@ long-option flags). All `TIDERACE_*` names are read directly by the binaries / t
 | `TIDERACE_PYTHON` | `tiderace run`, all `tiderace-daemon` modes | `python3` | The interpreter the wellspring launches. |
 | `TIDERACE_SOCKET` | `tiderace-daemon serve` | `<tmp>/tiderace-<uid>/<digest of the root>.sock` | Unix-socket path for the RPC server. `tiderace run`/`daemon` only look at the default. |
 | `TIDERACE_DAEMON_BIN` | `tiderace daemon start` | `tiderace-daemon` beside `tiderace` | The daemon binary to spawn. |
+| `TIDERACE_PLUGINS` | shim (all modes) | all installed | Which pytest plugins' fixtures to take: `none`, or a comma-separated allow-list of plugin names. `[tool.tiderace] plugins = [...]` is the config spelling. See [Configuration](../guides/configuration.md). |
 | `TIDERACE_NO_DAEMON` | `tiderace run` | unset | Set to anything to run in this process even when a daemon is serving the root — for a gate that must not share an image with earlier runs. |
 | `TIDERACE_COVERAGE` | wellspring (set by `tiderace-daemon run`) | off | Capture each test's source footprint via `sys.monitoring`. Set automatically by impact-aware `run`; cleared by `run --all`. |
 | `TIDERACE_RESTORE` | wellspring (set by all `tiderace-daemon` modes) | on (daemon) | Enable the no-fork + snapshot/restore isolation ladder (the default execution path). |
