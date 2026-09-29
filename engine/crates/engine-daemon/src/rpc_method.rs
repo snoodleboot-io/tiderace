@@ -11,7 +11,17 @@ pub enum RpcRequest {
     Run { node_ids: Vec<String> },
     /// The full parallel run — what `tiderace run` does — served from the daemon's warm image
     /// (TID-84). Answered with [`RpcResponse::RanFull`]: everything a report needs per node.
-    RunFull,
+    /// `keyword` / `marker` / `strict_markers` are the run's `-k` / `-m` / `--strict-markers`,
+    /// applied by the workers forked off the image (TID-90); absent, the image's own selection
+    /// (the project's `addopts`) stands.
+    RunFull {
+        #[serde(default)]
+        keyword: Option<String>,
+        #[serde(default)]
+        marker: Option<String>,
+        #[serde(default)]
+        strict_markers: bool,
+    },
     /// Start watching; the daemon streams impacted re-runs until cancelled.
     Watch,
     /// Drop warm state (a stale interpreter after a conftest/config/C-ext change) and re-run all.
@@ -20,6 +30,17 @@ pub enum RpcRequest {
     Health,
     /// Ask the daemon to exit.
     Shutdown,
+}
+
+impl RpcRequest {
+    /// The unfiltered full run.
+    pub fn run_full_all() -> Self {
+        RpcRequest::RunFull {
+            keyword: None,
+            marker: None,
+            strict_markers: false,
+        }
+    }
 }
 
 /// One test's result as carried over RPC.
@@ -80,7 +101,12 @@ mod tests {
     fn request_roundtrips_through_json() {
         for req in [
             RpcRequest::Discover,
-            RpcRequest::RunFull,
+            RpcRequest::run_full_all(),
+            RpcRequest::RunFull {
+                keyword: Some("not slow".into()),
+                marker: None,
+                strict_markers: true,
+            },
             RpcRequest::Run {
                 node_ids: vec!["t.py::a".into()],
             },

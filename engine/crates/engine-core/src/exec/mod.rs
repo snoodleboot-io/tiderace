@@ -40,6 +40,7 @@ pub use transport::{PipeTransport, ReadyInfo, ShimTransport};
 pub use watermark::{Watermark, WatermarkId};
 pub use watermark_stack::WatermarkStack;
 pub use wellspring::Wellspring;
+pub use wellspring_pool::Selection;
 #[cfg(unix)]
 pub use wellspring_pool::{PooledTransport, PooledWorker, WellspringPool};
 pub use worker::Worker;

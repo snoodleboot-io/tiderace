@@ -62,7 +62,7 @@ fn imports(dir: &Path) -> usize {
 }
 
 fn run_full(handler: &mut EngineHandler) -> Vec<engine_daemon::RpcFullResult> {
-    match handler.handle(RpcRequest::RunFull) {
+    match handler.handle(RpcRequest::run_full_all()) {
         RpcResponse::RanFull { results } => results,
         other => panic!("expected RanFull, got {other:?}"),
     }

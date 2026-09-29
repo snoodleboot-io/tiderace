@@ -121,19 +121,22 @@ fn main() -> ExitCode {
                     // SAFETY: as above.
                     unsafe { std::env::set_var("TIDERACE_STRICT_MARKERS", "1") };
                 }
-                // A daemon's image was started without this run's `-k`/`-m`, which the shim reads
-                // at start-up, so a filtered run stays in this process (TID-84); so does one under
-                // `TIDERACE_NO_DAEMON` — a gate that must not share an image with earlier runs.
-                let daemon_ok = opts.marker_expr.is_none()
-                    && opts.keyword_expr.is_none()
-                    && !opts.strict_markers
-                    && std::env::var_os("TIDERACE_NO_DAEMON").is_none();
+                // A run under `TIDERACE_NO_DAEMON` stays in this process — a gate that must not
+                // share an image with earlier runs. A filtered run goes through the daemon with
+                // its selection (TID-90): the image's workers apply it after the fork.
+                let daemon = std::env::var_os("TIDERACE_NO_DAEMON").is_none().then(|| {
+                    engine_core::exec::Selection {
+                        keyword: opts.keyword_expr.clone(),
+                        marker: opts.marker_expr.clone(),
+                        strict_markers: opts.strict_markers,
+                    }
+                });
                 cmd_run(
                     &opts.root,
                     &opts.plan,
                     opts.quiet,
                     opts.report.as_deref(),
-                    daemon_ok,
+                    daemon,
                 )
             }
             Err(e) => usage_error(&e),
@@ -171,11 +174,19 @@ fn daemon_call(
 
 /// The full run through the daemon: `None` when none is serving this root, `Some(Err)` when one is
 /// and could not run it, `Some(Ok(results))` otherwise — what the run here would have produced.
-fn daemon_run(root: &Path) -> Option<Result<Vec<engine_core::domain::TestResult>, String>> {
+fn daemon_run(
+    root: &Path,
+    selection: engine_core::exec::Selection,
+) -> Option<Result<Vec<engine_core::domain::TestResult>, String>> {
     use engine_daemon::{RpcRequest, RpcResponse};
     let root = root.canonicalize().ok()?;
     daemon_call(&root, RpcRequest::Health)?;
-    Some(match daemon_call(&root, RpcRequest::RunFull) {
+    let request = RpcRequest::RunFull {
+        keyword: selection.keyword,
+        marker: selection.marker,
+        strict_markers: selection.strict_markers,
+    };
+    Some(match daemon_call(&root, request) {
         Some(RpcResponse::RanFull { results }) => Ok(results.into_iter().map(from_rpc).collect()),
         Some(RpcResponse::Error { message }) => Err(message),
         Some(other) => Err(format!("unexpected answer: {other:?}")),
@@ -542,7 +553,7 @@ fn cmd_run(
     plan: &RunPlan,
     quiet: bool,
     report_path: Option<&Path>,
-    daemon_ok: bool,
+    daemon: Option<engine_core::exec::Selection>,
 ) -> ExitCode {
     let python = std::env::var("TIDERACE_PYTHON").unwrap_or_else(|_| engine_core::default_python());
     let shim = match std::env::var("TIDERACE_SHIM") {
@@ -577,7 +588,7 @@ fn cmd_run(
     // A daemon serving this root runs it from its warm image (TID-84): the same results, reported
     // here the same way, and the daemon persists durations and verdicts itself. No daemon, or one
     // that refuses, and the run happens in this process as before.
-    let via_daemon = if daemon_ok { daemon_run(root) } else { None };
+    let via_daemon = daemon.and_then(|selection| daemon_run(root, selection));
     let results = match via_daemon {
         Some(Ok(results)) => {
             eprintln!("tiderace: {}{learned} via daemon", effective.header());

@@ -20,7 +20,7 @@ long-option flags). All `TIDERACE_*` names are read directly by the binaries / t
 | `TIDERACE_SOCKET` | `tiderace-daemon serve` | `<tmp>/tiderace-<uid>/<digest of the root>.sock` | Unix-socket path for the RPC server. `tiderace run`/`daemon` only look at the default. |
 | `TIDERACE_DAEMON_BIN` | `tiderace daemon start` | `tiderace-daemon` beside `tiderace` | The daemon binary to spawn. |
 | `TIDERACE_PLUGINS` | shim (all modes) | all installed | Which pytest plugins' fixtures to take: `none`, or a comma-separated allow-list of plugin names. `[tool.tiderace] plugins = [...]` is the config spelling. See [Configuration](../guides/configuration.md). |
-| `TIDERACE_NO_DAEMON` | `tiderace run` | unset | Set to anything to run in this process even when a daemon is serving the root — for a gate that must not share an image with earlier runs. |
+| `TIDERACE_NO_DAEMON` | `tiderace run` | unset | Set to anything to run in this process even when a daemon is serving the root — for a gate that must not share an image with earlier runs. A filtered run (`-k`, `-m`) goes through the daemon like any other. |
 | `TIDERACE_COVERAGE` | wellspring (set by `tiderace-daemon run`) | off | Capture each test's source footprint via `sys.monitoring`. Set automatically by impact-aware `run`; cleared by `run --all`. |
 | `TIDERACE_RESTORE` | wellspring (set by all `tiderace-daemon` modes) | on (daemon) | Enable the no-fork + snapshot/restore isolation ladder (the default execution path). |
 | `TIDERACE_FORCE_FORK` | wellspring | off | Debug/benchmark only: fork every test, bypassing the no-fork ladder. **Not a user flag.** |
@@ -71,10 +71,11 @@ test through it, print a per-test report, and exit with the pytest-style code (`
 any failure/error). Requires `TIDERACE_SHIM`.
 
 When a daemon is serving `<path>` (see [`tiderace daemon`](#tiderace-daemon-startstatusstop-path--a-warm-image-for-run)),
-an unfiltered `run` is handed to it instead and the header says `via daemon`: the same results, the
-same report and exit code, but the workers fork from an image that already imported the suite. A
-run with `-k`, `-m` or `--strict-markers` stays in this process — the shim reads those at start-up,
-and the daemon's image started without them — and so does one with `TIDERACE_NO_DAEMON` set.
+the `run` is handed to it instead and the header says `via daemon`: the same results, the same
+report and exit code, but the workers fork from an image that already imported the suite. `-k`,
+`-m` and `--strict-markers` travel with the request and are applied by those workers after the
+fork (TID-90), so running one test by name pays neither start-up nor imports. A run with
+`TIDERACE_NO_DAEMON` set stays in this process.
 
 ```bash
 TIDERACE_SHIM=py-shim/shim.py tiderace run tests/

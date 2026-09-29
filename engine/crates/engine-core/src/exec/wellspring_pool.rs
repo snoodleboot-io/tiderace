@@ -46,9 +46,29 @@ const WORKER_DEADLINE: Duration = Duration::from_secs(30);
 pub type PooledTransport = PipeTransport<UnixStream, BufReader<UnixStream>>;
 
 /// The parent process plus its accepted worker connections.
+/// What a run selects, applied by each worker forked off a warm image before it serves (TID-90):
+/// the shim reads `-k` / `-m` / `--strict-markers` from its environment at start-up, and a
+/// persistent image was started without this run's. `None` fields keep what the image has
+/// (the project's own `addopts`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Selection {
+    pub keyword: Option<String>,
+    pub marker: Option<String>,
+    pub strict_markers: bool,
+}
+
+impl Selection {
+    /// Whether this selection narrows anything at all.
+    pub fn is_empty(&self) -> bool {
+        self.keyword.is_none() && self.marker.is_none() && !self.strict_markers
+    }
+}
+
 pub struct WellspringPool {
     parent: Child,
     socket_path: PathBuf,
+    /// The selection the next [`spawn_workers`](Self::spawn_workers) hands its workers (TID-90).
+    selection: Option<Selection>,
     /// Handed out one at a time by [`take_worker`](Self::take_worker).
     workers: Vec<PooledTransport>,
     /// A persistent parent's command channel (TID-84): `spawn` frames go down, `spawned` acks come
@@ -127,6 +147,7 @@ impl WellspringPool {
             socket_path,
             workers: Vec::with_capacity(size),
             control: None,
+            selection: None,
         };
         // Non-blocking, so the wait below can notice the parent dying instead of sitting in `accept`
         // forever. That is exactly what happened before (TID-43): the shim crashed during discovery on
@@ -259,6 +280,7 @@ impl WellspringPool {
             socket_path: Self::socket_path(),
             workers: Vec::new(),
             control: Some((stdin, stdout)),
+            selection: None,
         })
     }
 
@@ -279,7 +301,11 @@ impl WellspringPool {
             })?;
             crate::exec::write_frame(
                 stdin,
-                &serde_json::json!({"spawn": size, "connect": socket_path.to_string_lossy()}),
+                &serde_json::json!({
+                    "spawn": size,
+                    "connect": socket_path.to_string_lossy(),
+                    "selection": self.selection,
+                }),
             )
             .map_err(|e| EngineError::Exec(format!("warm pool parent is gone: {e}")))?;
             let ack: Option<serde_json::Value> = crate::exec::read_frame(stdout)
@@ -304,6 +330,11 @@ impl WellspringPool {
             self.workers.push(transport);
         }
         Ok(())
+    }
+
+    /// The selection the next spawn's workers apply (TID-90); `None` for an unfiltered run.
+    pub fn set_selection(&mut self, selection: Option<Selection>) {
+        self.selection = selection.filter(|s| !s.is_empty());
     }
 
     /// Whether this pool is a persistent parent that can [`spawn_workers`](Self::spawn_workers).

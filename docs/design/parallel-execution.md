@@ -117,8 +117,9 @@ pytest config file (`pytest.ini`, `pyproject.toml`, `tox.ini`, `setup.cfg` — t
 the parent. A full run then launches a new one, which is the full import a full run pays anyway;
 an impacted run on a changed tree uses the one-shot pool and its selective import instead (TID-75),
 which is cheaper than re-importing everything into an image it may not need. So the warm image
-pays off for runs that change nothing — re-runs, gates on an unchanged tree — and the source-edit
-inner loop stays where TID-75 put it.
+pays off for runs that change nothing — re-runs, gates on an unchanged tree, and `-k` runs of one
+test by name, whose selection travels with the request and is applied by the workers after the
+fork (TID-90) — and the source-edit inner loop stays where TID-75 put it.
 
 ## The isolation ladder
 

@@ -5486,7 +5486,8 @@ def _serve_pool_persistent(engine_args: dict) -> int:
                 continue
             n = int(req.get("spawn", 0))
             if n:
-                live.extend(_fork_pool_workers(n, req["connect"], engine_args))
+                live.extend(_fork_pool_workers(n, req["connect"], engine_args,
+                                               req.get("selection")))
                 _write_frame(_STDOUT, {"spawned": n})
     finally:
         for pid in live:
@@ -5497,9 +5498,31 @@ def _serve_pool_persistent(engine_args: dict) -> int:
     return 0
 
 
-def _fork_pool_workers(size: int, socket_path: str, engine_args: dict) -> list:
+def _apply_selection(selection: dict | None) -> None:
+    """This run's `-k` / `-m` / `--strict-markers`, in a worker forked off a warm image (TID-90).
+
+    The image read its selection from the environment at start-up — the project's own `addopts`,
+    since a persistent parent is launched with none of this run's — and the three are consulted
+    per node in `run()`, so setting them after the fork is the whole job. A field left out keeps
+    the image's value; an explicit empty string clears it (a `-k ""`)."""
+    global _KEYWORD_EXPR, _MARKER_EXPR, _STRICT_MARKS
+    if not selection:
+        return
+    if "keyword" in selection:
+        kexpr = selection["keyword"]
+        _KEYWORD_EXPR = _compile_selection_tree(kexpr, "-k") if kexpr else None
+    if "marker" in selection:
+        expr = selection["marker"]
+        _MARKER_EXPR = _compile_marker_expr(expr) if expr else None
+    if selection.get("strict_markers"):
+        _STRICT_MARKS = True
+
+
+def _fork_pool_workers(size: int, socket_path: str, engine_args: dict,
+                       selection: dict | None = None) -> list:
     """Fork `size` workers off this (imported) process, each connecting to `socket_path` and
-    serving the ordinary single-worker loop until its connection closes. Returns their pids."""
+    serving the ordinary single-worker loop until its connection closes. Returns their pids.
+    `selection` is this run's `-k` / `-m` / `--strict-markers`, applied in each child (TID-90)."""
     import socket
 
     children = []
@@ -5512,6 +5535,7 @@ def _fork_pool_workers(size: int, socket_path: str, engine_args: dict) -> list:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.connect(socket_path)
             _STDIN = _STDOUT = sock.fileno()
+            _apply_selection(selection)
             engine = Engine(**engine_args)
             _start_clean_room(engine)  # before a single test runs: the image is pristine now (TID-50)
             _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})

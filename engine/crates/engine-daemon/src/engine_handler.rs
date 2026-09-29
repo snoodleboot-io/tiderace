@@ -35,6 +35,9 @@ pub struct EngineHandler {
     warm: Option<engine_core::exec::WellspringPool>,
     #[cfg(unix)]
     warm_stamp: Option<u64>,
+    /// The `-k` / `-m` / `--strict-markers` of the `RunFull` being served (TID-90): handed to the
+    /// warm image's workers, or to a one-shot pool through its environment. `None` between runs.
+    selection: Option<engine_core::exec::Selection>,
     /// Content-addressed result cache (ADR-E004, TID-7). Enabled by `TIDERACE_CACHE_DIR` pointing at a
     /// directory (a CI cache path / shared mount), which makes a result computed on one machine a free
     /// hit on any other with the same inputs. `None` ⇒ cache off (impact-skip only).
@@ -61,6 +64,7 @@ impl EngineHandler {
             warm: None,
             #[cfg(unix)]
             warm_stamp: None,
+            selection: None,
         }
     }
 
@@ -238,6 +242,17 @@ impl EngineHandler {
             } else {
                 None
             };
+            // This run's selection (TID-90): a warm image's workers apply it after the fork; a
+            // one-shot pool reads it the way `tiderace run` hands it over, from the environment,
+            // set for this run alone so the next request (or a later image launch) sees none of it.
+            let selection = self.selection.clone();
+            let env_guard = match pool.as_mut() {
+                Some(p) => {
+                    p.set_selection(selection);
+                    None
+                }
+                None => selection.map(SelectionEnv::set),
+            };
             let out = crate::pool::run_parallel(
                 &self.python,
                 &self.shim,
@@ -252,6 +267,7 @@ impl EngineHandler {
                 pool.as_mut(),
             );
             self.warm = pool; // back for the next run, whatever this one's outcome
+            drop(env_guard);
             out
         }
         #[cfg(not(unix))]
@@ -788,12 +804,25 @@ impl RpcHandler for EngineHandler {
                 Ok(results) => RpcResponse::Ran { results },
                 Err(message) => RpcResponse::Error { message },
             },
-            RpcRequest::RunFull => match self.run_full_results() {
-                Ok(results) => RpcResponse::RanFull {
-                    results: results.into_iter().map(to_rpc_full).collect(),
-                },
-                Err(message) => RpcResponse::Error { message },
-            },
+            RpcRequest::RunFull {
+                keyword,
+                marker,
+                strict_markers,
+            } => {
+                self.selection = Some(engine_core::exec::Selection {
+                    keyword,
+                    marker,
+                    strict_markers,
+                });
+                let out = self.run_full_results();
+                self.selection = None;
+                match out {
+                    Ok(results) => RpcResponse::RanFull {
+                        results: results.into_iter().map(to_rpc_full).collect(),
+                    },
+                    Err(message) => RpcResponse::Error { message },
+                }
+            }
             RpcRequest::Recycle => {
                 self.worker = None; // drop the stale warm interpreter; next Run relaunches it
                 match self.run(&[]) {
@@ -812,6 +841,59 @@ impl RpcHandler for EngineHandler {
                 warm: self.worker.is_some() || self.is_warm(),
             },
             RpcRequest::Shutdown => RpcResponse::ShuttingDown,
+        }
+    }
+}
+
+/// The selection as the shim's environment, for a one-shot pool, restored on drop (TID-90).
+#[cfg(unix)]
+struct SelectionEnv {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+#[cfg(unix)]
+impl SelectionEnv {
+    const KEYS: [&'static str; 3] = [
+        "TIDERACE_KEYWORD_EXPR",
+        "TIDERACE_MARKER_EXPR",
+        "TIDERACE_STRICT_MARKERS",
+    ];
+
+    fn set(selection: engine_core::exec::Selection) -> Self {
+        let saved = Self::KEYS
+            .iter()
+            .map(|k| (*k, std::env::var_os(k)))
+            .collect();
+        let values = [
+            selection.keyword,
+            selection.marker,
+            selection.strict_markers.then(|| "1".to_string()),
+        ];
+        for (key, value) in Self::KEYS.iter().zip(values) {
+            // SAFETY: the daemon serves one request at a time on this thread, and no other
+            // thread reads the environment while a run is being set up.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        Self { saved }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SelectionEnv {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..) {
+            // SAFETY: as in `set`.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
         }
     }
 }
