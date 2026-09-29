@@ -1052,11 +1052,16 @@ mod tests {
         let handler = handler_for(&dir);
         let mut state = PersistedState::default();
 
-        handler.persist_results(&mut state, &[], &[result("t.py::a", Some(true), &["t.py"])]);
+        handler.persist_results(
+            &mut state,
+            &[],
+            &[result("t.py::a", Some(true), &["t.py"])],
+            true,
+        );
         assert_eq!(state.tests["t.py::a"].pure, Some(true));
 
         // The bare run: nothing measured.
-        handler.persist_results(&mut state, &[], &[result("t.py::a", None, &["t.py"])]);
+        handler.persist_results(&mut state, &[], &[result("t.py::a", None, &["t.py"])], true);
         assert_eq!(
             state.tests["t.py::a"].pure,
             Some(true),
@@ -1074,11 +1079,17 @@ mod tests {
         let handler = handler_for(&dir);
         let mut state = PersistedState::default();
 
-        handler.persist_results(&mut state, &[], &[result("t.py::a", Some(true), &["t.py"])]);
+        handler.persist_results(
+            &mut state,
+            &[],
+            &[result("t.py::a", Some(true), &["t.py"])],
+            true,
+        );
         handler.persist_results(
             &mut state,
             &[],
             &[result("t.py::a", Some(false), &["t.py"])],
+            true,
         );
         assert_eq!(
             state.tests["t.py::a"].pure,
@@ -1105,8 +1116,9 @@ mod tests {
             &mut state,
             &[],
             &[result("t.py::a", Some(true), &["t.py", "src.py"])],
+            true,
         );
-        handler.persist_results(&mut state, &[], &[result("t.py::a", None, &[])]);
+        handler.persist_results(&mut state, &[], &[result("t.py::a", None, &[])], true);
         assert_eq!(
             state.tests["t.py::a"].deps,
             vec!["t.py".to_string(), "src.py".to_string()],
