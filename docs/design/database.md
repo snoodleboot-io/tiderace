@@ -4,6 +4,14 @@ tiderace keeps no SQLite database. Persisted state lives in two places: a local 
 file** (`.tiderace-state.json`) that drives impact-aware re-runs, and a **content-addressed result
 cache** that turns the suite into a build system. Neither is coverage.py and neither is a relational DB.
 
+## `.tiderace-cache/` — what a run carries to the next
+
+`<root>/.tiderace-cache/file-deps/` holds the static import closure's per-file parse (TID-82):
+`index.json`, keyed by file path with the file's mtime and size and the `sys.path` it was resolved
+under, plus a `w-<pid>.json` per worker from the last run, which the next run's pool parent folds
+into the index before forking. Safe to delete at any time; a run without it parses the files again.
+The suite walker and the collector skip the directory.
+
 ## `.tiderace-state.json` — the warm impact state
 
 The active impact-skip layer (`engine-daemon/src/persist.rs`) writes a single JSON file at
