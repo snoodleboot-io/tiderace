@@ -386,7 +386,11 @@ impl EngineHandler {
             self.run_items_parallel(&[], &trusted, &must_fork, &durations, true)?
         };
         phase.mark("run");
-        self.persist_results(&mut state, &all_candidates, &fresh);
+        // A filtered run (TID-90) learns nothing about deselection: every unselected node
+        // produces nothing by design, which is indistinguishable from an `addopts` deselection
+        // (TID-73) — and recording it as one would make the next warm run skip the suite (TID-92).
+        let unfiltered = self.selection.as_ref().is_none_or(|s| s.is_empty());
+        self.persist_results(&mut state, &all_candidates, &fresh, unfiltered);
         state
             .save(&state_path)
             .map_err(|e| format!("state save failed: {e}"))?;
@@ -417,6 +421,7 @@ impl EngineHandler {
         state: &mut PersistedState,
         executed: &[String],
         results: &[TestResult],
+        learn_deselection: bool,
     ) {
         state.record_durations(results); // TID-62: the next run's scheduler weights
                                          // A candidate that ran and produced nothing is one the project's own `addopts` deselects
@@ -426,12 +431,19 @@ impl EngineHandler {
                                          // learned: it is deselected, and that verdict depends on its own module and on the config
                                          // that deselected it. A candidate that produces results again drops the record.
         let config_deps = self.config_deps();
-        let deselected = deselected_candidates(executed, results);
+        // `learn_deselection` is false for a run under `-k` / `-m` (TID-92): what produced nothing
+        // was unselected by this run, not by the project, and the records stay as they were.
+        let deselected = if learn_deselection {
+            deselected_candidates(executed, results)
+        } else {
+            Vec::new()
+        };
         for cand in executed {
             // Selected again — it produced results of its own this time, so those are the record
             // now. Same rule as `deselected_candidates`, or a class whose own methods are their own
             // candidates would be recorded as deselected and un-recorded in the same breath.
-            if !deselected.contains(cand)
+            if learn_deselection
+                && !deselected.contains(cand)
                 && state
                     .tests
                     .get(cand)
@@ -602,7 +614,7 @@ impl EngineHandler {
                 for r in &fresh {
                     results.push(to_rpc(r.clone()));
                 }
-                self.persist_results(&mut state, &to_execute, &fresh);
+                self.persist_results(&mut state, &to_execute, &fresh, true);
                 // Populate the shared cache with fresh **pure** outcomes (impure is never cached —
                 // ADR-E004 soundness). The key is the executed-source closure from this run's coverage.
                 if let Some(cache) = &self.cache {
@@ -1040,11 +1052,16 @@ mod tests {
         let handler = handler_for(&dir);
         let mut state = PersistedState::default();
 
-        handler.persist_results(&mut state, &[], &[result("t.py::a", Some(true), &["t.py"])]);
+        handler.persist_results(
+            &mut state,
+            &[],
+            &[result("t.py::a", Some(true), &["t.py"])],
+            true,
+        );
         assert_eq!(state.tests["t.py::a"].pure, Some(true));
 
         // The bare run: nothing measured.
-        handler.persist_results(&mut state, &[], &[result("t.py::a", None, &["t.py"])]);
+        handler.persist_results(&mut state, &[], &[result("t.py::a", None, &["t.py"])], true);
         assert_eq!(
             state.tests["t.py::a"].pure,
             Some(true),
@@ -1062,11 +1079,17 @@ mod tests {
         let handler = handler_for(&dir);
         let mut state = PersistedState::default();
 
-        handler.persist_results(&mut state, &[], &[result("t.py::a", Some(true), &["t.py"])]);
+        handler.persist_results(
+            &mut state,
+            &[],
+            &[result("t.py::a", Some(true), &["t.py"])],
+            true,
+        );
         handler.persist_results(
             &mut state,
             &[],
             &[result("t.py::a", Some(false), &["t.py"])],
+            true,
         );
         assert_eq!(
             state.tests["t.py::a"].pure,
@@ -1093,8 +1116,9 @@ mod tests {
             &mut state,
             &[],
             &[result("t.py::a", Some(true), &["t.py", "src.py"])],
+            true,
         );
-        handler.persist_results(&mut state, &[], &[result("t.py::a", None, &[])]);
+        handler.persist_results(&mut state, &[], &[result("t.py::a", None, &[])], true);
         assert_eq!(
             state.tests["t.py::a"].deps,
             vec!["t.py".to_string(), "src.py".to_string()],
