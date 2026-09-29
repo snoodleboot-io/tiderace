@@ -364,7 +364,7 @@ class FixtureDef:
         self.owner = owner
         if bindings is None:
             sig = list(inspect.signature(func).parameters)
-            skip = {"request"} | ({"self"} if owner is not None else set())
+            skip = {"request"} | ({"self", "cls"} if owner is not None else set())
             bindings = {p: p for p in sig if p not in skip}  # pytest/name-DI: identity
         self.bindings = bindings  # param_name -> provider_name
         self.deps = list(bindings.values())
@@ -3149,7 +3149,7 @@ class Engine:
         # `client`, `config` are ordinary words — and it only appears once the run root is wide enough
         # to have discovered the other module's fixture, so the same test passes on a narrow root and
         # errors on the whole package.
-        parametrized = {name for case, _ in raw_cases if isinstance(case, dict) for name in case}
+        parametrized = {name for case, *_ in raw_cases if isinstance(case, dict) for name in case}
         indirect = self._indirect(node_id, style)
         parametrized -= indirect  # indirect values go to the fixture, not the test
         fixture_requested = {
@@ -3161,10 +3161,12 @@ class Engine:
         # yields name→value maps (argnames need not follow the signature order).
         case_kwargs_list = [
             c if isinstance(c, dict) else dict(zip(case_params, c.values))
-            for c, _ in raw_cases
+            for c, *_ in raw_cases
         ] or [{}]
-        # Author-supplied ids, aligned with `case_kwargs_list`; `None` ⇒ generate one.
-        case_ids = [cid for _, cid in raw_cases] or [None]
+        # Author-supplied ids, aligned with `case_kwargs_list`; `None` ⇒ generate one. And each
+        # value's position in its own parametrize axis, for the generated ids (TID-86).
+        case_ids = [cid for _, cid, *_ in raw_cases] or [None]
+        case_pos_maps = [(rest[0] if rest else None) for _, _, *rest in raw_cases] or [None]
 
         # Soundness gate for BOTH in-process paths. A module whose shared state we can't snapshot/restore
         # (opaque globals — an open file, a generator, a live socket) must fork: running it in-process
@@ -3195,6 +3197,15 @@ class Engine:
             return self._module_child_run(node_id, style, deadline_ms)
 
         uses = self._uses(node_id, style)  # @tiderace.uses: set up by type, not injected (B2)
+        # `@pytest.mark.usefixtures("a", "b")` — on the function, its class or its module — sets those
+        # fixtures up around the test without passing them (TID-86). click's shell-completion tests
+        # snapshot and restore a registry through exactly this, and without it the registry entry a
+        # test adds is still there for the next.
+        uses = list(uses) + [
+            name for mark in _pytest_markers(node_id, style)
+            if getattr(mark, "name", "") == "usefixtures"
+            for name in getattr(mark, "args", ()) if isinstance(name, str) and name not in uses
+        ]
         # A marker can imply a fixture request. `@pytest.mark.anyio` means "run me on the backends
         # `anyio_backend` describes" — the anyio plugin wires that up, and a test never names the
         # fixture itself. Adding it to the closure is enough to get the expansion: `anyio_backend` is
@@ -3205,23 +3216,32 @@ class Engine:
         # in an anyio-marked module is one test, not one per backend — which is how pytest collects
         # it too.
         if (_test_is_async(node_id, style) and "anyio" in _mark_names(node_id, style)
-                and self.reg.is_provider("anyio_backend")):
+                and self.reg.is_provider("anyio_backend") and "anyio_backend" not in uses
+                and "anyio_backend" not in requested and "anyio_backend" not in parametrized):
             uses = list(uses) + ["anyio_backend"]
         closure = _closure(self.reg, module_key, fixture_requested, uses,
                            self._test_classes(node_id, style))
-        parametrized = [d for d in closure if d.params]
+        # A fixture the test parametrizes *indirectly* takes the case's value as `request.param`;
+        # its own `params` do not fan out as well — pytest yields `test[asyncio]` for an
+        # `indirect=True` parametrize of `anyio_backend`, not one case per backend times one (TID-86).
+        parametrized = [d for d in closure if d.params and d.name not in indirect]
         if parametrized:
             axes = [
-                [(d.name, p, _fixture_param_id(d, i, p)) for i, p in enumerate(d.params)]
+                [(d.name, _param_value(p), _fixture_param_id(d, i, p), i)
+                 for i, p in enumerate(d.params)]
                 for d in parametrized
             ]
             product = list(itertools.product(*axes))
-            combos = [{n: v for n, v, _ in c} for c in product]
-            # Aligned with `combos`: the author's id per axis, or None where one must be generated.
-            combo_id_maps = [{n: i for n, _, i in c} for c in product]
+            combos = [{n: v for n, v, _, _ in c} for c in product]
+            # Aligned with `combos`: the author's id per axis, or None where one must be generated,
+            # and each value's position in its own axis — what pytest numbers an unprintable value
+            # by (`bucket0-trio`, not the case's position across the product) (TID-86).
+            combo_id_maps = [{n: i for n, _, i, _ in c} for c in product]
+            combo_pos_maps = [{n: pos for n, _, _, pos in c} for c in product]
         else:
             combos = [{}]
             combo_id_maps = [{}]
+            combo_pos_maps = [{}]
 
         outcomes: list[tuple[str, str]] = []
         coverage: dict[str, set] = {}  # union of touched lines across all variants of this node
@@ -3239,8 +3259,8 @@ class Engine:
         # Ids are computed for the WHOLE node up front: pytest indexes every member of a colliding
         # group, which cannot be decided while walking the variants one at a time.
         specs = [
-            (combo, combo_ids, case_pos, case_kwargs)
-            for combo, combo_ids in zip(combos, combo_id_maps)
+            (combo, combo_ids, case_pos, case_kwargs, combo_pos)
+            for combo, combo_ids, combo_pos in zip(combos, combo_id_maps, combo_pos_maps)
             for case_pos, case_kwargs in enumerate(case_kwargs_list)
         ]
         variant_ids = [
@@ -3249,8 +3269,9 @@ class Engine:
             # unparametrized `test_x`.
             f"{node_id}[{text}]" if parametrized_node else node_id
             for text in _disambiguate([
-                _variant_parts(combo, combo_ids, case_kwargs, i, case_ids[case_pos])
-                for i, (combo, combo_ids, case_pos, case_kwargs) in enumerate(specs)
+                _variant_parts(combo, combo_ids, case_kwargs, i, case_ids[case_pos],
+                               combo_pos, case_pos_maps[case_pos])
+                for i, (combo, combo_ids, case_pos, case_kwargs, combo_pos) in enumerate(specs)
             ])
         ]
         # The cases `-k` keeps (TID-63): every one when the node was already a Yes, else each case
@@ -3999,7 +4020,7 @@ class Engine:
             func = getattr(module, node_id.partition("::")[2])
         native = list(getattr(func, "__tiderace_cases__", ()))
         if native:
-            return [(c, None) for c in native]  # native cases carry no author-supplied id
+            return [(c, None, None) for c in native]  # native cases carry no author-supplied id
         # The class and the module too: pytest applies their marks to every test they hold (TID-53).
         owner = getattr(module, _class_method(node_id)[0], None) if style == "class_method" else None
         hook_marks = self._hook_marks(node_id, style, func, module, owner)
@@ -4213,15 +4234,17 @@ def _parametrize_cases(func, *outer, hook_marks=None) -> list[dict]:
                 raw = tuple(entry)
             if explicit is None and ids_kw is not None:
                 explicit = _explicit_id(ids_kw, raw, position)
-            axis.append((dict(zip(names, raw)), None if explicit is None else str(explicit)))
+            axis.append((dict(zip(names, raw)), None if explicit is None else str(explicit), position))
         axes.append(axis)
     cases: list[tuple] = []
     for combo in itertools.product(*axes):
         merged: dict = {}
         pieces: list[tuple] = []  # per axis: (its argnames, the author's id or None)
-        for piece, piece_id in combo:
+        positions: dict = {}  # per argname: the value's position in its axis (TID-86)
+        for piece, piece_id, axis_pos in combo:
             merged.update(piece)
             pieces.append((tuple(piece), piece_id))
+            positions.update({name: axis_pos for name in piece})
         if pieces and all(pid is not None for _, pid in pieces):
             case_id = "-".join(pid for _, pid in pieces)
         elif any(pid is not None for _, pid in pieces):
@@ -4231,7 +4254,7 @@ def _parametrize_cases(func, *outer, hook_marks=None) -> list[dict]:
             case_id = pieces
         else:
             case_id = None
-        cases.append((merged, case_id))
+        cases.append((merged, case_id, positions))
     return cases
 
 
@@ -4838,6 +4861,12 @@ def _id_part(value, argname: str, index: int) -> str:
         return str(value)  # `OpaquePolicy.REPR_CONTENT`; before the int branch, since IntEnum is one
     if isinstance(value, str):
         return value.encode("unicode_escape").decode("ascii")
+    if isinstance(value, bytes):
+        # pytest's `ascii_escaped` for bytes: non-ASCII as `\xNN`, then anything non-printable the
+        # same way, so `b"\x1b[45m123\x1b[0m"` is `\x1b[45m123\x1b[0m` and `b"\xff"` is `\xff` —
+        # not `expect0`, and not the doubly-escaped `\\xff` (TID-86).
+        text = value.decode("ascii", "backslashreplace")
+        return "".join(c if c.isprintable() else f"\\x{ord(c):02x}" for c in text)
     if value is None or isinstance(value, (bool, int, float)):
         return str(value)
     # Classes and functions id by name in pytest. A parametrize value is an arbitrary object, and a lazy
@@ -4848,12 +4877,32 @@ def _id_part(value, argname: str, index: int) -> str:
     return f"{argname}{index}"
 
 
+def _is_param_set(value) -> bool:
+    """A `pytest.param(...)` — `ParameterSet` — probed safely: a lazy proxy raises on attribute access."""
+    return _safe_hasattr(value, "values") and _safe_hasattr(value, "marks") and _safe_hasattr(value, "id")
+
+
+def _param_value(value):
+    """What a fixture's `request.param` is for one entry of `params=`: the value itself, or, for a
+    `pytest.param(...)`, its values — one value unwrapped, several as a tuple — as pytest hands it
+    over. anyio's `anyio_backend` is `pytest.param(("asyncio", {...}), id="asyncio")`, and every
+    test on it received the ParameterSet instead of the tuple (TID-86)."""
+    if _is_param_set(value):
+        values = tuple(value.values)
+        return values[0] if len(values) == 1 else values
+    return value
+
+
 def _fixture_param_id(fdef, index: int, value):
     """The author-supplied id for one parametrized-FIXTURE case, or None to generate one.
 
     `@pytest.fixture(params=[...], ids=[...])` takes the same shapes `parametrize` does, so this
     mirrors `_explicit_id`. Kept separate because a fixture's ids live on its definition rather than
     on a mark, and the two are resolved at different points."""
+    # `pytest.param(..., id="asyncio")` as a fixture param carries its own id (TID-86); `ids=` on
+    # the fixture applies to the rest.
+    if _is_param_set(value) and _safe_getattr(value, "id", None) is not None:
+        return str(value.id)
     ids = getattr(fdef, "param_ids", None)
     if ids is None:
         return None
@@ -4865,15 +4914,17 @@ def _fixture_param_id(fdef, index: int, value):
 
 
 def _variant_parts(combo: dict, combo_ids: dict, case_kwargs: dict, index: int,
-                   explicit=None) -> str:
+                   explicit=None, combo_pos: dict | None = None, case_pos: dict | None = None) -> str:
     """The inside of a variant's `[...]`, before duplicates are disambiguated.
 
     Parametrized-fixture values come first, then the test's own `parametrize` values, each in
     declaration order, and an author-supplied id wins over anything generated. `explicit` is the
     whole case's id (a string), none (generate every part), or a list of per-axis
     `(argnames, id-or-None)` — an explicit piece where the author gave one, generated where not."""
+    cpos = combo_pos or {}
+    kpos = case_pos or {}
     parts = [
-        combo_ids.get(k) if combo_ids.get(k) is not None else _id_part(v, k, index)
+        combo_ids.get(k) if combo_ids.get(k) is not None else _id_part(v, k, cpos.get(k, index))
         for k, v in combo.items()
     ]
     if isinstance(explicit, str):
@@ -4883,9 +4934,10 @@ def _variant_parts(combo: dict, combo_ids: dict, case_kwargs: dict, index: int,
             if piece is not None:
                 parts.append(piece)
             else:
-                parts += [_id_part(case_kwargs[n], n, index) for n in names if n in case_kwargs]
+                parts += [_id_part(case_kwargs[n], n, kpos.get(n, index))
+                          for n in names if n in case_kwargs]
     else:
-        parts += [_id_part(v, k, index) for k, v in case_kwargs.items()]
+        parts += [_id_part(v, k, kpos.get(k, index)) for k, v in case_kwargs.items()]
     return "-".join(parts)
 
 

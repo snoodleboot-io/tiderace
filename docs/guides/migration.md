@@ -45,6 +45,8 @@ to. The codemod translates the mechanical parts of pytest to that model:
 | `@pytest.mark.skipif(c, reason=r)` | `@tiderace.skip_if(c, reason=r)` | |
 | `@pytest.mark.skip` / `xfail` | `@tiderace.skip` / `@tiderace.xfail` | |
 | `@pytest.mark.<name>` (other) | `@tiderace.tag("<name>")` | selection metadata |
+| `@pytest.mark.usefixtures("a", "b")` | `@tiderace.uses(A, B)` | honoured on the function, its class or its module (TID-86) |
+| `tmp_path_factory` / `tmpdir_factory` | same names (builtins) | session-scoped, `mktemp(basename)` / `getbasetemp()` (TID-86) |
 
 ## What needs a human (the report names each one)
 

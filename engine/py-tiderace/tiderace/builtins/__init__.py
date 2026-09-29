@@ -47,6 +47,9 @@ __all__ = [
     "caplog",
     "recwarn",
     "tmpdir",
+    "tmp_path_factory",
+    "tmpdir_factory",
+    "TmpPathFactory",
     "pytestconfig",
     "providers",
 ]
@@ -158,6 +161,80 @@ def _rootdir() -> str:
         return os.getcwd()
 
 
+class TmpPathFactory:
+    """pytest's session-scoped `tmp_path_factory`: `mktemp(basename, numbered=True)` hands out
+    directories under one base temp directory per session, `getbasetemp()` is that base."""
+
+    def __init__(self) -> None:
+        self._base: TmpPath | None = None
+
+    def getbasetemp(self) -> TmpPath:
+        if self._base is None:
+            self._base = TmpPath(tempfile.mkdtemp(prefix="tiderace-session-"))
+        return self._base
+
+    def mktemp(self, basename: str, numbered: bool = True) -> TmpPath:
+        base = self.getbasetemp()
+        if not numbered:
+            path = TmpPath(os.path.join(str(base), basename))
+            os.mkdir(path)
+            return path
+        n = 0
+        while True:  # `basename0`, `basename1`, … — pytest's numbering
+            path = TmpPath(os.path.join(str(base), f"{basename}{n}"))
+            try:
+                os.mkdir(path)
+                return path
+            except FileExistsError:
+                n += 1
+
+
+@tiderace.provides(scope="session")
+def tmp_path_factory() -> Iterator[TmpPathFactory]:
+    """Session-scoped factory of temp directories (pytest's `tmp_path_factory`); the base tree is
+    removed when the session ends. A class-scoped fixture that needs a directory for the whole
+    class reaches for this — anyio's file-stream tests do."""
+    factory = TmpPathFactory()
+    yield factory
+    if factory._base is not None:
+        shutil.rmtree(str(factory._base), ignore_errors=True)
+
+
+class _TmpdirFactory:
+    """The legacy `tmpdir_factory`: `tmp_path_factory` handing out `py.path.local` when one is
+    importable, `TmpPath` otherwise (as `tmpdir` does)."""
+
+    def __init__(self, inner: TmpPathFactory) -> None:
+        self._inner = inner
+
+    @staticmethod
+    def _legacy(path: TmpPath) -> Any:
+        try:
+            from _pytest._py.path import LocalPath
+
+            return LocalPath(str(path))
+        except Exception:  # noqa: BLE001 — no vendored py.path
+            try:
+                from py.path import local as LocalPath
+
+                return LocalPath(str(path))
+            except Exception:  # noqa: BLE001
+                return path
+
+    def getbasetemp(self) -> Any:
+        return self._legacy(self._inner.getbasetemp())
+
+    def mktemp(self, basename: str, numbered: bool = True) -> Any:
+        return self._legacy(self._inner.mktemp(basename, numbered))
+
+
+@tiderace.provides(scope="session")
+def tmpdir_factory(tmp_path_factory) -> _TmpdirFactory:
+    """pytest's legacy `tmpdir_factory`, over `tmp_path_factory`."""
+    return _TmpdirFactory(tmp_path_factory)
+
+
 def providers() -> list:
     """The builtin provider callables, for the shim to register globally (always-available)."""
-    return [monkeypatch, tmp_path, capsys, capfd, caplog, recwarn, tmpdir, pytestconfig]
+    return [monkeypatch, tmp_path, capsys, capfd, caplog, recwarn, tmpdir, tmp_path_factory,
+            tmpdir_factory, pytestconfig]

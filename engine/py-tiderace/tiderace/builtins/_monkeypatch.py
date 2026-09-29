@@ -156,7 +156,21 @@ class MonkeyPatch:
         if not isinstance(dotted, str):
             return dotted, name, _SENTINEL
         module_path, _, attr = dotted.rpartition(".")
-        obj = importlib.import_module(module_path)
+        # pytest's `derive_importpath`: the target may reach *into* a module —
+        # `"click.shell_completion.BashComplete._check_version"` names a method of a class — so
+        # import the longest importable prefix and walk the rest by attribute (TID-86).
+        parts = module_path.split(".")
+        obj = None
+        for cut in range(len(parts), 0, -1):
+            try:
+                obj = importlib.import_module(".".join(parts[:cut]))
+            except ImportError:
+                continue
+            for rest in parts[cut:]:
+                obj = getattr(obj, rest)
+            break
+        if obj is None:
+            raise ImportError(f"could not import any prefix of {module_path!r}")
         # `name` here is actually the *value* in the two-arg string form.
         return obj, attr, name
 
