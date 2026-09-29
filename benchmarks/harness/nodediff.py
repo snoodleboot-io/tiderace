@@ -16,8 +16,13 @@ _, _, cwd, py, target, troot, _ = by_name(name)
 pt = subprocess.run([py, "-m", "pytest", "-p", "no:cacheprovider", "-q", "-rA", target],
                     cwd=cwd, capture_output=True, text=True, env=clean_env()).stdout
 pmap = {}
-for word, node in re.findall(r"^(PASSED|FAILED|ERROR|XFAIL|XPASS|SKIPPED) (\S+)", pt, re.M):
-    pmap[node] = word.lower()
+# A node id runs to the end of the line (parametrize ids contain spaces: `[-1-a b c-expect4]`), and
+# a `SKIPPED [1] file:line: reason` line carries no node id at all. Everything a pytester-driven test
+# prints from its *inner* session lands in this output too; those ids lack the target prefix and
+# are dropped below rather than counted as pytest-only nodes.
+for word, node in re.findall(r"^(PASSED|FAILED|ERROR|XFAIL|XPASS) (.+?)(?: - .*)?$", pt, re.M):
+    if node.startswith(target.rstrip("/") + "/") or node.startswith(target.rstrip("/") + "::"):
+        pmap[node] = word.lower()
 rpath = os.path.join(HERE, f"report-{name}.json")
 if os.path.exists(rpath):
     os.remove(rpath)

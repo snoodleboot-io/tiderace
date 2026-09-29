@@ -74,20 +74,77 @@ comparison — is in that directory's README. `second_run.py` is the benchmark t
 do not cover: a warm run with nothing edited, one edit to a leaf module, one to a hub module, and an
 edit that must produce a failure (the stale-pass check). Its numbers are in the section below.
 
+### The eight-suite pass, 29 September 2026
+
+`bench_pass.sh` — parity, node diff, cold timings, the second run, warm vs xdist — on main at
+`ad3481f` (after TID-76 … TID-86), release build, defaults. Machine shared: one core was pinned by
+an unrelated process throughout, one-minute load 2.5–8.5 recorded with every sample; three
+interleaved rounds after a discarded warm-up, medians.
+
+**Parity first.** Per-node outcome diff (`nodediff.py`) against pytest in the same venv:
+
+| suite | tests | outcome differences | node ids only one side has |
+| -- | --: | --: | -- |
+| fx_corpus | 511 | 0 | 0 |
+| pirn-data | 1,463 | 0 | 0 |
+| pirn-core | 5,036 | 0 | pytest's `addopts` deselections (tiderace reports them as skipped) |
+| pirn-agents | 4,652 | 0 | the same |
+| cachetools | 215 | 0 | 0 |
+| click | 589 + 1 xfail | 0 | 3 Windows-only tests tiderace reports as skipped |
+| flask | 475 + 4 failed + 3 error (both sides) | 0 | 2 greenlet tests tiderace reports as skipped |
+| anyio | ~1,500 | plugin fixtures ([TID-87](https://linear.app/snoodleboot/issue/TID-87)) | 332 / 384 |
+
+**Cold timings**, median wall clock in seconds. tiderace here is `tiderace run` with durations
+already recorded from an earlier run, so its work units are cost-ordered; xdist is `pytest -n auto`.
+
+| suite | pytest | pytest -n auto | tiderace | vs pytest | vs xdist |
+| -- | --: | --: | --: | --: | --: |
+| pirn-core | 77.9 | 40.4 | **26.7** | 2.92× | 1.51× |
+| pirn-agents | 105.9 | 47.6 | **31.1** | 3.40× | 1.53× |
+| pirn-data | 31.2 | exit 3 | **15.3** | 2.04× | — |
+| anyio | 48.2 | 14.9 | **9.7** | 4.97× | 1.54× (partial parity, see above) |
+| cachetools | 0.57 | 1.58 | **0.29** | 1.97× | 5.4× |
+| click | 1.36 | 1.82 | **0.56** | 2.43× | 3.3× |
+| flask | 2.08 | 2.40 | **0.99** | 2.10× | 2.4× |
+| fx_corpus | 0.83 | 2.19 | 0.95 (**0.56** with `--shard-modules`) | 0.87× (1.48× sharded) | 2.3× |
+
+fx_corpus is one 500-test file: since TID-80 a file runs whole on one worker, as under pytest, so
+the default run is serial and slower than pytest; `--shard-modules` (for suites whose files are
+known independent) splits it and runs it in 0.56s. The public suites' xdist rows are its start-up
+on suites that finish in a second or two; the
+honest head-to-heads are the two 5k-test monorepo suites at 1.5×. On pirn-agents the earlier pass
+had tiderace *behind* xdist (0.77×); the queue (TID-52), cost-ordered units (TID-62) and the
+selective/shared import (TID-75/76) turned that into 1.53× — the same suite, same venv.
+`warm_vs_xdist.py`, the dedicated head-to-head at the same load, agrees on pirn-core (**xdist
+40.2s, tiderace 26.8s, 1.50×**); on pirn-agents its two rounds were 61.0s and 31.3s against xdist's
+47.2s — the 61s round is an outlier with no recorded cause (the three cold-pass rounds sat at
+31.0–31.4s), and it is reported rather than dropped.
+
 ### The second run, measured
 
-`second_run.py` on the two ~5k-test monorepo suites (pinned snapshot, machine shared — one-minute
-load 7–15 throughout, recorded with every sample; three rounds, medians). pytest has no warm mode,
-so its number is the same full run every time — that is the comparison.
+`second_run.py` on the two ~5k-test monorepo suites, same pass: a warm run with nothing edited,
+one edit to a leaf module, one to the hub module, and an edit that must produce a failure. pytest
+has no warm mode, so its number is the same full run every time — that is the comparison.
 
 | scenario | pirn-core | pirn-agents |
 | -- | -- | -- |
-| pytest, full run | 98.4s | 111.0s |
-| tiderace, cold `run --all` (coverage on, footprints recorded) | 51.8s | 58.9s |
-| tiderace, warm, **nothing edited** | **7.6s** — 55 ran, 5,602 cached | **2.3s** — 41 ran, 4,657 cached |
-| edit one leaf module (4 / 1 dependents) | 8.1s — 59 ran | 2.3s — 42 ran |
-| edit the hub module (3,953 / 2,428 dependents) | 32.3s — 3,843 ran | 23.6s — 2,357 ran |
-| leaf module made to raise on import | 4 failing, **reported** | 23 failing, **reported** |
+| pytest, full run | 80.0s | 105.8s |
+| tiderace, cold `run --all` (coverage on, footprints recorded) | 30.7s | 40.3s |
+| tiderace, warm, **nothing edited** | **0.16s** — 0 ran, 5,602 cached | **0.13s** — 0 ran, 4,657 cached |
+| edit one leaf module (4 / 1 dependents) | **1.38s** — 4 ran | **1.79s** — 1 ran |
+| edit the hub module (3,958 / 2,428 dependents) | 25.9s — 3,793 ran | 13.9s — 2,316 ran |
+| leaf module made to raise on import | 4 failing, **reported** | 1 failing, **reported** |
+
+pirn-agents' warm runs also carry one cached failure from the daemon's own cold run:
+`tests/llm/test_cross_process_provider_replay.py::TestCrossProcessProviderReplay::test_every_scenario_really_called_the_mock_server_while_recording`
+errors under the daemon's scheduling (it starts a mock HTTP server and replays recorded calls) and
+passes in the one-shot run of the same suite. A cached verdict is served until its dependencies
+change, which is the contract; the error itself is the next thing to look at on this suite.
+
+The first measurement of this table (20 September) read 7.6s / 2.3s for the no-change row and
+8.1s / 2.3s for a leaf edit; the bullets below record what each step found. The cold `run --all`
+is now 30.7s against the 51.8s it was: the coverage-closure fix (TID-76) and the rest of the same
+list.
 
 Read with the same care as the cold numbers:
 
