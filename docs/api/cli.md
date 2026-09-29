@@ -17,7 +17,7 @@ long-option flags). All `TIDERACE_*` names are read directly by the binaries / t
 |---|---|---|---|
 | `TIDERACE_SHIM` | `tiderace run`, all `tiderace-daemon` modes | — (**required**) | Path to `py-shim/shim.py`, the Python executor. Missing ⇒ error + exit. |
 | `TIDERACE_PYTHON` | `tiderace run`, all `tiderace-daemon` modes | `python3` | The interpreter the wellspring launches. |
-| `TIDERACE_SOCKET` | `tiderace-daemon serve` | `<root>/.tiderace-cache/daemon.sock` | Unix-socket path for the RPC server. `tiderace run`/`daemon` only look at the default. |
+| `TIDERACE_SOCKET` | `tiderace-daemon serve` | `<tmp>/tiderace-<uid>/<digest of the root>.sock` | Unix-socket path for the RPC server. `tiderace run`/`daemon` only look at the default. |
 | `TIDERACE_DAEMON_BIN` | `tiderace daemon start` | `tiderace-daemon` beside `tiderace` | The daemon binary to spawn. |
 | `TIDERACE_NO_DAEMON` | `tiderace run` | unset | Set to anything to run in this process even when a daemon is serving the root — for a gate that must not share an image with earlier runs. |
 | `TIDERACE_COVERAGE` | wellspring (set by `tiderace-daemon run`) | off | Capture each test's source footprint via `sys.monitoring`. Set automatically by impact-aware `run`; cleared by `run --all`. |
@@ -89,10 +89,11 @@ FAIL	tests/test_auth.py::test_logout
 
 Keep a `tiderace-daemon serve` for `<path>` alive between runs (TID-84). The daemon imports the
 suite once and holds that image; every later `tiderace run <path>` forks its workers from it, so the
-run pays scheduling and execution but no interpreter start-up and no imports. The image is dropped
-and re-imported when any `.py` file under `<path>` changes (path, size or mtime), so a stale module
-is never executed — which is also why this helps the runs that *don't* touch source: a test-only
-edit, a re-run, a CI-style gate on an unchanged tree. An edit under `src/` still pays the import.
+run pays scheduling and execution but no interpreter start-up and no imports — on a 5,600-test
+monorepo suite, 24s instead of 28s. The image is dropped and re-imported when any `.py` or pytest
+config file under `<path>` changes (path, size or mtime), so a stale module is never executed —
+which is why this helps the runs that *don't* edit the tree: a re-run, a CI-style gate on an
+unchanged tree. Any edit still pays the import.
 
 | Verb | Does |
 |---|---|
@@ -106,7 +107,9 @@ tiderace run tests/              # "tiderace: ... via daemon"
 tiderace daemon stop tests/
 ```
 
-Unix only: the daemon answers on `<path>/.tiderace-cache/daemon.sock`. The daemon shares the
+Unix only: the daemon answers on `<tmp>/tiderace-<uid>/<digest of the path>.sock` — not under
+the project, since a Unix socket path is limited to ~108 bytes and a project's path can be longer;
+the log names it. The daemon shares the
 interpreter image across runs of the same tree; see [When not to use watch](../guides/watch.md#when-not-to-use-it)
 for why a CI gate should stay a one-shot.
 
@@ -157,7 +160,8 @@ PASS	tests/test_auth.py::test_logout
 
 Bind the per-project Unix socket and answer JSON-RPC requests over a persistent warm session until
 `Shutdown`. The socket path comes from `TIDERACE_SOCKET`, defaulting to
-`<root>/.tiderace-cache/daemon.sock` — where `tiderace run` and `tiderace daemon` look for it.
+`<tmp>/tiderace-<uid>/<digest of the root>.sock` — where `tiderace run` and `tiderace daemon` look
+for it.
 Methods: `Discover`, `Run`, `RunFull`, `Watch`, `Recycle`, `Health`, `Shutdown` (see
 [Schema](schema.md) for the wire format). `RunFull` is the full parallel run `tiderace run` performs,
 served from the warm image and answered with the engine's per-node results. On non-Unix platforms this mode is unavailable and

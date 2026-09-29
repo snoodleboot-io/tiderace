@@ -8,7 +8,7 @@
 //!
 //! Env: `TIDERACE_SHIM` (path to `py-shim/shim.py`, required); `TIDERACE_PYTHON` (default `python3`,
 //! or `python` on Windows, whose venvs create no `python3.exe` — see `engine_core::default_python`);
-//! `TIDERACE_SOCKET` (serve mode socket path; default `<tmp>/tiderace-daemon.sock`).
+//! `TIDERACE_SOCKET` (serve mode socket path; default `engine_daemon::daemon_socket_path(root)`).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

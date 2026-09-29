@@ -16,7 +16,7 @@ child). There is exactly one command-line flag — `--all` — on the daemon's `
 | `TIDERACE_CACHE_DIR` | off | Directory for the **content-addressed result cache** (ADR-E004). Point it at a CI cache path / shared mount / artifact dir and a *pure* test's outcome computed on one machine is served without re-running on any other with the same inputs — even when local impact state is stale. Off ⇒ impact-skip only. |
 | `TIDERACE_SUBINTERP` | off | Opt into the **sub-interpreter tier** (ADR-E015) on `run --all`: sub-interpreter-*safe* modules run through a parallel sub-interpreter pool (no fork), the rest through the ordinary pool. Its purpose is **Windows** parallelism (no `fork()` there); on Linux the fork pool already parallelizes, so it measures at parity. Requires CPython 3.14+. |
 | `TIDERACE_SUBINTERP_WORKERS` | CPU count | Size of the sub-interpreter pool when `TIDERACE_SUBINTERP=1`. |
-| `TIDERACE_SOCKET` | `<tmp>/tiderace-daemon.sock` | `serve` mode: the Unix socket path the RPC server binds. |
+| `TIDERACE_SOCKET` | `<tmp>/tiderace-<uid>/<digest of the root>.sock` | `serve` mode: the Unix socket path the RPC server binds; `tiderace run` and `tiderace daemon` look only at the default. |
 | `TIDERACE_REQUIRE_LIVE` | off | Testing/CI: make the engine's own *live* test scenarios **fail** instead of self-skipping when their interpreter/venv is absent. Set in the CI jobs that provision Python, so a broken test environment can't pass as a silent no-op. Not needed to *use* tiderace. |
 
 ```bash

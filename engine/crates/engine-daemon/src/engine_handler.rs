@@ -109,8 +109,11 @@ impl EngineHandler {
     /// unchanged, TID-1) run BARE no-fork, skipping the snapshot. That is ~90× cheaper per test only in
     /// the trivial-test microbenchmark; measured on real corpora it is ~3.4× where it applies, and on a
     /// suite built with module-level test doubles it applies to no test at all (TID-41).
-    /// A digest of every `.py` file under the root — path, mtime, size — cheap enough to take per
-    /// run. It is what decides whether the warm image still describes the tree (TID-84).
+    /// A digest of every `.py` file and pytest config file under the root — path, mtime, size —
+    /// cheap enough to take per run. It is what decides whether the warm image still describes
+    /// the tree (TID-84): the shim reads the config (`addopts`, markers) at start-up, so a config
+    /// edit stales the image exactly as a source edit does.
+    #[cfg(unix)]
     fn tree_stamp(root: &Path) -> u64 {
         use std::hash::{Hash, Hasher};
         fn walk(dir: &Path, root: &Path, h: &mut std::collections::hash_map::DefaultHasher) {
@@ -127,7 +130,12 @@ impl EngineHandler {
                     if !engine_core::collection::SKIP_DIRS.contains(&name.as_ref()) {
                         walk(&path, root, h);
                     }
-                } else if name.ends_with(".py") {
+                } else if name.ends_with(".py")
+                    || matches!(
+                        name.as_ref(),
+                        "pytest.ini" | "pyproject.toml" | "tox.ini" | "setup.cfg"
+                    )
+                {
                     if let Ok(meta) = entry.metadata() {
                         path.strip_prefix(root).unwrap_or(&path).hash(h);
                         meta.len().hash(h);
@@ -143,16 +151,25 @@ impl EngineHandler {
         h.finish()
     }
 
-    /// The warm image for this run: reused while the tree is unchanged and the parent alive,
-    /// relaunched — a full import — otherwise (TID-84). Taken out of `self` for the run's duration.
+    /// The warm image for this run, taken out of `self` for the run's duration: reused while the
+    /// tree is unchanged and the parent alive; otherwise dropped, and — for a full run — relaunched,
+    /// which is the full import a full run pays anyway (TID-84). An impacted run on a changed tree
+    /// gets `None`: it runs on the one-shot pool with its selective import (TID-75), which is
+    /// cheaper than importing the whole tree into a new image it may not need.
     #[cfg(unix)]
-    fn warm_pool(&mut self) -> Result<engine_core::exec::WellspringPool, String> {
+    fn warm_pool(
+        &mut self,
+        launch: bool,
+    ) -> Result<Option<engine_core::exec::WellspringPool>, String> {
         let stamp = Self::tree_stamp(&self.root);
         if let Some(mut pool) = self.warm.take() {
             if self.warm_stamp == Some(stamp) && pool.is_alive() {
-                return Ok(pool);
+                return Ok(Some(pool));
             }
-            drop(pool); // stale or dead: its parent exits, and a fresh one imports the tree as it is
+            drop(pool); // stale or dead: its parent exits
+        }
+        if !launch {
+            return Ok(None);
         }
         let pool = engine_core::exec::WellspringPool::launch_persistent(
             &self.python,
@@ -162,7 +179,7 @@ impl EngineHandler {
         )
         .map_err(|e| format!("failed to launch the warm image: {e}"))?;
         self.warm_stamp = Some(stamp);
-        Ok(pool)
+        Ok(Some(pool))
     }
 
     /// The warm image's parent pid, when one is held.
@@ -200,6 +217,7 @@ impl EngineHandler {
         trusted: &HashSet<String>,
         must_fork: &HashSet<String>,
         durations: &HashMap<String, u64>,
+        full_run: bool,
     ) -> Result<Vec<TestResult>, String> {
         let all = self.collect()?;
         let items: Vec<TestItem> = if requested.is_empty() {
@@ -212,10 +230,11 @@ impl EngineHandler {
         #[cfg(unix)]
         {
             // Warm image (TID-84): this run's workers are forked off a persistent parent that
-            // already holds the imported suite. When the ladder is off (`TIDERACE_FORCE_FORK=1`)
-            // the one-shot pool runs as before.
+            // already holds the imported suite — when one is held and still describes the tree,
+            // or when this is a full run, which launches it. When the ladder is off
+            // (`TIDERACE_FORCE_FORK=1`) the one-shot pool runs as before.
             let mut pool = if optimistic_no_fork() {
-                Some(self.warm_pool()?)
+                self.warm_pool(full_run)?
             } else {
                 None
             };
@@ -235,6 +254,8 @@ impl EngineHandler {
             self.warm = pool; // back for the next run, whatever this one's outcome
             out
         }
+        #[cfg(not(unix))]
+        let _ = full_run;
         #[cfg(not(unix))]
         crate::pool::run_parallel(
             &self.python,
@@ -328,11 +349,12 @@ impl EngineHandler {
                     &trusted,
                     &must_fork,
                     &durations,
+                    true,
                 )?);
             }
             fresh
         } else {
-            self.run_items_parallel(&[], &trusted, &must_fork, &durations)?
+            self.run_items_parallel(&[], &trusted, &must_fork, &durations, true)?
         };
 
         self.persist_results(&mut state, &all_candidates, &fresh);
@@ -540,8 +562,13 @@ impl EngineHandler {
                     .map(|(node, _)| node.clone())
                     .collect();
                 let durations = recorded_durations(&state);
-                let fresh =
-                    self.run_items_parallel(&to_execute, &HashSet::new(), &disturbers, &durations)?;
+                let fresh = self.run_items_parallel(
+                    &to_execute,
+                    &HashSet::new(),
+                    &disturbers,
+                    &durations,
+                    false,
+                )?;
                 for r in &fresh {
                     results.push(to_rpc(r.clone()));
                 }
