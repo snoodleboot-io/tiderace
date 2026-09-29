@@ -156,6 +156,12 @@ Read with the same care as the cold numbers:
   22.9s test and 18 others, and running it whole makes the critical path 25.7s instead of 22.9s —
   warm **26.0s → 28.8s** (single runs, not load-gated). `--shard-modules` buys that back for a suite
   whose files are known independent; a single-file suite now runs on one worker unless it asks.
+  [TID-81](https://linear.app/snoodleboot/issue/TID-81) then moved the in-process restore from
+  after every test to the module boundary, so a file's own globals accumulate across its tests as
+  they do under pytest; per-test verdicts are unchanged. Parity after both: pirn-core 5,036 / 0
+  with no outcome differences against the run before, and pirn-agents **4,652 / 0** — the one
+  order-dependent test that had been the benchmark's single divergence now runs, in file order,
+  before the import that broke it.
 - **A cached failure stays failed.** pirn-agents' warm runs report `2 failing` from cache: the
   order-dependent test the cold benchmark names, plus one more under the daemon's scheduling. A
   cached verdict is served until its dependencies change, which is the contract.

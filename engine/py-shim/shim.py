@@ -2197,6 +2197,29 @@ def _is_test_owned(value, module_key: str) -> bool:
     return name == "conftest.py" or name.startswith("test_") or name.endswith("_test.py")
 
 
+def _registry_delta(before: dict, module_key: str) -> str | None:
+    """What the suite added to another module's containers since `before`, without touching it —
+    the per-test verdict's view; `_restore_registries` puts it back at the module boundary."""
+    changed = []
+    for key, (container, saved) in before.items():
+        try:
+            if container == saved:
+                continue
+            if isinstance(container, dict):
+                added = any(k not in saved and _is_test_owned(container[k], module_key) for k in container)
+            else:
+                added = any(v not in saved and _is_test_owned(v, module_key) for v in container)
+        except Exception:  # noqa: BLE001 — an uncooperative container is not a verdict
+            continue
+        if added:
+            changed.append(key)
+    if not changed:
+        return None
+    shown = ", ".join(sorted(changed)[:3])
+    more = "" if len(changed) <= 3 else f" (+{len(changed) - 3} more)"
+    return f"{shown}{more}"
+
+
 def _restore_registries(before: dict, module_key: str) -> str | None:
     """Remove what the *suite* put into another module's containers; returns what it changed.
 
@@ -2821,6 +2844,7 @@ class Engine:
         self._disturbance = None  # what moved, kept for the verdict the clean-room handoff reports
         self.restore = restore  # snapshot/restore shared state around no-fork tests (isolation w/o fork)
         self._module_child = None  # the live child running an opaque module's tests, if any (TID-80)
+        self._guard = None  # the in-process module's entry snapshot, restored when we leave it (TID-81)
         self._in_module_child = False  # set in that child: run everything in-process, never fork
         self.active: list[_Active] = []  # in setup order (widest → narrowest)
 
@@ -2859,13 +2883,63 @@ class Engine:
 
     def _teardown_stale(self, node_id: str) -> None:
         """Tear down active wider fixtures whose scope-instance no longer matches this test, from the
-        narrow end (active is ordered widest → narrowest)."""
+        narrow end (active is ordered widest → narrowest). Then, if this test is the first of a new
+        module, put back what the previous module changed (TID-81) — after its fixtures are gone,
+        so a finalizer never runs against restored globals."""
         while self.active:
             top = self.active[-1]
             if top.key == _instance_key(top.fdef, node_id):
                 break
             _teardown(top.gen)
             self.active.pop()
+        if self._guard is not None and self._guard["module_key"] != _module_key(node_id):
+            self._leave_module()
+
+    def _enter_module(self, module_key: str) -> None:
+        """Snapshot the module the worker is entering, once, before its first in-process test: its
+        globals, `os.environ`, `sys.modules`, the interpreter state the fingerprint watches, and the
+        library containers this module's imports reach (TID-81). `_leave_module` restores all of it."""
+        if self._guard is not None:
+            if self._guard["module_key"] == module_key:
+                return
+            self._leave_module()
+        try:
+            mod = importlib.import_module(_module_name(module_key))
+        except Exception:  # noqa: BLE001 — nothing to snapshot; nothing to put back either
+            return
+        self._guard = {
+            "module_key": module_key,
+            "module": mod,
+            "globals": _snapshot_shared(mod),
+            "environ": dict(os.environ),
+            "modules": dict(sys.modules),
+            "state": _state_fingerprint(),
+            "registries": _registry_snapshot(module_key),
+        }
+
+    def _leave_module(self) -> None:
+        """Restore the entered module's snapshot: the next module on this worker starts from the
+        state this one found, whatever its tests did in between (TID-81)."""
+        guard, self._guard = self._guard, None
+        if guard is None:
+            return
+        try:
+            _restore_shared(guard["module"], guard["globals"], guard["environ"])
+        except Exception:  # noqa: BLE001 — a global that will not restore must not take the worker
+            pass
+        _restore_modules(guard["modules"])
+        # A container the library created *during* the module (TID-68) was not in the entry
+        # snapshot; found now, it is restored against "empty", which pulls the suite's own entries
+        # out and leaves the library's.
+        registries = dict(guard["registries"])
+        for label, (container, _) in _registry_snapshot(guard["module_key"]).items():
+            if label not in registries:
+                try:
+                    registries[label] = (container, type(container)())
+                except Exception:  # noqa: BLE001 — an exotic container stays as it is
+                    pass
+        _restore_registries(registries, guard["module_key"])
+        _restore_state(guard["state"])
 
     def run(self, node_id: str, style: str, deadline_ms: int, force_no_fork: bool = False,
             trusted_pure: bool = False) -> dict:
@@ -3628,6 +3702,8 @@ class Engine:
             # usually applies to few tests: anything recording into shared state is not pure (TID-41).
             # Otherwise snapshot to measure/restore.
             need_snap = (self.purity_guard or (self.restore and in_process)) and not trusted_pure
+            if self.restore and in_process:
+                self._enter_module(module_key)
             mod = importlib.import_module(_module_name(module_key)) if need_snap else None
             before = _snapshot_shared(mod) if mod is not None else None
             env_before = dict(os.environ) if mod is not None else None
@@ -3643,11 +3719,17 @@ class Engine:
             # not live in this test's module, and restore has no way to put it back (TID-46).
             registry_before = _registry_snapshot(module_key) if state_before is not None else None
             outcome, detail = _invoke(node_id, style, test_args)
+            # Everything below MEASURES; nothing here restores. A file's tests run in one process
+            # in file order, and what one leaves behind is there for the next, as under pytest
+            # (TID-80). The restore that stands in for a fork now happens when this worker leaves
+            # the module (`_leave_module`), against the snapshot taken when it entered, so the
+            # next module starts clean and this one behaves as its author saw it under pytest
+            # (TID-81). The per-test verdict still says what each test touched: it decides the
+            # bare tier (TID-1) and it is what a reader of `--report` wants to know.
             purity = _purity_verdict(mod, before, env_before) if mod is not None else _UNKNOWN_PURITY
-            if self.restore and in_process and mod is not None and purity is not None:
-                _restore_shared(mod, before, env_before)  # undo the mutation → next test isolated
             if modules_before is not None:
-                replaced = _restore_modules(modules_before)
+                replaced = [name for name, module in modules_before.items()
+                            if sys.modules.get(name) is not None and sys.modules.get(name) is not module]
                 if replaced:
                     # Impure whatever the globals said: `_purity_verdict` cannot see this, and a test
                     # recorded pure would later take the BARE no-fork tier, which skips the snapshot
@@ -3657,29 +3739,24 @@ class Engine:
                     purity = f"replaced modules in sys.modules: {shown}{more}"
             if state_before is not None:
                 drift = _fingerprint_delta(state_before, _state_fingerprint())
-                # Put the library's own containers back before anything else runs here, then treat
-                # the test as a disturber: its result came from a world it had already changed, so it
-                # is re-run in the clean room (TID-50) and forked from now on.
-                registry_drift = _restore_registries(registry_before, module_key)
-                if registry_drift is not None:
-                    self._leaked = registry_drift
-                    purity = f"disturbed interpreter state: {registry_drift}"
-                    self._state_disturbed = True
-                    self._disturbance = registry_drift
+                registry_drift = _registry_delta(registry_before, module_key)
+                if registry_drift is not None and purity is None:
+                    purity = f"mutated another module's state: {registry_drift}"
                 if drift is not None:
-                    # Put back what is restorable before anything else runs in this process. The
-                    # offender's own result is still discarded below — it ran against a world it had
-                    # already changed — but its neighbours must not inherit the damage.
-                    _restore_state(state_before)
-                    residue = _fingerprint_delta(state_before, _state_fingerprint())
+                    if purity is None:
+                        purity = f"changed interpreter state: {drift}"
+                    # A thread left running is the one thing no restore can undo, at the boundary
+                    # or anywhere: it keeps executing in this process, and in every child forked
+                    # from it. That test should never have run in-process — `_leaked` tells the
+                    # caller to discard this result and re-run it forked (TID-33, TID-50), and it
+                    # forks from now on. Everything else the fingerprint watches is put back when
+                    # the module is left, and inside the module it is what pytest would show too.
+                    residue = _fingerprint_delta(
+                        {k: v for k, v in state_before.items() if k == "threads"},
+                        {k: v for k, v in _state_fingerprint().items() if k == "threads"})
                     if residue is not None:
-                        drift = f"{drift} (unrestorable: {residue})"
-                    # The world moved in a way nothing above undid, so this test should never have
-                    # run in-process. `_leaked` tells the caller to discard this result and re-run it
-                    # forked — detection that only fixed the NEXT run would leave the first one
-                    # quietly wrong, and the first run is where CI goes red for no visible reason.
-                    self._leaked = drift
-                    purity = f"disturbed interpreter state: {drift}"
+                        self._leaked = f"{drift} (unrestorable: {residue})"
+                        purity = f"disturbed interpreter state: {self._leaked}"
             cov.stop()
             return outcome, detail, cov.report_with_imports(module_key), purity
         finally:

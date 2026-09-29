@@ -103,9 +103,9 @@ def test_dict_a_mutates():
 
 def test_dict_b_sees_its_own_write():
     REC.record(\"b\")
-    # Rebinding leaves REC.sink pointing at the old dict, so this write lands where CALLS cannot
-    # see it — and CALLS is empty rather than {\"b\": 1}.
-    assert CALLS == {\"b\": 1}, f\"CALLS={CALLS!r} REC.sink={REC.sink!r}\"
+    # Rebinding would leave REC.sink pointing at the old dict, so this write would land where CALLS
+    # cannot see it. Inside the file the earlier write is still here too, as under pytest.
+    assert CALLS == {\"a\": 1, \"b\": 1}, f\"CALLS={CALLS!r} REC.sink={REC.sink!r}\"
 
 
 def test_list_a_mutates():
@@ -115,7 +115,7 @@ def test_list_a_mutates():
 
 def test_list_b_sees_its_own_write():
     SLOTTED.bucket.append(\"b\")
-    assert ITEMS == [\"b\"], f\"ITEMS={ITEMS!r} SLOTTED.bucket={SLOTTED.bucket!r}\"
+    assert ITEMS == [\"a\", \"b\"], f\"ITEMS={ITEMS!r} SLOTTED.bucket={SLOTTED.bucket!r}\"
 
 
 def test_set_a_mutates():
@@ -123,10 +123,9 @@ def test_set_a_mutates():
     assert SEEN == {\"a\"}
 
 
-def test_set_b_is_reset_in_place():
-    assert SEEN == set(), f\"SEEN={SEEN!r}\"
+def test_set_b_accumulates():
     SEEN.add(\"b\")
-    assert SEEN == {\"b\"}
+    assert SEEN == {\"a\", \"b\"}, f\"SEEN={SEEN!r}\"
 
 
 def test_deque_a_appends():
@@ -136,7 +135,7 @@ def test_deque_a_appends():
 
 def test_deque_b_sees_its_own_write():
     QUEUE.events.append(\"b\")
-    assert list(EVENTS) == [\"b\"], f\"EVENTS={list(EVENTS)!r} QUEUE.events={list(QUEUE.events)!r}\"
+    assert list(EVENTS) == [\"a\", \"b\"], f\"EVENTS={list(EVENTS)!r} QUEUE.events={list(QUEUE.events)!r}\"
 
 
 def test_array_a_appends():
@@ -146,7 +145,7 @@ def test_array_a_appends():
 
 def test_array_b_sees_its_own_write():
     QUEUE.nums.append(2)
-    assert list(NUMS) == [2], f\"NUMS={list(NUMS)!r} QUEUE.nums={list(QUEUE.nums)!r}\"
+    assert list(NUMS) == [1, 2], f\"NUMS={list(NUMS)!r} QUEUE.nums={list(QUEUE.nums)!r}\"
 
 
 def test_identity_survived_every_restore():
@@ -172,7 +171,43 @@ fn write_corpus(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("test_identity.py"), CORPUS).unwrap();
+    // A second module, so the worker leaves `test_identity` — which is when its state is put back.
+    std::fs::write(
+        dir.join("test_zz_other.py"),
+        "def test_elsewhere():\n    assert True\n",
+    )
+    .unwrap();
     dir
+}
+
+/// Run `test_identity` twice with the other module in between, on one worker. The `_a` tests pass
+/// the second time only if the boundary restore emptied the containers **in place**; the identity
+/// test passes only if nothing was rebound. The `_b` tests see the file's accumulated state each
+/// time, as under pytest (TID-81).
+fn run_leave_and_return(worker: &mut dyn Worker, dir: &std::path::Path, label: &str) {
+    let all = RegexCollector::new().collect(dir).expect("collection");
+    let identity: Vec<_> = all
+        .iter()
+        .filter(|i| i.node_id.as_str().starts_with("test_identity.py"))
+        .cloned()
+        .collect();
+    let other: Vec<_> = all
+        .iter()
+        .filter(|i| i.node_id.as_str().starts_with("test_zz_other.py"))
+        .cloned()
+        .collect();
+    assert_eq!(identity.len(), 11, "11 tests in the corpus");
+    assert_eq!(other.len(), 1);
+    let first = worker.run(&identity).expect("first pass runs");
+    assert_eq!(first.len(), 11, "one result per test");
+    assert_all_passed(&first, &format!("{label}, first pass"));
+    let elsewhere = worker.run(&other).expect("the other module runs");
+    assert_all_passed(&elsewhere, &format!("{label}, other module"));
+    let again = worker.run(&identity).expect("second pass runs");
+    assert_all_passed(
+        &again,
+        &format!("{label}, back in the module after the boundary restore"),
+    );
 }
 
 fn assert_all_passed(results: &[TestResult], label: &str) {
@@ -196,35 +231,8 @@ fn restore_preserves_identity_on_the_no_fork_tier() {
         return;
     };
     let dir = write_corpus("nofork");
-    let items = RegexCollector::new().collect(&dir).expect("collection");
-    assert_eq!(items.len(), 11, "11 tests in the corpus");
-
     let mut worker = SubprocessWorker::new(10_000, 1).with_target(python, &shim(), &dir);
-    let results = worker.run(&items).expect("batch runs against real Python");
-    assert_eq!(results.len(), 11, "one result per test");
-    assert_all_passed(&results, "subprocess");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The same corpus must also pass under fork, where each child is a pristine COW copy. If it did
-/// not, the corpus would be asserting something about restore that is not true of the engine.
-#[cfg(unix)]
-#[test]
-fn the_same_corpus_passes_under_fork() {
-    use engine_core::exec::ForkWorker;
-
-    let Some(python) = any_python() else {
-        skip_live("no Python interpreter available");
-        return;
-    };
-    let dir = write_corpus("fork");
-    let items = RegexCollector::new().collect(&dir).expect("collection");
-
-    let results = ForkWorker::launch(&python, &shim(), &dir)
-        .expect("wellspring")
-        .run(&items)
-        .expect("fork batch runs");
-    assert_all_passed(&results, "fork");
+    run_leave_and_return(&mut worker, &dir, "subprocess");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -240,12 +248,8 @@ fn the_optimistic_ladder_preserves_identity_too() {
         return;
     };
     let dir = write_corpus("optimistic");
-    let items = RegexCollector::new().collect(&dir).expect("collection");
-
-    let results = ForkWorker::launch_optimistic(&python, &shim(), &dir)
-        .expect("wellspring with restore")
-        .run(&items)
-        .expect("optimistic batch runs");
-    assert_all_passed(&results, "fork --optimistic");
+    let mut worker =
+        ForkWorker::launch_optimistic(&python, &shim(), &dir).expect("wellspring with restore");
+    run_leave_and_return(&mut worker, &dir, "fork --optimistic");
     let _ = std::fs::remove_dir_all(&dir);
 }

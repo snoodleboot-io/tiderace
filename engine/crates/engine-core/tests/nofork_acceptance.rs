@@ -269,7 +269,9 @@ fn opaque_module_is_isolated_by_fork_or_refused_never_leaked() {
 /// standalone the flag was unset and every module-level mutation persisted into the next test on that
 /// module. The existing acceptance corpus never mutated globals, so nothing caught it.
 ///
-/// `test_b` fails iff `test_a`'s append survived.
+/// Since TID-81 the file keeps its own state between its tests, as it does under pytest: `test_b`
+/// sees `test_a`'s append. What must not happen is that state reaching the *next module*, which the
+/// fingerprint and identity suites cover; here the assertion is pytest's.
 const MUTATING_CORPUS: &str = "\
 _SEEN = []
 
@@ -279,7 +281,7 @@ def test_a():
 
 def test_b():
     _SEEN.append(2)
-    assert _SEEN == [2], f\"LEAK: state from a previous test survived: {_SEEN}\"
+    assert _SEEN == [1, 2], f\"a file's state must carry between its tests, as under pytest: {_SEEN}\"
 ";
 
 #[test]

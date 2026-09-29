@@ -34,19 +34,22 @@ Two things a pytest suite may lean on without noticing, stated here so a diverge
 what it is.
 
 **Execution order across modules.** A module's tests run in one process, in file order, as
-pytest runs them (TID-80): a file whose tests hand each other state through a fixture, a library or
-a mock's backend — an object uploaded in one test and listed in the next — works as it does under
-pytest. One difference stays, and is stated: on the in-process tier a test module's *own* globals
-are put back after each test, because that restore is what stands in for a fork; a counter a test
-increments in its module is back to its value for the next test. What is *not* promised is the order
+pytest runs them (TID-80): a file whose tests hand each other state — through a fixture, a library,
+a mock's backend or the module's own globals — works as it does under pytest. Nothing is put back
+between a file's tests; what is put back is the *module*: when a worker leaves a file for the next,
+that file's globals, `os.environ`, `sys.modules`, the working directory, `sys.path`, the logging
+and warnings state, and the entries its tests added to library registries are restored to what the
+worker found on entering it (TID-81). So the next module starts clean, and the file itself behaves
+as its author saw it under pytest. What is *not* promised is the order
 *between* modules, or that two modules share a process: modules are units handed to workers from a
 queue, heaviest first. A test that asserts on what an earlier *module* left behind — the canonical
 case is `assert "chromadb" not in sys.modules`, true only if nothing before it imported the
 package — is order-dependent under pytest too (`pytest -p randomly` breaks it the same way), and
 the fix belongs in the test. When such a failure mentions `sys.modules`, the engine appends a line
 saying so rather than leaving a bare `AssertionError` to read as the runner's bug. This was the
-single divergence on a 4,652-test suite in the benchmark, and it stays in that count: a real
-difference, not a defect. `--shard-modules` gives the old behaviour back — a file heavier than one
+single divergence on a 4,652-test suite in the benchmark; with the file now run in its own order
+that test precedes the import that broke it and the suite agrees with pytest exactly, but the
+class of difference remains real and is not promised away. `--shard-modules` gives the old behaviour back — a file heavier than one
 worker's share split across workers, every core busy on a single-file suite, and such files may
 break — the trade `pytest-xdist` makes between `--dist loadfile` and `--dist load`.
 
@@ -121,7 +124,7 @@ flowchart TD
 | Tier | When | Isolation mechanism | Per-test cost ¹ |
 |---|---|---|---|
 | **bare no-fork** | test is *known pure* (recorded verdict) | nothing to isolate | ~0.05 ms (90×) |
-| **no-fork + restore** | *restorable* footprint, purity unknown/impure | deep-copy snapshot of module globals + `os.environ`, run, restore ² | ~0.4–0.9 ms (5–14×) |
+| **no-fork + restore** | *restorable* footprint, purity unknown/impure | deep-copy snapshot of module globals + `os.environ` on entering the module, per-test verdict, restore on leaving it ² | ~0.4–0.9 ms (5–14×) |
 | **fork** | module has *opaque* (un-deep-copyable) globals | copy-on-write child | ~4.5 ms (1×) |
 
 ² A global whose type compares by identity (no `__eq__`) is snapshotted as itself, not deep-copied: a
@@ -130,6 +133,11 @@ import annotations` binds one such global (`annotations`) in almost every module
 accounted for 4,491 of 4,499 impure verdicts and left 16 tests recorded pure; with the identity rule
 4,488 are (TID-77). The verdict still catches a rebinding; mutation *inside* such an object is left to
 the fingerprint, as it always was.
+
+The per-test snapshot is a *verdict*, not a restore, since TID-81: it says what each test touched
+(the bare tier and `--report` read it), and the restore happens once, at the module boundary. The
+one thing no boundary can put back is a thread a test left running; that test is re-run in the
+clean room and forks from then on, as before.
 
 ¹ **Microbenchmark figures** — one *trivial* test, against a fork from a *light* parent. They show the
 shape of each tier's overhead, not what a suite will see, and both halves of the ratio move:

@@ -95,6 +95,13 @@ def test_b_registers_its_own_class_in_it():
 
     fakelib.registry()["mine"] = Mine
     assert "mine" in fakelib.registry()
+"#;
+
+/// The next module on the same worker (TID-81): a container the library created *during* the
+/// previous module was never in that module's entry snapshot, so leaving the module has to find
+/// it and pull the suite's entries out — the same rescan TID-68 required per test.
+const NEXT_MODULE: &str = r#"
+import fakelib
 
 
 def test_c_sees_it_clean():
@@ -114,6 +121,7 @@ fn a_container_added_to_an_existing_module_is_watched_from_the_next_test_on() {
     std::fs::create_dir_all(dir.join("fakelib")).unwrap();
     std::fs::write(dir.join("fakelib/__init__.py"), LIBRARY).unwrap();
     std::fs::write(dir.join("test_late.py"), CORPUS).unwrap();
+    std::fs::write(dir.join("test_late_next.py"), NEXT_MODULE).unwrap();
 
     let items = RegexCollector::new().collect(&dir).expect("collection");
     assert_eq!(items.len(), 3);

@@ -93,6 +93,12 @@ def test_a_registers_its_own_class_and_warms_the_library():
     fakelib.register("mine", MyHandler)
     fakelib.lazy_self_registration()
     assert "mine" in fakelib.REGISTRY
+"#;
+
+/// The next module on the same worker. Inside `test_registry.py` the entry stays — pytest would
+/// leave it too — and it is pulled back out when the worker leaves that module (TID-81).
+const NEXT_MODULE: &str = r#"
+import fakelib
 
 
 def test_b_sees_a_clean_registry_but_keeps_the_libraries_own_entry():
@@ -115,6 +121,7 @@ fn a_registry_entry_a_test_added_does_not_reach_the_next_test() {
     std::fs::create_dir_all(dir.join("fakelib")).unwrap();
     std::fs::write(dir.join("fakelib/__init__.py"), LIBRARY).unwrap();
     std::fs::write(dir.join("test_registry.py"), CORPUS).unwrap();
+    std::fs::write(dir.join("test_registry_next.py"), NEXT_MODULE).unwrap();
 
     let items = RegexCollector::new().collect(&dir).expect("collection");
     assert_eq!(items.len(), 2);
