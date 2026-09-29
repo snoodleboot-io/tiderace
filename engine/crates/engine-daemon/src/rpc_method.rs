@@ -9,6 +9,9 @@ pub enum RpcRequest {
     Discover,
     /// Run a specific set of tests (empty ⇒ all collected).
     Run { node_ids: Vec<String> },
+    /// The full parallel run — what `tiderace run` does — served from the daemon's warm image
+    /// (TID-84). Answered with [`RpcResponse::RanFull`]: everything a report needs per node.
+    RunFull,
     /// Start watching; the daemon streams impacted re-runs until cancelled.
     Watch,
     /// Drop warm state (a stale interpreter after a conftest/config/C-ext change) and re-run all.
@@ -27,12 +30,42 @@ pub struct RpcResult {
     pub duration_ms: u64,
 }
 
+/// One node of a [`RpcRequest::RunFull`] answer: the `TestResult` the CLI would have produced
+/// itself, so its report, exit code and schedule timeline are the same either way (TID-84).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RpcFullResult {
+    pub node_id: String,
+    pub outcome: String,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub touched_files: Vec<String>,
+    #[serde(default)]
+    pub pure: Option<bool>,
+    #[serde(default)]
+    pub must_fork: bool,
+    #[serde(default)]
+    pub skip_origin: String,
+    #[serde(default)]
+    pub expanded: bool,
+    #[serde(default)]
+    pub worker: Option<usize>,
+    #[serde(default)]
+    pub unit: Option<usize>,
+    #[serde(default)]
+    pub unit_started_ms: Option<u64>,
+    #[serde(default)]
+    pub unit_ended_ms: Option<u64>,
+}
+
 /// The daemon's reply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum RpcResponse {
     Discovered { node_ids: Vec<String> },
     Ran { results: Vec<RpcResult> },
+    RanFull { results: Vec<RpcFullResult> },
     Watching,
     Healthy { pid: i64, warm: bool },
     ShuttingDown,
@@ -47,6 +80,7 @@ mod tests {
     fn request_roundtrips_through_json() {
         for req in [
             RpcRequest::Discover,
+            RpcRequest::RunFull,
             RpcRequest::Run {
                 node_ids: vec!["t.py::a".into()],
             },

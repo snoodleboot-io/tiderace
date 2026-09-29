@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use engine_core::cache::{Cache, CacheKey, CacheKeyBuilder, CachedOutcome, DirCache};
 use engine_core::collection::{Collector, RegexCollector};
@@ -28,6 +28,13 @@ pub struct EngineHandler {
     shim: PathBuf,
     root: PathBuf,
     worker: Option<ForkWorker>, // warm wellspring, kept alive across Run requests
+    /// The warm **image** for full parallel runs (TID-84): a persistent pool parent holding the
+    /// imported suite, from which every `RunFull` forks its workers. Dropped and relaunched when
+    /// the tree's `.py` files change (`warm_stamp`), so a stale module is never executed.
+    #[cfg(unix)]
+    warm: Option<engine_core::exec::WellspringPool>,
+    #[cfg(unix)]
+    warm_stamp: Option<u64>,
     /// Content-addressed result cache (ADR-E004, TID-7). Enabled by `TIDERACE_CACHE_DIR` pointing at a
     /// directory (a CI cache path / shared mount), which makes a result computed on one machine a free
     /// hit on any other with the same inputs. `None` ⇒ cache off (impact-skip only).
@@ -50,6 +57,10 @@ impl EngineHandler {
             root: root.into(),
             worker: None,
             cache,
+            #[cfg(unix)]
+            warm: None,
+            #[cfg(unix)]
+            warm_stamp: None,
         }
     }
 
@@ -98,12 +109,115 @@ impl EngineHandler {
     /// unchanged, TID-1) run BARE no-fork, skipping the snapshot. That is ~90× cheaper per test only in
     /// the trivial-test microbenchmark; measured on real corpora it is ~3.4× where it applies, and on a
     /// suite built with module-level test doubles it applies to no test at all (TID-41).
+    /// A digest of every `.py` file and pytest config file under the root — path, mtime, size —
+    /// cheap enough to take per run. It is what decides whether the warm image still describes
+    /// the tree (TID-84): the shim reads the config (`addopts`, markers) at start-up, so a config
+    /// edit stales the image exactly as a source edit does.
+    #[cfg(unix)]
+    fn tree_stamp(root: &Path) -> u64 {
+        use std::hash::{Hash, Hasher};
+        fn walk(dir: &Path, root: &Path, h: &mut std::collections::hash_map::DefaultHasher) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+            entries.sort_by_key(|e| e.file_name());
+            for entry in entries {
+                let path = entry.path();
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if path.is_dir() {
+                    if !engine_core::collection::SKIP_DIRS.contains(&name.as_ref()) {
+                        walk(&path, root, h);
+                    }
+                } else if name.ends_with(".py")
+                    || matches!(
+                        name.as_ref(),
+                        "pytest.ini" | "pyproject.toml" | "tox.ini" | "setup.cfg"
+                    )
+                {
+                    if let Ok(meta) = entry.metadata() {
+                        path.strip_prefix(root).unwrap_or(&path).hash(h);
+                        meta.len().hash(h);
+                        if let Ok(m) = meta.modified() {
+                            m.hash(h);
+                        }
+                    }
+                }
+            }
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        walk(root, root, &mut h);
+        h.finish()
+    }
+
+    /// The warm image for this run, taken out of `self` for the run's duration: reused while the
+    /// tree is unchanged and the parent alive; otherwise dropped, and — for a full run — relaunched,
+    /// which is the full import a full run pays anyway (TID-84). An impacted run on a changed tree
+    /// gets `None`: it runs on the one-shot pool with its selective import (TID-75), which is
+    /// cheaper than importing the whole tree into a new image it may not need.
+    #[cfg(unix)]
+    fn warm_pool(
+        &mut self,
+        launch: bool,
+    ) -> Result<Option<engine_core::exec::WellspringPool>, String> {
+        let stamp = Self::tree_stamp(&self.root);
+        if let Some(mut pool) = self.warm.take() {
+            if self.warm_stamp == Some(stamp) && pool.is_alive() {
+                return Ok(Some(pool));
+            }
+            drop(pool); // stale or dead: its parent exits
+        }
+        if !launch {
+            return Ok(None);
+        }
+        let pool = engine_core::exec::WellspringPool::launch_persistent(
+            &self.python,
+            &self.shim,
+            &self.root,
+            true,
+        )
+        .map_err(|e| format!("failed to launch the warm image: {e}"))?;
+        self.warm_stamp = Some(stamp);
+        Ok(Some(pool))
+    }
+
+    /// The warm image's parent pid, when one is held.
+    fn warm_pid(&self) -> Option<i64> {
+        #[cfg(unix)]
+        {
+            self.warm.as_ref().map(|p| i64::from(p.pid()))
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+
+    /// Whether a warm image is currently held.
+    pub fn is_warm(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.warm.is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// The root this handler serves.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     fn run_items_parallel(
-        &self,
+        &mut self,
         requested: &[String],
         trusted: &HashSet<String>,
         must_fork: &HashSet<String>,
         durations: &HashMap<String, u64>,
+        full_run: bool,
     ) -> Result<Vec<TestResult>, String> {
         let all = self.collect()?;
         let items: Vec<TestItem> = if requested.is_empty() {
@@ -113,6 +227,36 @@ impl EngineHandler {
                 .filter(|it| requested.iter().any(|r| r == it.node_id.as_str()))
                 .collect()
         };
+        #[cfg(unix)]
+        {
+            // Warm image (TID-84): this run's workers are forked off a persistent parent that
+            // already holds the imported suite — when one is held and still describes the tree,
+            // or when this is a full run, which launches it. When the ladder is off
+            // (`TIDERACE_FORCE_FORK=1`) the one-shot pool runs as before.
+            let mut pool = if optimistic_no_fork() {
+                self.warm_pool(full_run)?
+            } else {
+                None
+            };
+            let out = crate::pool::run_parallel(
+                &self.python,
+                &self.shim,
+                &self.root,
+                items,
+                crate::pool::default_workers(),
+                5000,
+                optimistic_no_fork(),
+                trusted,
+                must_fork,
+                durations,
+                pool.as_mut(),
+            );
+            self.warm = pool; // back for the next run, whatever this one's outcome
+            out
+        }
+        #[cfg(not(unix))]
+        let _ = full_run;
+        #[cfg(not(unix))]
         crate::pool::run_parallel(
             &self.python,
             &self.shim,
@@ -124,6 +268,7 @@ impl EngineHandler {
             trusted,
             must_fork, // TID-33: recorded state-disturbers skip the in-process ladder entirely
             durations, // TID-62: what each node cost last time, so the heaviest module goes first
+            None,
         )
     }
 
@@ -131,7 +276,12 @@ impl EngineHandler {
     /// it loads the persisted state, runs *recorded-pure + unchanged* tests BARE no-fork (skip the
     /// snapshot), re-verifies the rest under restore, and persists the updated verdicts + footprints.
     /// So the second `run --all` on an unchanged tree runs the pure suite at the bare-no-fork tier.
-    pub fn run_full_parallel(&self) -> Result<Vec<RpcResult>, String> {
+    pub fn run_full_parallel(&mut self) -> Result<Vec<RpcResult>, String> {
+        Ok(self.run_full_results()?.into_iter().map(to_rpc).collect())
+    }
+
+    /// The same run, as the engine's own `TestResult`s — what a report is built from (TID-84).
+    pub fn run_full_results(&mut self) -> Result<Vec<TestResult>, String> {
         let state_path = self.root.join(STATE_FILE);
         let mut state = PersistedState::load(&state_path);
 
@@ -199,18 +349,19 @@ impl EngineHandler {
                     &trusted,
                     &must_fork,
                     &durations,
+                    true,
                 )?);
             }
             fresh
         } else {
-            self.run_items_parallel(&[], &trusted, &must_fork, &durations)?
+            self.run_items_parallel(&[], &trusted, &must_fork, &durations, true)?
         };
 
         self.persist_results(&mut state, &all_candidates, &fresh);
         state
             .save(&state_path)
             .map_err(|e| format!("state save failed: {e}"))?;
-        Ok(fresh.into_iter().map(to_rpc).collect())
+        Ok(fresh)
     }
 
     /// The sub-interpreter-safe module set for `modules` (ADR-E015 TID-9 cache + TID-11).
@@ -411,8 +562,13 @@ impl EngineHandler {
                     .map(|(node, _)| node.clone())
                     .collect();
                 let durations = recorded_durations(&state);
-                let fresh =
-                    self.run_items_parallel(&to_execute, &HashSet::new(), &disturbers, &durations)?;
+                let fresh = self.run_items_parallel(
+                    &to_execute,
+                    &HashSet::new(),
+                    &disturbers,
+                    &durations,
+                    false,
+                )?;
                 for r in &fresh {
                     results.push(to_rpc(r.clone()));
                 }
@@ -585,6 +741,24 @@ fn deselected_candidates(executed: &[String], results: &[TestResult]) -> Vec<Str
         .collect()
 }
 
+fn to_rpc_full(r: TestResult) -> crate::rpc_method::RpcFullResult {
+    crate::rpc_method::RpcFullResult {
+        node_id: r.node_id.to_string(),
+        outcome: outcome_token(r.outcome).to_string(),
+        duration_ms: r.duration_ms,
+        detail: r.detail,
+        touched_files: r.touched_files,
+        pure: r.pure,
+        must_fork: r.must_fork,
+        skip_origin: r.skip_origin,
+        expanded: r.expanded,
+        worker: r.worker,
+        unit: r.unit,
+        unit_started_ms: r.unit_started_ms,
+        unit_ended_ms: r.unit_ended_ms,
+    }
+}
+
 fn to_rpc(r: TestResult) -> RpcResult {
     RpcResult {
         node_id: r.node_id.to_string(),
@@ -614,6 +788,12 @@ impl RpcHandler for EngineHandler {
                 Ok(results) => RpcResponse::Ran { results },
                 Err(message) => RpcResponse::Error { message },
             },
+            RpcRequest::RunFull => match self.run_full_results() {
+                Ok(results) => RpcResponse::RanFull {
+                    results: results.into_iter().map(to_rpc_full).collect(),
+                },
+                Err(message) => RpcResponse::Error { message },
+            },
             RpcRequest::Recycle => {
                 self.worker = None; // drop the stale warm interpreter; next Run relaunches it
                 match self.run(&[]) {
@@ -627,8 +807,9 @@ impl RpcHandler for EngineHandler {
                     .worker
                     .as_ref()
                     .map(ForkWorker::wellspring_pid)
-                    .unwrap_or(-1),
-                warm: self.worker.is_some(),
+                    .or_else(|| self.warm_pid())
+                    .unwrap_or_else(|| i64::from(std::process::id())),
+                warm: self.worker.is_some() || self.is_warm(),
             },
             RpcRequest::Shutdown => RpcResponse::ShuttingDown,
         }

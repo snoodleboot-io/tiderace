@@ -99,6 +99,25 @@ Each batch runs on the platform's isolation backend, chosen once in `pool.rs`:
   Parallelism still comes from N batches on N threads — one process per batch. This is what lets the
   parallel pool, and `run --all`, work on Windows at all.
 
+### The warm image (TID-84)
+
+The pool's parent — the one process that imported the suite, from which the N workers are forked —
+used to exit with the run, so every `tiderace run` paid the import again. With `tiderace daemon
+start`, the daemon launches the parent **persistent** (`WellspringPool::launch_persistent`): it
+imports once, reports ready, and then answers spawn requests over its stdin/stdout for as long as
+the daemon holds it. Each `RunFull` request asks it for N fresh workers (`spawn_workers`), which
+connect back over a Unix socket and serve that run only; the parent is untouched by any of them,
+so the next run forks from the same clean image — no start-up, no imports, no state carried over.
+
+What decides whether the image still describes the tree is a stamp over every `.py` file and
+pytest config file (`pytest.ini`, `pyproject.toml`, `tox.ini`, `setup.cfg` — the shim reads
+`addopts` at start-up) under the root: path, size, mtime, taken per request. A changed stamp drops
+the parent. A full run then launches a new one, which is the full import a full run pays anyway;
+an impacted run on a changed tree uses the one-shot pool and its selective import instead (TID-75),
+which is cheaper than re-importing everything into an image it may not need. So the warm image
+pays off for runs that change nothing — re-runs, gates on an unchanged tree — and the source-edit
+inner loop stays where TID-75 put it.
+
 ## The isolation ladder
 
 We isolate tests from each other so one can't corrupt another's view of process-global state. The

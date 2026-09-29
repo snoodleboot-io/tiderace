@@ -2,6 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use engine_core::domain::{TestItem, TestResult};
+#[cfg(unix)]
+use engine_core::exec::WellspringPool;
+#[cfg(unix)]
+use engine_core::runner::run_parallel_with_pool;
 use engine_core::runner::{run_parallel as core_run_parallel, RunPlan, WorkerStrategy};
 
 /// Run `items` across a **pool of `workers` in parallel** (design 06 / ADR-E010).
@@ -25,6 +29,8 @@ pub fn run_parallel(
     trusted: &HashSet<String>,
     must_fork: &HashSet<String>,
     durations: &HashMap<String, u64>,
+    #[cfg(unix)] warm: Option<&mut WellspringPool>,
+    #[cfg(not(unix))] warm: Option<()>,
 ) -> Result<Vec<TestResult>, String> {
     let plan = RunPlan {
         strategy: WorkerStrategy::platform_default(),
@@ -36,6 +42,13 @@ pub fn run_parallel(
         durations: durations.clone(), // TID-62: last run's per-node cost, the scheduler's weights
         ..RunPlan::default()
     };
+    #[cfg(unix)]
+    if let Some(pool) = warm {
+        // The daemon's warm image (TID-84): this run's workers are forked off it, no import.
+        return run_parallel_with_pool(python, shim, root, items, &plan, pool);
+    }
+    #[cfg(not(unix))]
+    let _ = warm;
     core_run_parallel(python, shim, root, items, &plan)
 }
 
@@ -116,6 +129,7 @@ mod tests {
             &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
+            None,
         )
         .expect("empty batch is Ok");
         assert!(out.is_empty());
@@ -159,6 +173,7 @@ mod tests {
             &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
+            None,
         )
         .expect("pool run succeeds");
 
@@ -219,6 +234,7 @@ mod tests {
             &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
+            None,
         )
         .expect("pool run succeeds");
 

@@ -30,9 +30,34 @@ pub use pool::{default_workers, run_parallel};
 // Moved to `engine-core` (TID-17) so the CLI can reach the sub-interpreter tier too;
 // re-exported here to keep the daemon's public surface unchanged.
 pub use engine_core::exec::probe_modules;
-pub use rpc_method::{RpcRequest, RpcResponse, RpcResult};
+pub use rpc_method::{RpcFullResult, RpcRequest, RpcResponse, RpcResult};
 pub use rpc_server::{read_frame, serve_connection, write_frame, RpcHandler};
 pub use session::{ChangeOutcome, Session};
 #[cfg(unix)]
 pub use socket::serve_unix_socket;
+
+/// Where a daemon serving `root` listens, and where `tiderace run` looks for one (TID-84):
+/// `<tmp>/tiderace-<uid>/<digest of the canonical root>.sock`. Not under the root itself — a Unix
+/// socket path is limited to ~108 bytes, and a project's path can be longer than that.
+pub fn daemon_socket_path(root: &std::path::Path) -> std::path::PathBuf {
+    use std::hash::{Hash, Hasher};
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    root.hash(&mut h);
+    #[cfg(unix)]
+    let uid = unsafe { libc_getuid() };
+    #[cfg(not(unix))]
+    let uid = 0u32;
+    std::env::temp_dir()
+        .join(format!("tiderace-{uid}"))
+        .join(format!("{:016x}.sock", h.finish()))
+}
+
+#[cfg(unix)]
+unsafe fn libc_getuid() -> u32 {
+    unsafe extern "C" {
+        fn getuid() -> u32;
+    }
+    unsafe { getuid() }
+}
 pub use watch::{content_hash, react_to_change, watch_loop, WatchAction};

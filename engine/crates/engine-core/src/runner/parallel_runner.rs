@@ -39,7 +39,7 @@ pub fn run_parallel(
     if plan.strategy.is_hybrid() {
         return run_subinterp_hybrid(python, shim, root, items, plan);
     }
-    run_batched(python, shim, root, items, plan, plan.strategy)
+    run_batched(python, shim, root, items, plan, plan.strategy, None)
 }
 
 /// Schedule `items` into work units and drain them through a pool of `workers` threads (TID-52).
@@ -53,6 +53,29 @@ pub fn run_parallel(
 /// so on pirn-agents, whose per-test cost spans four orders of magnitude, bins balanced by test
 /// count ran 121/97/66/34/31/25/23/19 seconds: the machine 57% idle, and 2.32x the makespan a
 /// perfectly balanced run would take. Nothing about the execution tier was wrong; the prediction was.
+/// As [`run_parallel`], drawing this run's workers from a **warm** pool (TID-84): a persistent
+/// parent that already holds the imported suite forks a fresh set for the run, so nothing is
+/// imported. The caller owns the pool and decides when its image is stale.
+#[cfg(unix)]
+pub fn run_parallel_with_pool(
+    python: &str,
+    shim: &Path,
+    root: &Path,
+    items: Vec<TestItem>,
+    plan: &RunPlan,
+    pool: &mut WellspringPool,
+) -> Result<Vec<TestResult>, String> {
+    run_batched(
+        python,
+        shim,
+        root,
+        items,
+        plan,
+        WorkerStrategy::Fork,
+        Some(pool),
+    )
+}
+
 fn run_batched(
     python: &str,
     shim: &Path,
@@ -60,7 +83,11 @@ fn run_batched(
     items: Vec<TestItem>,
     plan: &RunPlan,
     strategy: WorkerStrategy,
+    #[cfg(unix)] warm: Option<&mut WellspringPool>,
+    #[cfg(not(unix))] warm: Option<()>,
 ) -> Result<Vec<TestResult>, String> {
+    #[cfg(not(unix))]
+    let _ = warm;
     if items.is_empty() {
         return Ok(Vec::new());
     }
@@ -124,23 +151,33 @@ fn run_batched(
     // finished — and paid once — before any worker starts. Fork-tier only: the subprocess and
     // sub-interpreter tiers have no wellspring to share, by construction.
     #[cfg(unix)]
-    let mut pool = if plan.shared_import && matches!(strategy, WorkerStrategy::Fork) {
-        // Launched with restore unconditionally, exactly as `ForkWorker::launch_optimistic` does:
-        // it costs nothing when the ladder is off, and it makes the unsound combination — in-process
-        // execution with no snapshot — unreachable rather than merely unused.
-        Some(
-            WellspringPool::launch_selected(
-                python,
-                shim,
-                root,
-                true,
-                threads,
-                Some(&modules_file.path),
+    let mut owned_pool =
+        if warm.is_none() && plan.shared_import && matches!(strategy, WorkerStrategy::Fork) {
+            // Launched with restore unconditionally, exactly as `ForkWorker::launch_optimistic` does:
+            // it costs nothing when the ladder is off, and it makes the unsound combination — in-process
+            // execution with no snapshot — unreachable rather than merely unused.
+            Some(
+                WellspringPool::launch_selected(
+                    python,
+                    shim,
+                    root,
+                    true,
+                    threads,
+                    Some(&modules_file.path),
+                )
+                .map_err(|e| e.to_string())?,
             )
-            .map_err(|e| e.to_string())?,
-        )
-    } else {
-        None
+        } else {
+            None
+        };
+    // Warm (TID-84): the persistent parent forks this run's workers now, off its imported image.
+    #[cfg(unix)]
+    let mut pool: Option<&mut WellspringPool> = match warm {
+        Some(w) => {
+            w.spawn_workers(threads).map_err(|e| e.to_string())?;
+            Some(w)
+        }
+        None => owned_pool.as_mut(),
     };
 
     let exec = BatchExec {
@@ -171,7 +208,7 @@ fn run_batched(
         // pool. The pool itself must outlive the threads — it is dropped after the joins below,
         // because its parent process only exits once every worker connection has closed.
         #[cfg(unix)]
-        let pooled = pool.as_mut().and_then(|p| p.take_worker());
+        let pooled = pool.as_deref_mut().and_then(|p| p.take_worker());
         #[cfg(not(unix))]
         let pooled: Option<()> = None;
 
@@ -230,11 +267,12 @@ fn run_batched(
             }
         }
     }
-    // Every worker connection is closed by now (the threads owned them), so the pool's parent can
-    // exit. Dropping it here rather than on the `?` path above is what keeps a failing run from
-    // leaving an orphaned parent behind holding the imported image.
+    // Every worker connection is closed by now (the threads owned them), so a pool this run owns
+    // can exit. Dropping it here rather than on the `?` path above is what keeps a failing run
+    // from leaving an orphaned parent behind holding the imported image. A borrowed (warm) pool
+    // stays with its owner: that is the image the next run forks from.
     #[cfg(unix)]
-    drop(pool.take());
+    drop(owned_pool.take());
     match first_err {
         Some(e) => Err(e),
         None => Ok(all),
@@ -300,6 +338,7 @@ fn run_subinterp_hybrid(
             rest,
             plan,
             plan.strategy.fallback(),
+            None,
         )?);
     }
     Ok(all)

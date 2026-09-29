@@ -51,7 +51,9 @@ recently starts `watch` with a warmer graph.
 
 `watch` keeps a **long-lived warm process** that shares interpreter state across runs. That's a
 deliberate convenience for **trusted local development** — it's not an isolation guarantee across the
-whole session. **Do not use the warm process as your CI gate.** For CI, run a fresh one-shot:
+whole session. The same applies to `tiderace daemon start` (whose image *is* re-imported whenever a
+`.py` file changes, but is shared by every run between edits). **Do not use a warm process as your
+CI gate.** For CI, run a fresh one-shot:
 
 ```bash
 tiderace-daemon run tests/          # impact-aware fresh run

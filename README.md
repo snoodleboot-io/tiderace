@@ -95,6 +95,11 @@ export TIDERACE_PYTHON="$(which python3)"
 
 # Watch — warm interpreter, re-run impacted tests on save (millisecond loops)
 ./target/release/tiderace-daemon watch /path/to/tests
+
+# Or keep a daemon warm and use the one-shot CLI: later runs import nothing
+./target/release/tiderace daemon start /path/to/tests
+./target/release/tiderace run /path/to/tests      # "via daemon"
+./target/release/tiderace daemon stop /path/to/tests
 ```
 
 ## How it works
