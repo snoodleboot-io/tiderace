@@ -250,6 +250,10 @@ fn run_batched(
                         .into_iter()
                         .map(|r| r.with_schedule(worker_index, unit_index, started_ms, ended_ms)),
                 );
+                if worker.is_lost() {
+                    // Its last unit is reported; the queue drains on the other workers (TID-93).
+                    return Ok(mine);
+                }
             }
         }));
     }

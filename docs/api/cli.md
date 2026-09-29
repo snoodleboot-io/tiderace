@@ -71,6 +71,12 @@ Collect, launch a warm wellspring (`TIDERACE_PYTHON` importing the project once)
 test through it, print a per-test report, and exit with the pytest-style code (`0` all green, `1` on
 any failure/error). Requires `TIDERACE_SHIM`.
 
+Every test runs under one deadline, `--timeout <ms>` (default 60,000): a forked child that
+overruns is killed; a test on the in-process tier is interrupted by a signal and reported as a
+timeout error, then forks from the next run on; a worker that stays silent ten seconds past the
+deadline — a wait no signal can reach — is killed, its in-flight node reported as the fault and
+the rest of its unit as not run, while the other workers finish the run (TID-93).
+
 When a daemon is serving `<path>` (see [`tiderace daemon`](#tiderace-daemon-startstatusstop-path--a-warm-image-for-run)),
 the `run` is handed to it instead and the header says `via daemon`: the same results, the same
 report and exit code, but the workers fork from an image that already imported the suite. `-k`,

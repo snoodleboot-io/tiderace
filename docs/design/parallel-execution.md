@@ -27,7 +27,13 @@ flowchart TB
 - **Per-test deadline** — a child exceeding its deadline is killed and reported `Error`. One
   deadline, `DEFAULT_DEADLINE_MS` (60 s, `--timeout` to change it), for `tiderace run` and every
   daemon mode alike: the daemon used to hand its pool 5 s, and a class whose set-up ran two worker
-  interpreters timed out under the daemon only (TID-89).
+  interpreters timed out under the daemon only (TID-89). On the **in-process** tiers the same
+  deadline is a `SIGALRM` armed around the test: it ends any wait CPython lets a signal interrupt
+  (a lock, a sleep, a socket read), the node is reported as a timeout error and forks from the
+  next run on. A wait the signal cannot reach leaves the worker silent, and the engine's read on
+  it gives up ten seconds past the deadline: the worker is killed, the in-flight node is reported
+  as the fault, the rest of its unit as not run, and the other workers finish the run (TID-93).
+  Before that a test blocking on the in-process tier blocked the whole run, for good.
 - **WatermarkStack** — tracks fixture setup/teardown across scopes so finalizers run in the right
   order as the engine moves between modules and classes.
 

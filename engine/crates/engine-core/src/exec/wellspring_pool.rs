@@ -29,7 +29,7 @@ use std::collections::HashSet;
 
 use crate::domain::{TestItem, TestResult};
 use crate::error::{EngineError, Result};
-use crate::exec::transport::{run_batch, PipeTransport, ShimTransport};
+use crate::exec::transport::{PipeTransport, ShimTransport};
 use crate::exec::{Selection, Worker};
 
 /// How long the parent may spend importing the project before the first worker connects. Generous on
@@ -391,6 +391,8 @@ pub struct PooledWorker {
     optimistic_no_fork: bool,
     trusted: HashSet<String>,
     must_fork: HashSet<String>,
+    /// Set when the worker stopped answering (TID-93); it was killed and takes no more work.
+    lost: bool,
 }
 
 impl PooledWorker {
@@ -399,6 +401,7 @@ impl PooledWorker {
             transport,
             deadline_ms,
             optimistic_no_fork: false,
+            lost: false,
             trusted: HashSet::new(),
             must_fork: HashSet::new(),
         }
@@ -427,13 +430,46 @@ impl PooledWorker {
 
 impl Worker for PooledWorker {
     fn run(&mut self, items: &[TestItem]) -> Result<Vec<TestResult>> {
-        run_batch(
+        if self.lost {
+            return Err(EngineError::Exec(
+                "this worker was lost and takes no more work".into(),
+            ));
+        }
+        // The backstop behind the shim's own deadline (TID-93): a test the shim cannot interrupt
+        // — blocked inside a C call — leaves the worker silent. The read gives up a margin after
+        // the deadline, the worker is killed, and the batch is reported rather than the run hung.
+        let budget = Duration::from_millis(self.deadline_ms.saturating_add(LOST_WORKER_MARGIN_MS));
+        let _ = self.transport.set_read_timeout(Some(budget));
+        let (results, fault) = crate::exec::transport::run_batch_lost(
             &mut self.transport,
             items,
             self.deadline_ms,
             self.optimistic_no_fork,
             &self.trusted,
             &self.must_fork,
-        )
+            crate::exec::transport::LostWorker::Report,
+        )?;
+        if fault.is_some() {
+            self.lost = true;
+            let pid = self.transport.peer_pid();
+            if pid > 0 {
+                // SAFETY: a plain kill(2) on a pid this pool's parent forked for this run.
+                unsafe { kill(pid as i32, 9) };
+            }
+            self.transport.close_input();
+        }
+        Ok(results)
     }
+
+    fn is_lost(&self) -> bool {
+        self.lost
+    }
+}
+
+/// How long past the per-test deadline a silent worker is waited on before it is declared lost:
+/// the shim's own deadline fires first when it can, and reports; this is for when it cannot.
+const LOST_WORKER_MARGIN_MS: u64 = 10_000;
+
+unsafe extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
 }
