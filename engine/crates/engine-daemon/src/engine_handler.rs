@@ -5,6 +5,7 @@ use engine_core::cache::{Cache, CacheKey, CacheKeyBuilder, CachedOutcome, DirCac
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestItem, TestResult};
 use engine_core::exec::{ForkWorker, SubInterpWorker, Worker};
+use engine_core::runner::DEFAULT_DEADLINE_MS;
 
 use crate::persist::{changed_files, plan, PersistedState, TestRecord, STATE_FILE};
 use crate::rpc_method::{RpcRequest, RpcResponse, RpcResult};
@@ -80,6 +81,7 @@ impl EngineHandler {
     fn worker(&mut self) -> Result<&mut ForkWorker, String> {
         if self.worker.is_none() {
             let w = ForkWorker::launch(&self.python, &self.shim, &self.root)
+                .map(|w| w.with_deadline_ms(DEFAULT_DEADLINE_MS))
                 .map_err(|e| format!("failed to launch wellspring: {e}"))?
                 .with_optimistic_no_fork(optimistic_no_fork());
             self.worker = Some(w);
@@ -259,7 +261,7 @@ impl EngineHandler {
                 &self.root,
                 items,
                 crate::pool::default_workers(),
-                5000,
+                DEFAULT_DEADLINE_MS,
                 optimistic_no_fork(),
                 trusted,
                 must_fork,
@@ -279,7 +281,7 @@ impl EngineHandler {
             &self.root,
             items,
             crate::pool::default_workers(),
-            5000,
+            DEFAULT_DEADLINE_MS,
             optimistic_no_fork(), // no-fork + restore by default (TIDERACE_FORCE_FORK=1 to disable)
             trusted,
             must_fork, // TID-33: recorded state-disturbers skip the in-process ladder entirely
@@ -349,7 +351,7 @@ impl EngineHandler {
 
             let mut fresh = Vec::new();
             if !si_items.is_empty() {
-                let mut w = SubInterpWorker::new(5000)
+                let mut w = SubInterpWorker::new(DEFAULT_DEADLINE_MS)
                     .with_target(self.python.clone(), &self.shim, &self.root)
                     .with_pool_size(crate::pool::default_workers());
                 fresh.extend(

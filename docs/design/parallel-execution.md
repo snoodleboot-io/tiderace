@@ -24,7 +24,10 @@ flowchart TB
 ```
 
 - **Import once, fork many** — the warm import is the expensive part; COW children share it.
-- **Per-test deadline** — a child exceeding its deadline is killed and reported `Error`.
+- **Per-test deadline** — a child exceeding its deadline is killed and reported `Error`. One
+  deadline, `DEFAULT_DEADLINE_MS` (60 s, `--timeout` to change it), for `tiderace run` and every
+  daemon mode alike: the daemon used to hand its pool 5 s, and a class whose set-up ran two worker
+  interpreters timed out under the daemon only (TID-89).
 - **WatermarkStack** — tracks fixture setup/teardown across scopes so finalizers run in the right
   order as the engine moves between modules and classes.
 
