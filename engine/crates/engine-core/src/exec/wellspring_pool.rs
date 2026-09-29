@@ -51,6 +51,13 @@ pub struct WellspringPool {
     socket_path: PathBuf,
     /// Handed out one at a time by [`take_worker`](Self::take_worker).
     workers: Vec<PooledTransport>,
+    /// A persistent parent's command channel (TID-84): `spawn` frames go down, `spawned` acks come
+    /// back. `None` for a one-shot pool, whose parent forked its workers at launch and exits with
+    /// them.
+    control: Option<(
+        std::process::ChildStdin,
+        BufReader<std::process::ChildStdout>,
+    )>,
 }
 
 impl WellspringPool {
@@ -119,6 +126,7 @@ impl WellspringPool {
             parent,
             socket_path,
             workers: Vec::with_capacity(size),
+            control: None,
         };
         // Non-blocking, so the wait below can notice the parent dying instead of sitting in `accept`
         // forever. That is exactly what happened before (TID-43): the shim crashed during discovery on
@@ -204,6 +212,110 @@ impl WellspringPool {
     }
 
     /// Hand one worker's transport to a caller (typically one scheduler batch, on its own thread).
+    /// Launch the shim as a **persistent** pool parent (TID-84): it imports the whole suite once and
+    /// then waits for [`spawn_workers`](Self::spawn_workers), forking a fresh set of workers off the
+    /// same image for every run. Blocks until the import is done (the parent's readiness frame).
+    /// Drop it to end the parent; a run that already took its workers is unaffected.
+    pub fn launch_persistent(
+        python: &str,
+        shim: &Path,
+        root: &Path,
+        restore: bool,
+    ) -> Result<Self> {
+        let mut cmd = Command::new(python);
+        cmd.arg(shim)
+            .arg(root)
+            .arg("--pool")
+            .arg("0")
+            .arg("--connect")
+            .arg("-"); // the socket comes with each spawn request
+        if restore {
+            cmd.arg("--restore");
+        }
+        let mut parent = cmd
+            .env("OPENBLAS_NUM_THREADS", "1")
+            .env("OMP_NUM_THREADS", "1")
+            .env("MKL_NUM_THREADS", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|e| EngineError::Exec(format!("failed to launch warm pool parent: {e}")))?;
+        let stdin = parent.stdin.take().expect("piped");
+        let mut stdout = BufReader::new(parent.stdout.take().expect("piped"));
+        // The import happens before the readiness frame, so reading it is waiting for the image.
+        let ready: Option<serde_json::Value> =
+            crate::exec::read_frame(&mut stdout).map_err(|e| {
+                EngineError::Exec(format!("warm pool parent did not report ready: {e}"))
+            })?;
+        if ready.is_none() {
+            let _ = parent.wait();
+            return Err(EngineError::Exec(
+                "the warm pool parent exited before it was ready — the Python traceback above says why"
+                    .into(),
+            ));
+        }
+        Ok(Self {
+            parent,
+            socket_path: Self::socket_path(),
+            workers: Vec::new(),
+            control: Some((stdin, stdout)),
+        })
+    }
+
+    /// Ask a persistent parent for `size` fresh workers and accept their connections (TID-84).
+    /// The workers are then handed out by [`take_worker`](Self::take_worker) as usual.
+    pub fn spawn_workers(&mut self, size: usize) -> Result<()> {
+        let size = size.max(1);
+        let socket_path = Self::socket_path();
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path)
+            .map_err(|e| EngineError::Exec(format!("failed to bind worker socket: {e}")))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| EngineError::Exec(format!("worker socket: {e}")))?;
+        {
+            let (stdin, stdout) = self.control.as_mut().ok_or_else(|| {
+                EngineError::Exec("spawn_workers on a one-shot pool: launch it persistent".into())
+            })?;
+            crate::exec::write_frame(
+                stdin,
+                &serde_json::json!({"spawn": size, "connect": socket_path.to_string_lossy()}),
+            )
+            .map_err(|e| EngineError::Exec(format!("warm pool parent is gone: {e}")))?;
+            let ack: Option<serde_json::Value> = crate::exec::read_frame(stdout)
+                .map_err(|e| EngineError::Exec(format!("warm pool parent did not answer: {e}")))?;
+            if ack.is_none() {
+                return Err(EngineError::Exec(
+                    "the warm pool parent exited while spawning workers".into(),
+                ));
+            }
+        }
+        let _ = std::fs::remove_file(&self.socket_path);
+        self.socket_path = socket_path;
+        let started = Instant::now();
+        let mut first_connected: Option<Instant> = Some(started); // the image is already imported
+        for i in 0..size {
+            let stream = self.accept_worker(&listener, i, size, started, &mut first_connected)?;
+            let read_half = stream
+                .try_clone()
+                .map_err(|e| EngineError::Exec(format!("worker {i} socket clone: {e}")))?;
+            let mut transport = PipeTransport::new(stream, BufReader::new(read_half));
+            transport.ready()?;
+            self.workers.push(transport);
+        }
+        Ok(())
+    }
+
+    /// Whether this pool is a persistent parent that can [`spawn_workers`](Self::spawn_workers).
+    pub fn is_persistent(&self) -> bool {
+        self.control.is_some()
+    }
+
+    /// Whether the parent process is still alive.
+    pub fn is_alive(&mut self) -> bool {
+        matches!(self.parent.try_wait(), Ok(None))
+    }
+
     pub fn take_worker(&mut self) -> Option<PooledTransport> {
         self.workers.pop()
     }
@@ -235,6 +347,7 @@ impl Drop for WellspringPool {
         // and the parent is blocked in `waitpid` on all of them. Reaping before they can see EOF
         // would deadlock — the same shutdown ordering `Wellspring` already depends on.
         self.workers.clear();
+        self.control = None; // EOF on a persistent parent's stdin: it reaps its workers and exits
         let _ = self.parent.wait();
         let _ = std::fs::remove_file(&self.socket_path);
     }

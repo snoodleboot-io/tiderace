@@ -30,9 +30,15 @@ pub use pool::{default_workers, run_parallel};
 // Moved to `engine-core` (TID-17) so the CLI can reach the sub-interpreter tier too;
 // re-exported here to keep the daemon's public surface unchanged.
 pub use engine_core::exec::probe_modules;
-pub use rpc_method::{RpcRequest, RpcResponse, RpcResult};
+pub use rpc_method::{RpcFullResult, RpcRequest, RpcResponse, RpcResult};
 pub use rpc_server::{read_frame, serve_connection, write_frame, RpcHandler};
 pub use session::{ChangeOutcome, Session};
 #[cfg(unix)]
 pub use socket::serve_unix_socket;
+
+/// Where a daemon serving `root` listens, and where `tiderace run` looks for one (TID-84):
+/// `<root>/.tiderace-cache/daemon.sock`.
+pub fn daemon_socket_path(root: &std::path::Path) -> std::path::PathBuf {
+    root.join(".tiderace-cache").join("daemon.sock")
+}
 pub use watch::{content_hash, react_to_change, watch_loop, WatchAction};

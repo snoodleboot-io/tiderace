@@ -8,7 +8,9 @@ use crate::domain::{NodeId, ScopePath, TestItem, TestStyle};
 use crate::error::Result;
 
 /// Directory names never descended into during collection.
-const SKIP_DIRS: &[&str] = &[
+/// Directories never descended into: the shim's `_SKIP_DIRS` mirrors this list, and so does the
+/// daemon's tree digest (TID-84).
+pub const SKIP_DIRS: &[&str] = &[
     "__pycache__",
     ".git",
     ".venv",

@@ -5193,6 +5193,52 @@ def _serve_pool(size: int, socket_path: str, engine_args: dict) -> int:
     the whole thing dependency-free on both sides: no `SCM_RIGHTS`, no `dup2`, and nothing for the
     Rust side to do beyond accepting `size` connections.
     """
+    if size == 0:
+        return _serve_pool_persistent(engine_args)
+    children = _fork_pool_workers(size, socket_path, engine_args)
+    # Parent: nothing to serve. Hold the imported image alive — the children are COW views of it —
+    # and reap them so no worker is orphaned if the run is cut short.
+    status = 0
+    for pid in children:
+        _, st = os.waitpid(pid, 0)
+        if os.WIFEXITED(st) and os.WEXITSTATUS(st) != 0:
+            status = os.WEXITSTATUS(st)
+    return status
+
+
+def _serve_pool_persistent(engine_args: dict) -> int:
+    """The warm image (TID-84): import once, then serve the Rust side's requests over stdin/stdout
+    for as long as it stays connected — `{"spawn": n, "connect": path}` forks `n` workers that
+    connect to `path` and serve one run each; `{"ping": true}` answers `{"pong": true}`; EOF ends
+    the process. Every run forks fresh workers from the one imported image, so the second run pays
+    no import at all. Finished workers are reaped before each spawn; the rest at exit."""
+    _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
+    live: list = []
+    try:
+        while True:
+            req = _read_frame(_STDIN)
+            if req is None:
+                break
+            live = [pid for pid in live if os.waitpid(pid, os.WNOHANG)[0] == 0]
+            if req.get("ping"):
+                _write_frame(_STDOUT, {"pong": True, "pid": os.getpid(), "workers": len(live)})
+                continue
+            n = int(req.get("spawn", 0))
+            if n:
+                live.extend(_fork_pool_workers(n, req["connect"], engine_args))
+                _write_frame(_STDOUT, {"spawned": n})
+    finally:
+        for pid in live:
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+    return 0
+
+
+def _fork_pool_workers(size: int, socket_path: str, engine_args: dict) -> list:
+    """Fork `size` workers off this (imported) process, each connecting to `socket_path` and
+    serving the ordinary single-worker loop until its connection closes. Returns their pids."""
     import socket
 
     children = []
@@ -5222,15 +5268,7 @@ def _serve_pool(size: int, socket_path: str, engine_args: dict) -> int:
                 engine.teardown_all()
                 os._exit(0)  # never unwind past the fork point in a child
         children.append(pid)
-
-    # Parent: nothing to serve. Hold the imported image alive — the children are COW views of it —
-    # and reap them so no worker is orphaned if the run is cut short.
-    status = 0
-    for pid in children:
-        _, st = os.waitpid(pid, 0)
-        if os.WIFEXITED(st) and os.WEXITSTATUS(st) != 0:
-            status = os.WEXITSTATUS(st)
-    return status
+    return children
 
 
 def serve() -> int:

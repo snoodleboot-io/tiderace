@@ -19,6 +19,8 @@ mod scheduler_kind;
 mod verdicts;
 mod worker_strategy;
 
+#[cfg(unix)]
+pub use parallel_runner::run_parallel_with_pool;
 pub use parallel_runner::{locality_key, run_parallel};
 pub use run_plan::{default_workers, RunPlan, DEFAULT_DEADLINE_MS};
 pub use scheduler_kind::SchedulerKind;
