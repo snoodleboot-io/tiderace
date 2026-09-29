@@ -38,6 +38,8 @@ pub struct EngineHandler {
     warm_stamp: Option<u64>,
     /// The `-k` / `-m` / `--strict-markers` of the `RunFull` being served (TID-90): handed to the
     /// warm image's workers, or to a one-shot pool through its environment. `None` between runs.
+    /// Read on the Unix path only; the non-Unix pool takes no selection (TID-90).
+    #[cfg_attr(not(unix), allow(dead_code))]
     selection: Option<engine_core::exec::Selection>,
     /// Content-addressed result cache (ADR-E004, TID-7). Enabled by `TIDERACE_CACHE_DIR` pointing at a
     /// directory (a CI cache path / shared mount), which makes a result computed on one machine a free

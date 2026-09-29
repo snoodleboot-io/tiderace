@@ -30,7 +30,7 @@ use std::collections::HashSet;
 use crate::domain::{TestItem, TestResult};
 use crate::error::{EngineError, Result};
 use crate::exec::transport::{run_batch, PipeTransport, ShimTransport};
-use crate::exec::Worker;
+use crate::exec::{Selection, Worker};
 
 /// How long the parent may spend importing the project before the first worker connects. Generous on
 /// purpose: a false timeout here would break a legitimate large project, while a dead parent is caught
@@ -46,24 +46,6 @@ const WORKER_DEADLINE: Duration = Duration::from_secs(30);
 pub type PooledTransport = PipeTransport<UnixStream, BufReader<UnixStream>>;
 
 /// The parent process plus its accepted worker connections.
-/// What a run selects, applied by each worker forked off a warm image before it serves (TID-90):
-/// the shim reads `-k` / `-m` / `--strict-markers` from its environment at start-up, and a
-/// persistent image was started without this run's. `None` fields keep what the image has
-/// (the project's own `addopts`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Selection {
-    pub keyword: Option<String>,
-    pub marker: Option<String>,
-    pub strict_markers: bool,
-}
-
-impl Selection {
-    /// Whether this selection narrows anything at all.
-    pub fn is_empty(&self) -> bool {
-        self.keyword.is_none() && self.marker.is_none() && !self.strict_markers
-    }
-}
-
 pub struct WellspringPool {
     parent: Child,
     socket_path: PathBuf,
