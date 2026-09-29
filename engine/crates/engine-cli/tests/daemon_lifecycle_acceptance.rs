@@ -1,8 +1,9 @@
 //! TID-84 — `tiderace daemon start|status|stop` and `tiderace run` through a live daemon.
 //!
 //! `status` and `stop` against a root nobody serves say so and fail; with a daemon serving the
-//! root, `run` reports "via daemon" and the daemon's results, `-k` stays local, and `stop` ends the
-//! server. `start` spawns the daemon binary beside this one and waits for it to answer.
+//! root, `run` reports "via daemon" and the daemon's results, a `-k` run goes through it with its
+//! selection applied by the image's workers (TID-90), `TIDERACE_NO_DAEMON` stays local, and
+//! `stop` ends the server. `start` spawns the daemon binary beside this one and waits for it.
 
 #![cfg(unix)]
 
@@ -168,17 +169,42 @@ fn run_goes_through_a_serving_daemon_and_stop_ends_it() {
         .unwrap();
     assert!(text(&out).0.contains("image warm"), "{}", text(&out).0);
 
-    // A filtered run stays in this process.
+    // A filtered run goes through the daemon too (TID-90): the workers forked off the warm image
+    // apply this run's `-k`, so only the selected node is reported — and the image is unchanged,
+    // as the unfiltered run after it shows.
+    let filtered = dir.join("filtered.json");
     let out = tiderace(&python)
         .arg("run")
         .arg("-k")
         .arg("test_one")
+        .arg("--report")
+        .arg(&filtered)
         .arg(&dir)
         .output()
         .unwrap();
     let (_, stderr) = text(&out);
-    assert!(!stderr.contains("via daemon"), "-k runs locally: {stderr}");
+    assert!(
+        stderr.contains("via daemon"),
+        "-k through the daemon: {stderr}"
+    );
     assert!(out.status.success(), "{stderr}");
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&filtered).unwrap()).unwrap();
+    let ids: Vec<&str> = json["tests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["node_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["test_plain.py::test_one"], "{json}");
+    let out = tiderace(&python).arg("run").arg(&dir).output().unwrap();
+    let (_, stderr) = text(&out);
+    assert!(stderr.contains("via daemon"), "{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "both nodes again, one failing: {stderr}"
+    );
 
     // So does one under TIDERACE_NO_DAEMON — and it reports the same nodes and outcomes.
     let local = dir.join("local.json");
