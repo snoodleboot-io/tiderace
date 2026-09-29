@@ -3111,6 +3111,7 @@ class Engine:
         self._leaked = None          # this test's unmodelled state drift, if any (TID-33)
         self._state_disturbed = False  # …and whether the node should be forked from now on
         self._disturbance = None  # what moved, kept for the verdict the clean-room handoff reports
+        self._timed_out = False  # the in-process deadline ended the case (TID-93): no re-run
         self.restore = restore  # snapshot/restore shared state around no-fork tests (isolation w/o fork)
         self._module_child = None  # the live child running an opaque module's tests, if any (TID-80)
         self._guard = None  # the in-process module's entry snapshot, restored when we leave it (TID-81)
@@ -3488,6 +3489,7 @@ class Engine:
                 started = time.perf_counter()
                 self._state_disturbed = False
                 self._disturbance = None
+                self._timed_out = False
                 # `indirect=` routes a case's value to the *fixture* of that name, as `request.param`,
                 # and the test receives whatever the fixture returns (TID-58). The per-fixture param
                 # map is what `combo` already is, so an indirect value simply joins it — and must be
@@ -3555,7 +3557,11 @@ class Engine:
         # this process is no longer a safe thing to fork. Re-run it in the clean room and report that
         # instead — the pristine image is the only place the answer is both correct and reachable
         # without deadlocking (TID-50).
-        if node_must_fork and _CLEAN_ROOM is not None and not self.no_fork and not force_no_fork_only:
+        # …unless the deadline is what ended it (TID-93): a re-run would block again, cost a second
+        # deadline, and replace the timeout's own message with the child path's; the error stands,
+        # and the must-fork verdict is what changes the next run.
+        if (node_must_fork and _CLEAN_ROOM is not None and not self.no_fork
+                and not force_no_fork_only and not self._timed_out):
             print(f"tiderace: re-running {node_id} from a clean image — it disturbed interpreter state",
                   file=sys.stderr, flush=True)
             clean = _clean_room_run(node_id, style, deadline_ms)
@@ -3807,9 +3813,20 @@ class Engine:
             # torn down per test in-process; wider scopes still live once in the parent.
             self._leaked = None
             try:
-                result = self._child_exec(node_id, style, requested, closure, combo, case_kwargs,
-                                          variant_id=variant_id,
-                                          in_process=True, trusted_pure=trusted_pure)
+                # The deadline holds here too (TID-93): a forked child is killed when it overruns,
+                # but a test that blocks on this tier used to block the worker, and the run.
+                with _in_process_deadline(deadline_ms):
+                    result = self._child_exec(node_id, style, requested, closure, combo, case_kwargs,
+                                              variant_id=variant_id,
+                                              in_process=True, trusted_pure=trusted_pure)
+            except _InProcessTimeout as exc:
+                # The test was interrupted mid-body: whatever it held is not torn down, so this
+                # process is not to be trusted with the next in-process test — the node forks from
+                # now on (TID-33's must-fork), where the deadline can kill instead of interrupt.
+                self._state_disturbed = True
+                self._disturbance = str(exc)
+                self._timed_out = True
+                return "error", str(exc), {}, _UNKNOWN_PURITY
             except BaseException as exc:  # noqa: BLE001 — any in-process test error → Outcome::Error
                 return "error", "".join(traceback.format_exception_only(type(exc), exc)), {}, _UNKNOWN_PURITY
             # `_child_exec` sets this when the fingerprint moved in a way nothing undid (TID-33), so
@@ -5433,6 +5450,53 @@ def _clean_room_serve(sock, engine: "Engine") -> None:
             resp = {"node_id": req["node_id"], "outcome": "error",
                     "detail": "timeout (clean re-run produced no result)"}
         _write_frame(fd, resp)
+
+
+class _InProcessTimeout(BaseException):
+    """Raised in the main thread by the in-process deadline's signal handler (TID-93). A
+    `BaseException`, so a test's `except Exception` cannot swallow it."""
+
+
+class _in_process_deadline:
+    """Arm the per-test deadline around an in-process run (TID-93).
+
+    `SIGALRM` through `setitimer`: the handler raises `_InProcessTimeout` in the main thread, which
+    ends any wait CPython lets a signal interrupt — a lock, a sleep, a socket read, a thread join.
+    A wait it cannot interrupt (inside a C extension that never returns to the interpreter) is the
+    engine's job: its read on the worker times out and the worker is killed. Off when there is no
+    deadline, no `setitimer` (Windows), or this is not the main thread (signals only land there);
+    a test's own `SIGALRM` handler is put back afterwards."""
+
+    def __init__(self, deadline_ms: int):
+        self.seconds = max(deadline_ms, 0) / 1000.0
+        self.armed = False
+        self.previous = None
+
+    def __enter__(self):
+        if (self.seconds <= 0 or not hasattr(signal, "setitimer")
+                or threading.current_thread() is not threading.main_thread()):
+            return self
+        seconds = self.seconds
+
+        def on_alarm(_signum, _frame):
+            raise _InProcessTimeout(
+                f"timeout after {seconds:g}s on the in-process tier — the test was still running; "
+                f"it forks from the next run on, where the deadline kills instead of interrupts")
+
+        try:
+            self.previous = signal.signal(signal.SIGALRM, on_alarm)
+            signal.setitimer(signal.ITIMER_REAL, seconds)
+            self.armed = True
+        except (ValueError, OSError):  # not the main thread after all, or no timers here
+            self.armed = False
+        return self
+
+    def __exit__(self, *_exc):
+        if self.armed:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, self.previous if self.previous is not None
+                          else signal.SIG_DFL)
+        return False
 
 
 def _clean_room_run(node_id: str, style: str, deadline_ms: int) -> dict | None:

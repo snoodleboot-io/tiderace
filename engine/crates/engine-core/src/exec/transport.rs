@@ -44,6 +44,17 @@ pub trait ShimTransport {
     fn exchange(&mut self, req: &ExecRequest<'_>) -> Result<ExecResponse>;
 }
 
+/// What a batch does when its worker stops answering mid-batch (TID-93).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LostWorker {
+    /// Fail the batch: the error propagates (a one-shot worker's owner relaunches or gives up).
+    Fail,
+    /// Report it: the in-flight node is an error naming the fault, every node after it in the
+    /// batch is an error naming the node that took the worker down, and the batch returns `Ok` —
+    /// the caller reads [`run_batch_lost`] to learn the worker is gone.
+    Report,
+}
+
 /// Drive a whole batch through a transport, building one [`TestResult`] per item.
 ///
 /// This is the per-item loop formerly copy-pasted into `ForkWorker::run` and `SubprocessWorker::run`;
@@ -58,8 +69,31 @@ pub(crate) fn run_batch<T: ShimTransport + ?Sized>(
     trusted: &std::collections::HashSet<String>,
     must_fork: &std::collections::HashSet<String>,
 ) -> Result<Vec<TestResult>> {
+    run_batch_lost(
+        transport,
+        items,
+        deadline_ms,
+        force_no_fork,
+        trusted,
+        must_fork,
+        LostWorker::Fail,
+    )
+    .map(|(results, _)| results)
+}
+
+/// [`run_batch`] with a [`LostWorker`] policy; the second value names the fault that took the
+/// worker down, when one did.
+pub(crate) fn run_batch_lost<T: ShimTransport + ?Sized>(
+    transport: &mut T,
+    items: &[TestItem],
+    deadline_ms: u64,
+    force_no_fork: bool,
+    trusted: &std::collections::HashSet<String>,
+    must_fork: &std::collections::HashSet<String>,
+    on_lost: LostWorker,
+) -> Result<(Vec<TestResult>, Option<String>)> {
     let mut results = Vec::with_capacity(items.len());
-    for item in items {
+    for (index, item) in items.iter().enumerate() {
         let mut req = ExecRequest::bare(item.node_id.as_str(), item.style.wire(), deadline_ms);
         // TID-33: a test recorded as disturbing interpreter state never takes the in-process ladder
         // again. The shim still catches a first offence at runtime and re-runs it forked, but that
@@ -70,7 +104,31 @@ pub(crate) fn run_batch<T: ShimTransport + ?Sized>(
                                            // on a no-fork request; the shim ignores it otherwise.
         req.trusted_pure = force_no_fork && trusted.contains(item.node_id.as_str());
         let start = Instant::now();
-        let resp = transport.exchange(&req)?;
+        let resp = match transport.exchange(&req) {
+            Ok(resp) => resp,
+            Err(e) if on_lost == LostWorker::Report => {
+                // The worker is gone — hung past its deadline, or dead. Say so per node rather
+                // than losing the batch (TID-93): this node names the fault, the rest name it.
+                let fault = format!("{e}");
+                let duration_ms = start.elapsed().as_millis() as u64;
+                results.push(TestResult::new(
+                    item.node_id.clone(),
+                    Outcome::Error,
+                    duration_ms,
+                    fault.clone(),
+                ));
+                for later in &items[index + 1..] {
+                    results.push(TestResult::new(
+                        later.node_id.clone(),
+                        Outcome::Error,
+                        0,
+                        format!("not run: the worker was lost at {} ({fault})", item.node_id),
+                    ));
+                }
+                return Ok((results, Some(fault)));
+            }
+            Err(e) => return Err(e),
+        };
         let duration_ms = start.elapsed().as_millis() as u64;
         // A parametrized node reports one result per case (TID-25). The cases already ran and forked
         // individually, so this reports what was executed rather than the worst of it.
@@ -106,7 +164,19 @@ pub(crate) fn run_batch<T: ShimTransport + ?Sized>(
             .with_skip_origin(resp.skip_origin),
         );
     }
-    Ok(results)
+    Ok((results, None))
+}
+
+#[cfg(unix)]
+impl PipeTransport<std::os::unix::net::UnixStream, BufReader<std::os::unix::net::UnixStream>> {
+    /// How long a read on this socket waits before it fails (TID-93). The two halves are one
+    /// socket, so setting it on the write half covers the reads.
+    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
+        match self.stdin.as_ref() {
+            Some(sock) => sock.set_read_timeout(timeout),
+            None => Ok(()),
+        }
+    }
 }
 
 /// The production transport: length-prefixed JSON frames over a pair of byte streams — in practice a
@@ -117,6 +187,9 @@ pub struct PipeTransport<W: Write, R: Read> {
     /// the owner reaps the child — the ordering that avoids a deadlock on shutdown.
     stdin: Option<W>,
     stdout: R,
+    /// The shim's pid as its ready frame reported it (`-1` before the handshake or when unknown):
+    /// what a worker that stops answering is killed by (TID-93).
+    peer_pid: i64,
 }
 
 /// The concrete transport over a child process's pipes (what `Wellspring`/`NoForkProc` hold).
@@ -129,7 +202,13 @@ impl<W: Write, R: Read> PipeTransport<W, R> {
         Self {
             stdin: Some(stdin),
             stdout,
+            peer_pid: -1,
         }
+    }
+
+    /// The shim's pid from the ready frame, `-1` when unknown.
+    pub fn peer_pid(&self) -> i64 {
+        self.peer_pid
     }
 
     /// Close the write half (→ shim sees EOF and exits, running wider-scope finalizers once). Idempotent.
@@ -146,9 +225,8 @@ impl<W: Write, R: Read> ShimTransport for PipeTransport<W, R> {
         if frame.get("ready").and_then(Value::as_bool) != Some(true) {
             return Err(EngineError::Exec(format!("shim failed to warm: {frame}")));
         }
-        Ok(ReadyInfo {
-            pid: frame.get("pid").and_then(Value::as_i64).unwrap_or(-1),
-        })
+        self.peer_pid = frame.get("pid").and_then(Value::as_i64).unwrap_or(-1);
+        Ok(ReadyInfo { pid: self.peer_pid })
     }
 
     fn exchange(&mut self, req: &ExecRequest<'_>) -> Result<ExecResponse> {

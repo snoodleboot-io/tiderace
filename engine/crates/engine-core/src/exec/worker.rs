@@ -6,4 +6,10 @@ use crate::error::Result;
 /// (free-threaded), and `RemoteWorker` (distributed) live, so the orchestrator never speaks `fork`.
 pub trait Worker {
     fn run(&mut self, items: &[TestItem]) -> Result<Vec<TestResult>>;
+
+    /// Whether this worker stopped answering during its last batch and is gone (TID-93): the
+    /// batch's results were still reported, and the owner must not hand it another.
+    fn is_lost(&self) -> bool {
+        false
+    }
 }
