@@ -1843,11 +1843,16 @@ def _closure(reg: Registry, module_key: str, requested: dict, extra: list | None
             seen.add(key)
             ordered.append(d)
 
+    # pytest's closure order, which is also the order its parametrised-fixture axes take in a node
+    # id: the autouse fixtures, then `usefixtures` (and what a marker implies — anyio's backend),
+    # then the signature's arguments. anyio's `TestConnectedUDPSocket.test_iterate(family)` is
+    # `[asyncio-ipv4]` under pytest, the backend the plugin's `usefixtures` injects before the
+    # `family` the test asks for (TID-87).
     for d in reg.autouse_for(module_key, classes):
         visit(d.name)
-    for provider_name in requested.values():
-        visit(provider_name)
     for provider_name in extra or ():
+        visit(provider_name)
+    for provider_name in requested.values():
         visit(provider_name)
     return ordered
 
