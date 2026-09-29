@@ -3,7 +3,8 @@
     python benchmarks/harness/nodediff.py click
 
 The only sound way to compare two runners is by node id: a tally cannot tell a changed outcome from
-a node that never existed on one side. pytest's side comes from `-rA`; ours from `--report`.
+a node that never existed on one side. pytest's side comes from `-v`, one line per node; ours from
+`--report`.
 """
 import json, os, re, subprocess, sys
 from collections import Counter
@@ -13,11 +14,23 @@ from corpora import TIDERACE, by_name, clean_env, tiderace_env
 HERE = os.path.dirname(os.path.abspath(__file__))
 name = sys.argv[1]
 _, _, cwd, py, target, troot, _ = by_name(name)
-pt = subprocess.run([py, "-m", "pytest", "-p", "no:cacheprovider", "-q", "-rA", target],
-                    cwd=cwd, capture_output=True, text=True, env=clean_env()).stdout
+pt = subprocess.run([py, "-m", "pytest", "-p", "no:cacheprovider", "-v", "-p", "no:randomly",
+                     target], cwd=cwd, capture_output=True, text=True, env=clean_env()).stdout
 pmap = {}
-for word, node in re.findall(r"^(PASSED|FAILED|ERROR|XFAIL|XPASS|SKIPPED) (\S+)", pt, re.M):
-    pmap[node] = word.lower()
+# `-v` prints one `node OUTCOME` line per node, skips included — `-rA`'s summary folds every skip
+# into a `SKIPPED [16] file:line: reason` line with no node id, which hid 21 of click's Windows-only
+# variants and made them look like nodes only tiderace had (TID-88). A node id may contain spaces
+# (`[-1-a b c-expect4]`), so it runs to the outcome word. Everything a pytester-driven test prints
+# from its *inner* session lands in this output too; those ids lack the target prefix and are
+# dropped rather than counted as pytest-only nodes.
+outcome_re = re.compile(r"^(.+?) (PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)(?: |$)")
+for line in pt.splitlines():
+    m = outcome_re.match(line)
+    if not m:
+        continue
+    node, word = m.group(1), m.group(2)
+    if node.startswith(target.rstrip("/") + "/") or node.startswith(target.rstrip("/") + "::"):
+        pmap[node] = word.lower()
 rpath = os.path.join(HERE, f"report-{name}.json")
 if os.path.exists(rpath):
     os.remove(rpath)

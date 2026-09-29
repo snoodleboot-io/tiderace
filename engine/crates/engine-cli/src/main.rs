@@ -25,7 +25,11 @@ usage: tiderace <command> [options] <path>
 
 Commands:
   collect <path>          discover tests and print their node ids + styles
-  run [options] <path>    collect and execute, then report
+  run [options] <path>    collect and execute, then report — through the daemon serving
+                          <path> when one is (see `daemon`), else in this process
+  daemon start <path>     keep a daemon for <path> warm: later runs import nothing
+  daemon status <path>    is one serving, and is its image warm
+  daemon stop <path>      shut it down
 
 Options for `run`:
   -n, --workers <N>       parallel workers (default: CPU count; 1 = sequential)
@@ -37,6 +41,8 @@ Options for `run`:
       --optimistic        let restorable tests skip the fork (the default; kept for scripts)
       --no-optimistic     fork every test, even the restorable ones (see the note below)
       --shared-import     import the project once and fork the workers from it (the default)
+      --shard-modules     split a module heavier than one worker's share across workers; a file
+                          whose tests build on each other's state may then break (off by default)
       --no-shared-import  give every worker its own interpreter, each importing the project
   -m, --markers <EXPR>    run only tests matching a marker expression, e.g. 'not slow and db'.
                           Matches pytest marks and tiderace tags alike, and overrides any -m the
@@ -115,12 +121,215 @@ fn main() -> ExitCode {
                     // SAFETY: as above.
                     unsafe { std::env::set_var("TIDERACE_STRICT_MARKERS", "1") };
                 }
-                cmd_run(&opts.root, &opts.plan, opts.quiet, opts.report.as_deref())
+                // A run under `TIDERACE_NO_DAEMON` stays in this process — a gate that must not
+                // share an image with earlier runs. A filtered run goes through the daemon with
+                // its selection (TID-90): the image's workers apply it after the fork.
+                let daemon = std::env::var_os("TIDERACE_NO_DAEMON").is_none().then(|| {
+                    engine_core::exec::Selection {
+                        keyword: opts.keyword_expr.clone(),
+                        marker: opts.marker_expr.clone(),
+                        strict_markers: opts.strict_markers,
+                    }
+                });
+                cmd_run(
+                    &opts.root,
+                    &opts.plan,
+                    opts.quiet,
+                    opts.report.as_deref(),
+                    daemon,
+                )
             }
             Err(e) => usage_error(&e),
         },
+        "daemon" => cmd_daemon(&args[1..]),
         other => usage_error(&format!("unknown command: {other}")),
     }
+}
+
+// ------------------------------------------------------------------ the daemon (TID-84)
+
+/// One request to the daemon serving `root`, if one is listening: `None` when there is no socket
+/// or nothing answers on it.
+#[cfg(unix)]
+fn daemon_call(
+    root: &Path,
+    request: engine_daemon::RpcRequest,
+) -> Option<engine_daemon::RpcResponse> {
+    use std::os::unix::net::UnixStream;
+    let path = engine_daemon::daemon_socket_path(root);
+    let mut stream = UnixStream::connect(&path).ok()?;
+    engine_daemon::write_frame(&mut stream, &request).ok()?;
+    engine_daemon::read_frame::<_, engine_daemon::RpcResponse>(&mut stream)
+        .ok()
+        .flatten()
+}
+
+#[cfg(not(unix))]
+fn daemon_call(
+    _root: &Path,
+    _request: engine_daemon::RpcRequest,
+) -> Option<engine_daemon::RpcResponse> {
+    None
+}
+
+/// The full run through the daemon: `None` when none is serving this root, `Some(Err)` when one is
+/// and could not run it, `Some(Ok(results))` otherwise — what the run here would have produced.
+fn daemon_run(
+    root: &Path,
+    selection: engine_core::exec::Selection,
+) -> Option<Result<Vec<engine_core::domain::TestResult>, String>> {
+    use engine_daemon::{RpcRequest, RpcResponse};
+    let root = root.canonicalize().ok()?;
+    daemon_call(&root, RpcRequest::Health)?;
+    let request = RpcRequest::RunFull {
+        keyword: selection.keyword,
+        marker: selection.marker,
+        strict_markers: selection.strict_markers,
+    };
+    Some(match daemon_call(&root, request) {
+        Some(RpcResponse::RanFull { results }) => Ok(results.into_iter().map(from_rpc).collect()),
+        Some(RpcResponse::Error { message }) => Err(message),
+        Some(other) => Err(format!("unexpected answer: {other:?}")),
+        None => Err("the daemon went away mid-run".to_string()),
+    })
+}
+
+fn from_rpc(r: engine_daemon::RpcFullResult) -> engine_core::domain::TestResult {
+    use engine_core::domain::{NodeId, TestResult};
+    let mut out = TestResult::new(
+        NodeId::new(r.node_id),
+        Outcome::from_wire(&r.outcome),
+        r.duration_ms,
+        r.detail,
+    )
+    .with_touched(r.touched_files)
+    .with_pure(r.pure)
+    .with_must_fork(r.must_fork)
+    .with_skip_origin(r.skip_origin)
+    .with_expanded(r.expanded);
+    if let (Some(w), Some(u), Some(s), Some(e)) =
+        (r.worker, r.unit, r.unit_started_ms, r.unit_ended_ms)
+    {
+        out = out.with_schedule(w, u, s, e);
+    }
+    out
+}
+
+/// `tiderace daemon start|status|stop <path>`.
+fn cmd_daemon(args: &[String]) -> ExitCode {
+    use engine_daemon::{RpcRequest, RpcResponse};
+    let (verb, root) = match args {
+        [verb, root] => (verb.as_str(), PathBuf::from(root)),
+        _ => return usage_error("daemon takes a verb and a path: daemon start|status|stop <path>"),
+    };
+    let root = root.canonicalize().unwrap_or(root);
+    match verb {
+        "status" => match daemon_call(&root, RpcRequest::Health) {
+            Some(RpcResponse::Healthy { pid, warm }) => {
+                println!(
+                    "daemon serving {} — pid {pid}, image {}",
+                    root.display(),
+                    if warm {
+                        "warm"
+                    } else {
+                        "cold (the first run imports the suite)"
+                    }
+                );
+                ExitCode::SUCCESS
+            }
+            _ => {
+                println!("no daemon serving {}", root.display());
+                ExitCode::FAILURE
+            }
+        },
+        "stop" => match daemon_call(&root, RpcRequest::Shutdown) {
+            Some(RpcResponse::ShuttingDown) => {
+                println!("daemon for {} stopped", root.display());
+                ExitCode::SUCCESS
+            }
+            _ => {
+                println!("no daemon serving {}", root.display());
+                ExitCode::FAILURE
+            }
+        },
+        "start" => daemon_start(&root),
+        other => usage_error(&format!("unknown daemon verb: {other}")),
+    }
+}
+
+#[cfg(unix)]
+fn daemon_start(root: &Path) -> ExitCode {
+    use engine_daemon::{RpcRequest, RpcResponse};
+    use std::os::unix::process::CommandExt;
+    if let Some(RpcResponse::Healthy { pid, .. }) = daemon_call(root, RpcRequest::Health) {
+        println!("a daemon is already serving {} (pid {pid})", root.display());
+        return ExitCode::SUCCESS;
+    }
+    // The daemon binary ships beside this one; `TIDERACE_DAEMON_BIN` points elsewhere.
+    let bin = std::env::var("TIDERACE_DAEMON_BIN")
+        .map(PathBuf::from)
+        .or_else(|_| {
+            std::env::current_exe().map(|exe| {
+                exe.with_file_name(format!("tiderace-daemon{}", std::env::consts::EXE_SUFFIX))
+            })
+        })
+        .unwrap_or_else(|_| PathBuf::from("tiderace-daemon"));
+    let cache = root.join(".tiderace-cache");
+    let log_path = cache.join("daemon.log");
+    let log = std::fs::create_dir_all(&cache).and_then(|_| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+    });
+    let (out, err) = match log.and_then(|f| Ok((f.try_clone()?, f))) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("error: cannot open {}: {e}", log_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let child = std::process::Command::new(&bin)
+        .arg("serve")
+        .arg(root)
+        .stdin(std::process::Stdio::null())
+        .stdout(out)
+        .stderr(err)
+        .process_group(0) // its own group: a Ctrl-C in this terminal does not take it down
+        .spawn();
+    let child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: cannot start {}: {e}", bin.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if let Some(RpcResponse::Healthy { .. }) = daemon_call(root, RpcRequest::Health) {
+            println!(
+                "daemon started for {} (pid {}): the first run imports the suite, later runs do \
+                 not. Log: {}",
+                root.display(),
+                child.id(),
+                log_path.display()
+            );
+            return ExitCode::SUCCESS;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    eprintln!(
+        "error: the daemon did not answer on {} within 30s — see {}",
+        engine_daemon::daemon_socket_path(root).display(),
+        log_path.display()
+    );
+    ExitCode::FAILURE
+}
+
+#[cfg(not(unix))]
+fn daemon_start(_root: &Path) -> ExitCode {
+    eprintln!("error: the daemon serves over a Unix socket, which this platform does not have");
+    ExitCode::FAILURE
 }
 
 fn usage_error(msg: &str) -> ExitCode {
@@ -238,6 +447,7 @@ impl Options {
                 "--optimistic" => plan.optimistic_no_fork = true,
                 "--no-optimistic" => plan.optimistic_no_fork = false,
                 "--shared-import" => plan.shared_import = true,
+                "--shard-modules" => plan.shard_modules = true,
                 "--no-shared-import" => plan.shared_import = false,
                 "-m" | "--markers" => marker_expr = Some(value("--markers")?),
                 "-k" | "--keyword" => keyword_expr = Some(value("--keyword")?),
@@ -338,7 +548,14 @@ fn effective_plan(plan: &RunPlan, item_count: usize, root: &Path) -> (RunPlan, S
     (effective, learned)
 }
 
-fn cmd_run(root: &Path, plan: &RunPlan, quiet: bool, report_path: Option<&Path>) -> ExitCode {
+fn cmd_run(
+    root: &Path,
+    plan: &RunPlan,
+    quiet: bool,
+    report_path: Option<&Path>,
+    daemon: Option<engine_core::exec::Selection>,
+) -> ExitCode {
+    let t_start = std::time::Instant::now();
     let python = std::env::var("TIDERACE_PYTHON").unwrap_or_else(|_| engine_core::default_python());
     let shim = match std::env::var("TIDERACE_SHIM") {
         Ok(s) => PathBuf::from(s),
@@ -369,30 +586,55 @@ fn cmd_run(root: &Path, plan: &RunPlan, quiet: bool, report_path: Option<&Path>)
     //
     let (effective, learned) = effective_plan(plan, items.len(), root);
 
-    eprintln!("tiderace: {}{learned}", effective.header());
-
-    // `&effective`, not `plan`: the header and the run must describe the same thing. They did not,
-    // so the worker clamp shown in the header was never the clamp applied — and the verdicts read
-    // above would have been reported and then dropped on the floor.
-    let results = match run_parallel(&python, &shim, root, items, &effective) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // The one thing `run` writes back (TID-62, ADR-E016): how long each node took, so the next
-    // run's scheduler hands out the heaviest module first instead of the one with the most tests.
-    // Not a verdict — the verdict store's "reading only" contract still holds for everything that
-    // can change an answer — and best-effort: a tree that cannot be written runs cold next time,
-    // which is not a failure of this run.
-    if let Err(e) = record_durations(root, &results) {
+    // A daemon serving this root runs it from its warm image (TID-84): the same results, reported
+    // here the same way, and the daemon persists durations and verdicts itself. No daemon, or one
+    // that refuses, and the run happens in this process as before.
+    let t_daemon = std::time::Instant::now();
+    let via_daemon = daemon.and_then(|selection| daemon_run(root, selection));
+    if std::env::var_os("TIDERACE_TIMING").is_some() {
         eprintln!(
-            "warning: could not record durations in {}: {e}",
-            root.display()
+            "tiderace: timing: cli: collect+plan {}ms, daemon round trip {}ms",
+            t_daemon.duration_since(t_start).as_millis(),
+            t_daemon.elapsed().as_millis()
         );
     }
+    let results = match via_daemon {
+        Some(Ok(results)) => {
+            eprintln!("tiderace: {}{learned} via daemon", effective.header());
+            results
+        }
+        Some(Err(message)) => {
+            eprintln!("error: the daemon could not run this: {message}");
+            return ExitCode::FAILURE;
+        }
+        None => {
+            eprintln!("tiderace: {}{learned}", effective.header());
+
+            // `&effective`, not `plan`: the header and the run must describe the same thing. They
+            // did not, so the worker clamp shown in the header was never the clamp applied — and
+            // the verdicts read above would have been reported and then dropped on the floor.
+            let results = match run_parallel(&python, &shim, root, items, &effective) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            // The one thing `run` writes back (TID-62, ADR-E016): how long each node took, so the
+            // next run's scheduler hands out the heaviest module first instead of the one with the
+            // most tests. Not a verdict — the verdict store's "reading only" contract still holds
+            // for everything that can change an answer — and best-effort: a tree that cannot be
+            // written runs cold next time, which is not a failure of this run.
+            if let Err(e) = record_durations(root, &results) {
+                eprintln!(
+                    "warning: could not record durations in {}: {e}",
+                    root.display()
+                );
+            }
+            results
+        }
+    };
     let report = RunReport::new(results);
     if !quiet {
         for result in &report.results {

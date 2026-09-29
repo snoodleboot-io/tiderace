@@ -95,6 +95,11 @@ export TIDERACE_PYTHON="$(which python3)"
 
 # Watch — warm interpreter, re-run impacted tests on save (millisecond loops)
 ./target/release/tiderace-daemon watch /path/to/tests
+
+# Or keep a daemon warm and use the one-shot CLI: later runs import nothing
+./target/release/tiderace daemon start /path/to/tests
+./target/release/tiderace run /path/to/tests      # "via daemon"
+./target/release/tiderace daemon stop /path/to/tests
 ```
 
 ## How it works
@@ -102,7 +107,8 @@ export TIDERACE_PYTHON="$(which python3)"
 1. **Collect** — discover tests with Rust regex (no Python startup).
 2. **Graph** — build each test's fixture closure (Rust).
 3. **Schedule** — group by module (scope locality) and hand the groups to N warm interpreters from a
-   queue. Execution order is not pytest's file order and is not promised to be.
+   queue. A file's tests run in one process in file order, as under pytest; the order *between*
+   files is not pytest's and is not promised to be.
 4. **Impact** — skip tests whose dependency files (from coverage) didn't change; with no changes,
    nothing runs — the interpreter isn't even launched.
 5. **Isolate** — per test: pure → no-fork · state-mutating → no-fork + snapshot/restore · opaque → fork

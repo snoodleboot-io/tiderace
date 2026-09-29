@@ -5,6 +5,7 @@ use crate::scheduler::{ScheduledTest, WorkerBatch};
 pub struct ScheduleInput {
     tests: Vec<ScheduledTest>,
     workers: usize,
+    shard_modules: bool,
 }
 
 impl ScheduleInput {
@@ -13,7 +14,19 @@ impl ScheduleInput {
         Self {
             tests,
             workers: workers.max(1),
+            shard_modules: false,
         }
+    }
+
+    /// Let a module heavier than one perfect bin be split across workers (TID-52). Off by default
+    /// since TID-80: a module's tests then run in one process, in file order, as pytest runs them.
+    pub fn with_module_sharding(mut self, shard: bool) -> Self {
+        self.shard_modules = shard;
+        self
+    }
+
+    pub fn shard_modules(&self) -> bool {
+        self.shard_modules
     }
 
     pub fn tests(&self) -> &[ScheduledTest] {

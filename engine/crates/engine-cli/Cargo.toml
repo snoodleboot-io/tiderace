@@ -11,8 +11,9 @@ path = "src/main.rs"
 
 [dependencies]
 engine-core = { path = "../engine-core" }
+# The daemon client (TID-84): `tiderace run` hands a run to a live daemon, `tiderace daemon` manages one.
+engine-daemon = { path = "../engine-daemon" }
 
 [dev-dependencies]
-# Only the integration test reads the `--report` file back; the binary itself still has no
-# dependency beyond `engine-core`.
+# Only the integration tests read the `--report` file back.
 serde_json = { workspace = true }

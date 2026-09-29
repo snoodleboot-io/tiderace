@@ -8,7 +8,7 @@
 //!
 //! Env: `TIDERACE_SHIM` (path to `py-shim/shim.py`, required); `TIDERACE_PYTHON` (default `python3`,
 //! or `python` on Windows, whose venvs create no `python3.exe` — see `engine_core::default_python`);
-//! `TIDERACE_SOCKET` (serve mode socket path; default `<tmp>/tiderace-daemon.sock`).
+//! `TIDERACE_SOCKET` (serve mode socket path; default `engine_daemon::daemon_socket_path(root)`).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -259,9 +259,13 @@ fn cmd_watch(root: &Path, handler: &mut EngineHandler) -> ExitCode {
 
 #[cfg(unix)]
 fn cmd_serve(handler: &mut EngineHandler) -> ExitCode {
+    // Per project: `tiderace run` looks here for a live daemon (TID-84). `TIDERACE_SOCKET` overrides.
     let path = std::env::var("TIDERACE_SOCKET")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir().join("tiderace-daemon.sock"));
+        .unwrap_or_else(|_| engine_daemon::daemon_socket_path(handler.root()));
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     eprintln!("serving on {} …", path.display());
     match engine_daemon::serve_unix_socket(&path, handler) {
         Ok(()) => ExitCode::SUCCESS,

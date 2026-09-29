@@ -16,7 +16,8 @@ child). There is exactly one command-line flag — `--all` — on the daemon's `
 | `TIDERACE_CACHE_DIR` | off | Directory for the **content-addressed result cache** (ADR-E004). Point it at a CI cache path / shared mount / artifact dir and a *pure* test's outcome computed on one machine is served without re-running on any other with the same inputs — even when local impact state is stale. Off ⇒ impact-skip only. |
 | `TIDERACE_SUBINTERP` | off | Opt into the **sub-interpreter tier** (ADR-E015) on `run --all`: sub-interpreter-*safe* modules run through a parallel sub-interpreter pool (no fork), the rest through the ordinary pool. Its purpose is **Windows** parallelism (no `fork()` there); on Linux the fork pool already parallelizes, so it measures at parity. Requires CPython 3.14+. |
 | `TIDERACE_SUBINTERP_WORKERS` | CPU count | Size of the sub-interpreter pool when `TIDERACE_SUBINTERP=1`. |
-| `TIDERACE_SOCKET` | `<tmp>/tiderace-daemon.sock` | `serve` mode: the Unix socket path the RPC server binds. |
+| `TIDERACE_SOCKET` | `<tmp>/tiderace-<uid>/<digest of the root>.sock` | `serve` mode: the Unix socket path the RPC server binds; `tiderace run` and `tiderace daemon` look only at the default. |
+| `TIDERACE_PLUGINS` | all installed | Which pytest plugins' **fixtures** to take (TID-87): `none`, or a comma-separated allow-list of plugin names (`pytest_mock,anyio`). The default is every `pytest11` entry point plus `-p NAME` in `addopts` and each conftest's `pytest_plugins`, minus `-p no:NAME`. `PYTEST_DISABLE_PLUGIN_AUTOLOAD` turns the entry points off, as for pytest. Only fixtures are taken — no plugin hook runs, except `pytest_addoption`, whose options and ini defaults are recorded so `config.getoption` / `config.getini` read back what the plugin declared. |
 | `TIDERACE_REQUIRE_LIVE` | off | Testing/CI: make the engine's own *live* test scenarios **fail** instead of self-skipping when their interpreter/venv is absent. Set in the CI jobs that provision Python, so a broken test environment can't pass as a silent no-op. Not needed to *use* tiderace. |
 
 ```bash
@@ -77,9 +78,17 @@ keeps their own. Ignore it:
 .tiderace-state.json
 ```
 
-## Future: pyproject configuration
+## Project configuration
 
-!!! note "Not yet"
-    There is currently **no** `pyproject.toml` / config-file support — configuration is entirely
-    through the environment variables above. A native `[tool.tiderace]` section may arrive later;
-    it does not exist today.
+tiderace reads the project's **pytest** configuration where pytest would — `pytest.ini`,
+`[tool.pytest.ini_options]` in `pyproject.toml`, `tox.ini`, `setup.cfg` — for the settings that
+change what runs and how it is named: `addopts` (`-m`, `-k`, `-p`, `--ignore`, `--strict-markers`),
+`markers`, `asyncio_mode`. A `[tool.tiderace]` section in `pyproject.toml` is read for the same keys,
+so a suite mid-migration can carry its settings in either place, plus one key of its own:
+
+```toml
+[tool.tiderace]
+plugins = ["pytest_mock", "anyio"]   # only these plugins' fixtures; [] for none. Default: all installed.
+```
+
+`TIDERACE_PLUGINS` in the environment overrides the config.

@@ -2,6 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use engine_core::domain::{TestItem, TestResult};
+#[cfg(unix)]
+use engine_core::exec::WellspringPool;
+#[cfg(unix)]
+use engine_core::runner::run_parallel_with_pool;
 use engine_core::runner::{run_parallel as core_run_parallel, RunPlan, WorkerStrategy};
 
 /// Run `items` across a **pool of `workers` in parallel** (design 06 / ADR-E010).
@@ -25,6 +29,8 @@ pub fn run_parallel(
     trusted: &HashSet<String>,
     must_fork: &HashSet<String>,
     durations: &HashMap<String, u64>,
+    #[cfg(unix)] warm: Option<&mut WellspringPool>,
+    #[cfg(not(unix))] warm: Option<()>,
 ) -> Result<Vec<TestResult>, String> {
     let plan = RunPlan {
         strategy: WorkerStrategy::platform_default(),
@@ -36,6 +42,13 @@ pub fn run_parallel(
         durations: durations.clone(), // TID-62: last run's per-node cost, the scheduler's weights
         ..RunPlan::default()
     };
+    #[cfg(unix)]
+    if let Some(pool) = warm {
+        // The daemon's warm image (TID-84): this run's workers are forked off it, no import.
+        return run_parallel_with_pool(python, shim, root, items, &plan, pool);
+    }
+    #[cfg(not(unix))]
+    let _ = warm;
     core_run_parallel(python, shim, root, items, &plan)
 }
 
@@ -116,6 +129,7 @@ mod tests {
             &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
+            None,
         )
         .expect("empty batch is Ok");
         assert!(out.is_empty());
@@ -159,6 +173,7 @@ mod tests {
             &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
+            None,
         )
         .expect("pool run succeeds");
 
@@ -182,13 +197,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The pool must **isolate module state between tests on whichever backend the platform uses** —
-    /// fork on Unix, no-fork SubprocessWorker on Windows. A module-level list mutated by the first
-    /// test must not be seen by the second. This is the property that broke silently on the no-fork
-    /// path, so run it against a bare interpreter (stdlib corpus, no venv) so **Windows CI** exercises
-    /// its own backend here, not just Unix's.
+    /// The pool must run a file **with pytest's semantics on whichever backend the platform uses** —
+    /// the optimistic ladder on Unix, the no-fork SubprocessWorker on Windows. A module-level list
+    /// the first test appends to is seen appended by the second (TID-81); what must not happen is
+    /// that state reaching the next module, which the engine-core suites cover. Run against a bare
+    /// interpreter (stdlib corpus, no venv) so **Windows CI** exercises its own backend here.
     #[test]
-    fn pool_isolates_module_state_between_tests_on_this_platform() {
+    fn pool_runs_a_file_with_pytests_semantics_on_this_platform() {
         let Some(python) = any_python() else {
             skip_live("no Python interpreter available");
             return;
@@ -196,14 +211,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tiderace_pool_iso_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // A restorable module that mutates a global: test_b fails iff test_a's append leaked.
+        // A restorable module that mutates a global: test_b sees test_a's append, as under pytest.
         std::fs::write(
             dir.join("test_mut.py"),
             "_SEEN = []\n\
              \n\
              def test_a():\n    _SEEN.append(1)\n    assert _SEEN == [1]\n\
              \n\
-             def test_b():\n    _SEEN.append(2)\n    assert _SEEN == [2], f\"LEAK: {_SEEN}\"\n",
+             def test_b():\n    _SEEN.append(2)\n    assert _SEEN == [1, 2], f\"not pytest's order or state: {_SEEN}\"\n",
         )
         .unwrap();
 
@@ -215,10 +230,11 @@ mod tests {
             items,
             1,
             5000,
-            false,
+            true, // the optimistic ladder: in-process with the module-boundary restore (TID-81)
             &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
+            None,
         )
         .expect("pool run succeeds");
 
@@ -230,7 +246,7 @@ mod tests {
             .collect();
         assert!(
             failures.is_empty(),
-            "pool must restore module state between tests on this platform's backend; leaked in {failures:?}"
+            "a file's tests must share their module's state in file order on this platform's backend; failed: {failures:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

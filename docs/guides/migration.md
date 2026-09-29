@@ -41,9 +41,12 @@ to. The codemod translates the mechanical parts of pytest to that model:
 | fixture with `-> T` return type | `@tiderace.provides` + inject-by `T` | the type is what tests wire to |
 | `def test(db)` where `db` is a typed fixture | `def test(db: Db)` | **type inferred** from the provider's return type |
 | `@pytest.mark.parametrize("a,b", [...])` | `@tiderace.cases([...])` | `ids=` preserved |
+| `pytest_generate_tests(metafunc)` in a conftest or module | — (honoured as written) | `metafunc.parametrize(...)` expands the tests it governs; hook axes precede decorator axes in the id, as in pytest (TID-85) |
 | `@pytest.mark.skipif(c, reason=r)` | `@tiderace.skip_if(c, reason=r)` | |
 | `@pytest.mark.skip` / `xfail` | `@tiderace.skip` / `@tiderace.xfail` | |
 | `@pytest.mark.<name>` (other) | `@tiderace.tag("<name>")` | selection metadata |
+| `@pytest.mark.usefixtures("a", "b")` | `@tiderace.uses(A, B)` | honoured on the function, its class or its module (TID-86) |
+| `tmp_path_factory` / `tmpdir_factory` | same names (builtins) | session-scoped, `mktemp(basename)` / `getbasetemp()` (TID-86) |
 
 ## What needs a human (the report names each one)
 
@@ -60,6 +63,10 @@ rather than guessed:
 5. **`@pytest.mark.usefixtures("x")`** — a string name carries no type; request it as a typed param, or
    mark the provider `autouse=True`.
 6. **pytest builtins** (`tmp_path`, `monkeypatch`, `capsys`, …) — provide your own resource.
+   A fixture a **plugin** provides — `mocker` from pytest-mock, `anyio_backend_name` from anyio —
+   keeps working under the compat path: the shim registers every installed plugin's fixtures at the
+   lowest precedence, exactly as a conftest's, without running the plugin's hooks. It is still a
+   pytest fixture, so migrating the test means replacing it too.
 7. **`pytest_*` hooks / `from pytest import …`** — port manually.
 8. **Order-dependent tests** — not flagged, because they are not visible in the source. A test that
    passes under pytest only because of what an earlier test imported or left behind fails under

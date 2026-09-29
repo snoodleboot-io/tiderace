@@ -118,8 +118,17 @@ impl Scheduler for LocalityScheduler {
         groups.sort_by(|(ka, a), (kb, b)| b.total_ms.cmp(&a.total_ms).then(ka.cmp(kb)));
 
         // One perfect bin. A unit at most this heavy means the queue can always keep every worker
-        // busy; a unit heavier than this is the one thing a queue cannot schedule around.
-        let cap = ((total_ms as f64) / (input.workers() as f64)).ceil() as u64;
+        // busy; a unit heavier than this is the one thing a queue cannot schedule around. But a
+        // shard is a piece of a module on another worker — another process — and a module whose
+        // tests hand each other state ("upload in one test, list it in the next") only works when
+        // the whole file runs in one process, in file order, which is what pytest gives it. So a
+        // module is one unit unless the caller asked for sharding (TID-80), the way `pytest-xdist`
+        // keeps a file together under `--dist loadfile` and splits it under `--dist load`.
+        let cap = if input.shard_modules() {
+            ((total_ms as f64) / (input.workers() as f64)).ceil() as u64
+        } else {
+            0
+        };
         let mut units: Vec<WorkerBatch> = Vec::new();
         for (_key, group) in groups {
             let mut batch = WorkerBatch::new(units.len());
@@ -204,7 +213,8 @@ mod tests {
                 t("small::a", "module:small", 5),
             ],
             3, // cap = ceil(48/3) = 16, so only `heavy` (30) is sharded
-        );
+        )
+        .with_module_sharding(true);
         let units = LocalityScheduler::default().units(&input);
         assert_eq!(
             units
@@ -237,7 +247,8 @@ mod tests {
         let tests: Vec<_> = (0..80)
             .map(|i| t(&format!("m::t{i}"), "module:m", 1))
             .collect();
-        let units = LocalityScheduler::default().units(&ScheduleInput::new(tests, 8));
+        let units = LocalityScheduler::default()
+            .units(&ScheduleInput::new(tests.clone(), 8).with_module_sharding(true));
         assert_eq!(
             units.len(),
             8,
@@ -246,6 +257,19 @@ mod tests {
         assert!(
             units.iter().all(|u| u.items().len() == 10),
             "and evenly, since every test weighs the same here"
+        );
+        // …but only when asked. By default the file stays one unit on one worker, in file order:
+        // its tests may hand each other state, as pytest lets them (TID-80).
+        let units = LocalityScheduler::default().units(&ScheduleInput::new(tests, 8));
+        assert_eq!(units.len(), 1, "one module, one unit: {units:?}");
+        assert_eq!(
+            units[0]
+                .items()
+                .iter()
+                .map(|n| n.as_str().to_string())
+                .collect::<Vec<_>>(),
+            (0..80).map(|i| format!("m::t{i}")).collect::<Vec<_>>(),
+            "in the order given"
         );
     }
 

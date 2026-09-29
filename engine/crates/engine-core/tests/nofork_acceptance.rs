@@ -175,19 +175,33 @@ fn no_fork_is_result_identical_to_fork() {
 /// next test. See `py-tiderace/proof_windows_opaque_fork.py`.
 ///
 /// So the expectation is genuinely platform-dependent, and this asserts both halves:
-/// * **fork-capable** (Unix) — the module forks and the tests pass, no leak;
+/// * **fork-capable** (Unix) — the module runs in a forked child, and what it does there never
+///   reaches the worker: a module that runs *after* it sees none of its leak. Inside the module the
+///   file behaves as under pytest (TID-80): the generator `test_a` advanced is advanced for
+///   `test_b`, which fails exactly as `pytest` fails it;
 /// * **fork-less** (Windows) — the tests are reported as `Error` rather than run without isolation.
 ///
 /// Either way the worker survives, which is the part that used to fail.
 const OPAQUE_CORPUS: &str = "\
+import os
 _GEN = (i for i in range(100))
 
 def test_a():
+    os.environ[\"OPAQUE_LEAK\"] = \"from test_a\"
     assert next(_GEN) == 0
 
 def test_b():
     v = next(_GEN)
     assert v == 0, f\"LEAK: generator advanced across tests, got {v}\"
+";
+
+/// Collected after the opaque module: the worker that serves it must not carry the opaque module's
+/// leak, which lived in that module's child.
+const AFTER_CORPUS: &str = "\
+import os
+
+def test_after_the_opaque_module():
+    assert \"OPAQUE_LEAK\" not in os.environ, \"the opaque module's child leaked into the worker\"
 ";
 
 #[test]
@@ -198,25 +212,41 @@ fn opaque_module_is_isolated_by_fork_or_refused_never_leaked() {
     };
     let dir = write_corpus("opaque");
     std::fs::write(dir.join("test_opaque.py"), OPAQUE_CORPUS).unwrap();
-    // Drop the default corpus so only the opaque module is collected.
+    std::fs::write(dir.join("test_zz_after.py"), AFTER_CORPUS).unwrap();
+    // Drop the default corpus so only the opaque module and its follower are collected.
     let _ = std::fs::remove_file(dir.join("test_nofork.py"));
 
     let items = RegexCollector::new().collect(&dir).expect("collection");
-    assert_eq!(items.len(), 2, "test_a + test_b");
+    assert_eq!(items.len(), 3, "test_a + test_b + the follower");
 
     let results = SubprocessWorker::new(5_000, 1)
         .with_target(python, &shim(), &dir)
         .run(&items)
         .expect("the worker must survive an opaque module, whatever the platform");
-    assert_eq!(results.len(), 2);
+    assert_eq!(results.len(), 3);
 
     for r in &results {
-        if cfg!(unix) {
+        let leaf = r.node_id.as_str().rsplit("::").next().unwrap_or("");
+        if leaf == "test_after_the_opaque_module" {
             assert_eq!(
                 r.outcome,
                 Outcome::Passed,
-                "fork-capable: {} should fork and pass (a leak shows up as Failed)",
-                r.node_id
+                "the opaque module's leak stayed in its child: {}",
+                r.detail
+            );
+            continue;
+        }
+        if cfg!(unix) {
+            let want = if leaf == "test_b" {
+                Outcome::Failed
+            } else {
+                Outcome::Passed
+            };
+            assert_eq!(
+                r.outcome, want,
+                "fork-capable: {} runs in the module's child with pytest's semantics inside the \
+                 file (TID-80): {}",
+                r.node_id, r.detail
             );
         } else {
             assert_eq!(
@@ -239,7 +269,9 @@ fn opaque_module_is_isolated_by_fork_or_refused_never_leaked() {
 /// standalone the flag was unset and every module-level mutation persisted into the next test on that
 /// module. The existing acceptance corpus never mutated globals, so nothing caught it.
 ///
-/// `test_b` fails iff `test_a`'s append survived.
+/// Since TID-81 the file keeps its own state between its tests, as it does under pytest: `test_b`
+/// sees `test_a`'s append. What must not happen is that state reaching the *next module*, which the
+/// fingerprint and identity suites cover; here the assertion is pytest's.
 const MUTATING_CORPUS: &str = "\
 _SEEN = []
 
@@ -249,7 +281,7 @@ def test_a():
 
 def test_b():
     _SEEN.append(2)
-    assert _SEEN == [2], f\"LEAK: state from a previous test survived: {_SEEN}\"
+    assert _SEEN == [1, 2], f\"a file's state must carry between its tests, as under pytest: {_SEEN}\"
 ";
 
 #[test]
