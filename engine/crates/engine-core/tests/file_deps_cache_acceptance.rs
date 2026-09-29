@@ -112,7 +112,9 @@ fn the_closure_is_written_after_one_run_folded_by_the_next_and_invalidated_by_an
     let index = index_of(&dir);
     let files = index["files"].as_object().expect("files");
     assert!(
-        files.keys().any(|k| k.ends_with("tests/test_deps.py")),
+        files
+            .keys()
+            .any(|k| k.replace('\\', "/").ends_with("tests/test_deps.py")),
         "the index carries the test module's entry: {:?}",
         files.keys().collect::<Vec<_>>()
     );
