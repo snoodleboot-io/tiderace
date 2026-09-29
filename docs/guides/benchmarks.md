@@ -143,11 +143,13 @@ has no warm mode, so its number is the same full run every time — that is the 
 | edit the hub module (3,958 / 2,428 dependents) | 25.9s — 3,793 ran | 13.9s — 2,316 ran |
 | leaf module made to raise on import | 4 failing, **reported** | 1 failing, **reported** |
 
-pirn-agents' warm runs also carry one cached failure from the daemon's own cold run:
-`tests/llm/test_cross_process_provider_replay.py::TestCrossProcessProviderReplay::test_every_scenario_really_called_the_mock_server_while_recording`
-errors under the daemon's scheduling (it starts a mock HTTP server and replays recorded calls) and
-passes in the one-shot run of the same suite. A cached verdict is served until its dependencies
-change, which is the contract; the error itself is the next thing to look at on this suite.
+pirn-agents' warm rows carried one cached failure from the daemon's own cold run in this pass:
+`tests/llm/test_cross_process_provider_replay.py::TestCrossProcessProviderReplay::test_every_scenario_really_called_the_mock_server_while_recording`,
+which passes in the one-shot run of the same suite. Not scheduling: the daemon handed its pool a
+5 s per-test deadline where `tiderace run` allows 60 s, and that class's set-up starts a mock HTTP
+server and runs two worker interpreters. One deadline for both since
+[TID-89](https://linear.app/snoodleboot/issue/TID-89); the daemon's full run on pirn-agents is
+`4657 tests, 0 failing` and the warm run `0 ran, 4657 cached, 0 failing`.
 
 The first measurement of this table (20 September) read 7.6s / 2.3s for the no-change row and
 8.1s / 2.3s for a leaf edit; the bullets below record what each step found. The cold `run --all`
