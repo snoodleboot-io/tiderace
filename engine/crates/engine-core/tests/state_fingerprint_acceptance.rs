@@ -57,22 +57,20 @@ fn any_python() -> Option<String> {
     None
 }
 
-/// Each `_a`/`_c`/`_e` test leaks; its `_b`/`_d`/`_f` sibling runs next (the collector sorts by node
-/// id) and fails if the leak survived. The baselines are captured at import, which on the in-process
-/// ladder happens once in the pristine parent — so they are the values a fresh interpreter would
-/// have, not whatever the previous test left behind.
+/// The `_a`/`_c`/`_e` tests leak; the `_b`/`_d`/`_f` checks live in the **next module**, which the
+/// same worker runs after it, and fail if the leak survived the module boundary. Inside a file
+/// nothing is put back — a file behaves as it does under pytest (TID-80, TID-81) — so the checks
+/// cannot be the leakers' own neighbours any more. The baselines are captured at import, which on
+/// the in-process ladder happens once in the pristine parent — so they are the values a fresh
+/// interpreter would have, not whatever the previous module left behind.
 ///
 /// `test_g` leaks a thread, which nothing can undo; it only has to be *detected*. `test_h` is
 /// plainly pure and guards the other direction: a fingerprint that fired on everything would demote
 /// every test and quietly turn the ladder back into fork-per-test.
-const CORPUS: &str = "\
+const LEAKERS: &str = "\
 import logging
 import sys
 import threading
-
-PATH_AT_IMPORT = list(sys.path)
-HANDLERS_AT_IMPORT = len(logging.getLogger().handlers)
-LEVEL_AT_IMPORT = logging.getLogger().level
 
 
 def test_a_pollutes_sys_path():
@@ -80,29 +78,14 @@ def test_a_pollutes_sys_path():
     assert sys.path[0] == \"/tmp/tiderace-not-a-real-path\"
 
 
-def test_b_sys_path_is_clean():
-    extra = [p for p in sys.path if p not in PATH_AT_IMPORT]
-    assert not extra, f\"sys.path leaked: {extra}\"
-
-
 def test_c_leaves_a_logging_handler():
     logging.getLogger().addHandler(logging.NullHandler())
     assert True
 
 
-def test_d_no_handler_leaked():
-    n = len(logging.getLogger().handlers)
-    assert n == HANDLERS_AT_IMPORT, f\"leaked {n - HANDLERS_AT_IMPORT} handler(s)\"
-
-
 def test_e_raises_the_root_log_level():
     logging.getLogger().setLevel(logging.DEBUG)
     assert logging.getLogger().level == logging.DEBUG
-
-
-def test_f_log_level_restored():
-    level = logging.getLogger().level
-    assert level == LEVEL_AT_IMPORT, f\"root level leaked: {level} != {LEVEL_AT_IMPORT}\"
 
 
 def test_g_leaks_a_thread():
@@ -115,22 +98,49 @@ def test_h_is_pure():
     assert sum(range(10)) == 45
 ";
 
+/// Collected after `test_a_leaks.py`; run by the same worker once it has left that module.
+const NEIGHBOURS: &str = "\
+import logging
+import sys
+
+PATH_AT_IMPORT = list(sys.path)
+HANDLERS_AT_IMPORT = len(logging.getLogger().handlers)
+LEVEL_AT_IMPORT = logging.getLogger().level
+
+
+def test_b_sys_path_is_clean():
+    extra = [p for p in sys.path if p not in PATH_AT_IMPORT]
+    assert not extra, f\"sys.path leaked: {extra}\"
+
+
+def test_d_no_handler_leaked():
+    n = len(logging.getLogger().handlers)
+    assert n == HANDLERS_AT_IMPORT, f\"leaked {n - HANDLERS_AT_IMPORT} handler(s)\"
+
+
+def test_f_log_level_restored():
+    level = logging.getLogger().level
+    assert level == LEVEL_AT_IMPORT, f\"root level leaked: {level} != {LEVEL_AT_IMPORT}\"
+";
+
 /// A leak whose *own* result differs between the two ways of running it — the only direct evidence,
 /// from outside the process, that the offender was re-run in a fork rather than merely flagged.
 /// In-process the pid is the wellspring's and the body fails; in a forked child it differs and the
 /// body passes. Reported as passed ⇒ the re-run happened and its result is the one that was kept.
 ///
 /// Unix only, with the test that uses it: there is no fork to be re-run into anywhere else.
+/// A thread, because that is the one leak nothing can put back (TID-81): a `sys.path` entry is
+/// restored when the worker leaves the module and no longer makes a test a disturber.
 #[cfg(unix)]
 const FORK_PROOF: &str = "\
 import os
-import sys
+import threading
 
 PID_AT_IMPORT = os.getpid()
 
 
 def test_leak_forces_a_fork():
-    sys.path.insert(0, \"/tmp/tiderace-fork-proof\")
+    threading.Thread(target=threading.Event().wait, daemon=True).start()
     assert os.getpid() != PID_AT_IMPORT, \"ran in the wellspring: the leak did not force a fork\"
 ";
 
@@ -144,6 +154,13 @@ fn write_corpus(tag: &str, body: &str, file: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(file), body).unwrap();
+    dir
+}
+
+/// The leakers and, after them, the module that checks the boundary held.
+fn write_split(tag: &str) -> PathBuf {
+    let dir = write_corpus(tag, LEAKERS, "test_a_leaks.py");
+    std::fs::write(dir.join("test_b_neighbours.py"), NEIGHBOURS).unwrap();
     dir
 }
 
@@ -166,7 +183,7 @@ fn assert_detected_and_restored(results: &[TestResult], tier: &str) {
         assert_eq!(
             r.outcome,
             Outcome::Passed,
-            "TID-33/{tier}: {leaf} saw the previous test's leak — {}",
+            "TID-33/{tier}: {leaf} saw the previous module's leak — {}",
             r.detail
         );
     }
@@ -202,7 +219,7 @@ fn leaks_are_restored_and_demoted_on_the_no_fork_tier() {
         skip_live("no Python interpreter available");
         return;
     };
-    let dir = write_corpus("nofork", CORPUS, "test_leaks.py");
+    let dir = write_split("nofork");
     let items = RegexCollector::new().collect(&dir).expect("collection");
     assert_eq!(items.len(), 8, "8 tests in the corpus");
 
@@ -224,7 +241,7 @@ fn leaks_are_restored_and_demoted_on_the_optimistic_ladder() {
         skip_live("no Python interpreter available");
         return;
     };
-    let dir = write_corpus("optimistic", CORPUS, "test_leaks.py");
+    let dir = write_split("optimistic");
     let items = RegexCollector::new().collect(&dir).expect("collection");
 
     let results = ForkWorker::launch_optimistic(&python, &shim(), &dir)
@@ -277,7 +294,7 @@ fn the_same_corpus_passes_under_fork() {
         skip_live("no Python interpreter available");
         return;
     };
-    let dir = write_corpus("fork", CORPUS, "test_leaks.py");
+    let dir = write_split("fork");
     let items = RegexCollector::new().collect(&dir).expect("collection");
 
     let results = ForkWorker::launch(&python, &shim(), &dir)

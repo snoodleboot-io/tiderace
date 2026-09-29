@@ -79,10 +79,19 @@ def _work_somewhere_else():
 def test_a_wanders_off():
     _work_somewhere_else()
     assert os.getcwd() != ROOT
+"#;
+
+/// The next module on the same worker: the working directory is put back when the worker leaves
+/// the module that moved it (TID-81), not after every test — inside a file, pytest would not put it
+/// back either.
+const NEXT_MODULE: &str = r#"
+import os
+
+ROOT = os.getcwd()
 
 
 def test_b_expects_its_footing():
-    assert os.getcwd() == ROOT, f"a neighbour left this worker in {os.getcwd()}"
+    assert os.getcwd() == ROOT, f"the previous module left this worker in {os.getcwd()}"
 "#;
 
 #[test]
@@ -92,7 +101,8 @@ fn a_test_that_chdirs_does_not_move_its_neighbours() {
         return;
     };
     let dir = scratch("chdir");
-    std::fs::write(dir.join("test_chdir.py"), CORPUS).unwrap();
+    std::fs::write(dir.join("test_a_chdir.py"), CORPUS).unwrap();
+    std::fs::write(dir.join("test_b_footing.py"), NEXT_MODULE).unwrap();
     let items = RegexCollector::new().collect(&dir).expect("collection");
     assert_eq!(items.len(), 2);
 
@@ -107,7 +117,7 @@ fn a_test_that_chdirs_does_not_move_its_neighbours() {
         assert_eq!(
             r.outcome,
             Outcome::Passed,
-            "TID-45: {} — the working directory must be restored between in-process tests — {}",
+            "TID-45: {} — the working directory must be restored between modules — {}",
             r.node_id.as_str(),
             r.detail
         );

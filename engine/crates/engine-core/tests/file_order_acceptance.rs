@@ -18,10 +18,8 @@ use std::path::PathBuf;
 /// Every test appends to a list a module-scoped fixture holds; the last one asserts the file ran
 /// top to bottom in one process. Named so that alphabetical order is not file order.
 ///
-/// A fixture rather than a module global on purpose: on the in-process tier a test module's own
-/// globals are put back after each test — that restore is what stands in for a fork — while what a
-/// test leaves in a fixture, a library or a mock's backend carries to the next test, as it does
-/// under pytest. The moto suites this came from keep their state in the mock, not in the module.
+/// The moto suites this came from keep their state in the mock; `MODULE_GLOBAL` below is the
+/// other shape, a counter in the module itself, which TID-81 made carry too.
 const CORPUS: &str = "\
 import pytest
 
@@ -40,6 +38,32 @@ def test_zz_third(order):
 
 def test_last_checks(order):
     assert order == [1, 2, 3], f\"not file order in one process: {order}\"
+";
+
+/// The same file with its state in a module global: since TID-81 nothing is put back between a
+/// file's tests, so this accumulates as it does under pytest. The module after it, on the same
+/// worker, must not see what the first one changed in the environment.
+const MODULE_GLOBAL: &str = "\
+import os
+
+ORDER = []
+
+def test_second_in_file():
+    ORDER.append(1)
+    os.environ[\"T81_LEAK\"] = \"set in the first module\"
+
+def test_first_alphabetically():
+    ORDER.append(2)
+
+def test_last_checks():
+    assert ORDER == [1, 2], f\"a file's own globals must carry between its tests: {ORDER}\"
+";
+
+const NEXT_MODULE: &str = "\
+import os
+
+def test_starts_clean():
+    assert \"T81_LEAK\" not in os.environ, \"the previous module's change reached this one\"
 ";
 
 fn write_corpus(tag: &str) -> PathBuf {
@@ -141,5 +165,41 @@ mod live {
         let workers: std::collections::HashSet<_> =
             results.iter().filter_map(|r| r.worker).collect();
         assert_eq!(workers.len(), 1, "one module, one worker: {workers:?}");
+    }
+
+    /// TID-81: a module-level list accumulates across the file's tests, and the module that runs
+    /// next on the same worker starts from what the worker found before the first.
+    #[test]
+    fn a_files_own_globals_carry_between_its_tests_and_not_into_the_next_module() {
+        let Some(python) = any_python() else {
+            skip_live("no Python interpreter available");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("tiderace_t81_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("test_a_counter.py"), super::MODULE_GLOBAL).unwrap();
+        std::fs::write(dir.join("test_b_next.py"), super::NEXT_MODULE).unwrap();
+        let items = RegexCollector::new().collect(&dir).expect("collection");
+        assert_eq!(items.len(), 4);
+        let plan = RunPlan {
+            workers: 1,
+            strategy: WorkerStrategy::Subprocess,
+            scheduler: SchedulerKind::Locality,
+            shared_import: false,
+            ..RunPlan::default()
+        };
+        let results = run_parallel(&python, &shim(), &dir, items, &plan).expect("the corpus runs");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(results.len(), 4);
+        for r in &results {
+            assert_eq!(
+                r.outcome,
+                Outcome::Passed,
+                "TID-81: {} — {}",
+                r.node_id,
+                r.detail
+            );
+        }
     }
 }
