@@ -28,6 +28,7 @@ import asyncio
 import copy
 import difflib
 import enum
+import functools
 import importlib
 import importlib.util
 import inspect
@@ -3219,6 +3220,11 @@ class Engine:
         if style in ("inherited_methods", "unresolved_class"):
             return self._run_inherited(node_id, deadline_ms, force_no_fork, trusted_pure,
                                        own_too=style == "unresolved_class")
+        # A `@pytest.fixture` whose name starts with `test` (anyio's `TestAsyncFile.testdata`) is
+        # what the regex collector cannot tell from a test; pytest never collects it. Reported as
+        # an empty expansion, like a deselected node: absent from the tally (TID-88).
+        if self._is_fixture_node(node_id, style):
+            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
         # Deselected by the project's own `-m` filter (TID-32). Reported as an EMPTY expansion
         # rather than a skip: pytest deselects these, so they must not appear in the tally at all —
         # a skip would be a different, visible outcome.
@@ -3272,11 +3278,13 @@ class Engine:
         # (TID-20). Both short-circuit BEFORE any fixture setup — a test skipped for a missing
         # backend must not pay to build one.
         skip_reason = _skip_decision(marks) or _MARKER_SKIPS.get(node_id)
-        # Deferred while `-k` is still undecided (TID-63): pytest deselects at collection, before it
-        # reads a skip mark, so a skip-marked test `-k` does not select is absent from the tally
-        # rather than a skip in it. Decided per case below, once the case ids exist.
-        if skip_reason is not None and keyword_verdict is True:
-            return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason}
+        # Applied once the case ids exist, below: pytest collects a skip-marked parametrized test
+        # as one variant per case and skips each, so `test_lchmod[asyncio]`, `[trio]`, … are what
+        # the tally holds — not one un-expanded `test_lchmod` (TID-88). Nothing is set up on the
+        # way there: the ids come from the marks and the registry, never from a fixture. And while
+        # `-k` is still undecided (TID-63) the skip waits for the same ids: pytest deselects at
+        # collection, before it reads a skip mark, so a skip-marked test `-k` does not select is
+        # absent from the tally rather than a skip in it.
 
         # Split requested params: fixtures (resolved by the graph) vs. bare params filled positionally
         # by @tiderace.cases. Without this, a parametrized test's params look like missing fixtures.
@@ -3288,7 +3296,14 @@ class Engine:
         # to have discovered the other module's fixture, so the same test passes on a narrow root and
         # errors on the whole package.
         parametrized = {name for case, *_ in raw_cases if isinstance(case, dict) for name in case}
-        indirect = self._indirect(node_id, style)
+        indirect = set(self._indirect(node_id, style))
+        # A parametrized name that is not one of the function's parameters but names a fixture —
+        # anyio's `@pytest.mark.parametrize("anyio_backend", ["asyncio"])` on a test that takes no
+        # argument — sets that fixture's `request.param`: pytest routes it as an indirect
+        # parametrize when the fixture is in the closure, and errors otherwise. Inferred here so
+        # the closure is built with it, confirmed against the closure below (TID-88).
+        inferred = {n for n in parametrized if n not in requested and self.reg.is_provider(n)}
+        indirect |= inferred
         parametrized -= indirect  # indirect values go to the fixture, not the test
         fixture_requested = {
             p: t for p, t in requested.items()
@@ -3359,6 +3374,11 @@ class Engine:
             uses = list(uses) + ["anyio_backend"]
         closure = _closure(self.reg, module_key, fixture_requested, uses,
                            self._test_classes(node_id, style))
+        if inferred:
+            # Not in the closure after all: pytest reports "function uses no argument"; here the
+            # value reaches the test as a keyword it never declared, which fails the same way.
+            present = {d.name for d in closure}
+            indirect -= {n for n in inferred if n not in present}
         # A fixture the test parametrizes *indirectly* takes the case's value as `request.param`;
         # its own `params` do not fan out as well — pytest yields `test[asyncio]` for an
         # `indirect=True` parametrize of `anyio_backend`, not one case per backend times one (TID-86).
@@ -3420,8 +3440,13 @@ class Engine:
                         if _keyword_verdict(vid, names, final=True)}
             if not selected:
                 return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
-            if skip_reason is not None:  # the skip deferred above: `-k` selected it, so it is one
+        if skip_reason is not None:  # the skip deferred above, one per selected variant (TID-88)
+            if not parametrized_node:
                 return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason}
+            return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason,
+                    "variants": [{"node_id": vid, "outcome": "skipped", "detail": skip_reason,
+                                  "duration_ms": 0}
+                                 for i, vid in enumerate(variant_ids) if i in selected]}
         variant_index = 0
         per_combo = len(case_kwargs_list)
         for combo, combo_ids in zip(combos, combo_id_maps):
@@ -4066,6 +4091,21 @@ class Engine:
         finally:
             for handle in reversed(handles):
                 await _teardown_async(handle)
+
+    def _is_fixture_node(self, node_id: str, style: str) -> bool:
+        """Whether the object a node names is a fixture rather than a test (TID-88)."""
+        if style == "unittest_method":
+            return False
+        try:
+            module = importlib.import_module(_module_name(_module_key(node_id)))
+            if style == "class_method":
+                cls, method = _class_method(node_id)
+                obj = getattr(getattr(module, cls), method)
+            else:
+                obj = getattr(module, node_id.partition("::")[2])
+        except (Exception, *_skip_exceptions()):  # noqa: BLE001 — a module that skips itself at
+            return False  # import raises a BaseException here; the run below reports it (TID-48)
+        return _is_fixture(obj)
 
     def _requested(self, node_id: str, style: str) -> dict:
         """The resources a test requests, as `param_name -> provider_name` bindings. Native params
@@ -5100,20 +5140,35 @@ def _disambiguate(parts: list) -> list:
 
     Two cases whose values print alike produce the same text, and an id that collides cannot select.
     pytest turns `as_tool, as_tool` into `as_tool0, as_tool1`; suffixing only the second (leaving the
-    first bare) is the obvious alternative and does not match, so a copied id would miss."""
+    first bare) is the obvious alternative and does not match, so a copied id would miss. An id that
+    ends in a digit takes a `_` before the index under pytest 8 and later — `1_0`, `1_1` rather than
+    `10`, `11` — and does not under 7 (TID-88); the suite's own pytest decides."""
     seen: dict[str, int] = {}
     counts: dict[str, int] = {}
     for text in parts:
         counts[text] = counts.get(text, 0) + 1
     out = []
+    underscore = _pytest_major() >= 8
     for text in parts:
         if counts[text] == 1:
             out.append(text)
             continue
         n = seen.get(text, 0)
         seen[text] = n + 1
-        out.append(f"{text}{n}")
+        sep = "_" if underscore and text and text[-1].isdigit() else ""
+        out.append(f"{text}{sep}{n}")
     return out
+
+
+@functools.lru_cache(maxsize=1)
+def _pytest_major() -> int:
+    """The major version of the pytest the suite's interpreter has, or the current one's behaviour
+    (a large number) when there is none to ask."""
+    try:
+        import pytest
+        return int(str(pytest.__version__).split(".")[0])
+    except Exception:  # noqa: BLE001 — no pytest, or an unparsable version
+        return 99
 
 
 def _aggregate(outcomes: list[tuple[str, str]]) -> tuple[str, str]:
