@@ -270,6 +270,8 @@ impl WellspringPool {
     /// The workers are then handed out by [`take_worker`](Self::take_worker) as usual.
     pub fn spawn_workers(&mut self, size: usize) -> Result<()> {
         let size = size.max(1);
+        let timing = std::env::var_os("TIDERACE_TIMING").is_some();
+        let t0 = Instant::now();
         let socket_path = Self::socket_path();
         let _ = std::fs::remove_file(&socket_path);
         let listener = UnixListener::bind(&socket_path)
@@ -300,6 +302,12 @@ impl WellspringPool {
         }
         let _ = std::fs::remove_file(&self.socket_path);
         self.socket_path = socket_path;
+        if timing {
+            eprintln!(
+                "tiderace: timing: spawn_workers: parent forked {size} in {}ms",
+                t0.elapsed().as_millis()
+            );
+        }
         let started = Instant::now();
         let mut first_connected: Option<Instant> = Some(started); // the image is already imported
         for i in 0..size {
@@ -310,6 +318,12 @@ impl WellspringPool {
             let mut transport = PipeTransport::new(stream, BufReader::new(read_half));
             transport.ready()?;
             self.workers.push(transport);
+        }
+        if timing {
+            eprintln!(
+                "tiderace: timing: spawn_workers: {size} workers connected and ready in {}ms",
+                started.elapsed().as_millis()
+            );
         }
         Ok(())
     }

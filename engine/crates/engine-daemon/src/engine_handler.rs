@@ -227,7 +227,9 @@ impl EngineHandler {
         durations: &HashMap<String, u64>,
         full_run: bool,
     ) -> Result<Vec<TestResult>, String> {
+        let mut phase = PhaseTimer::start("run_items");
         let all = self.collect()?;
+        phase.mark("collect items");
         let items: Vec<TestItem> = if requested.is_empty() {
             all
         } else {
@@ -246,6 +248,7 @@ impl EngineHandler {
             } else {
                 None
             };
+            phase.mark("warm pool");
             // This run's selection (TID-90): a warm image's workers apply it after the fork; a
             // one-shot pool reads it the way `tiderace run` hands it over, from the environment,
             // set for this run alone so the next request (or a later image launch) sees none of it.
@@ -272,6 +275,7 @@ impl EngineHandler {
             );
             self.warm = pool; // back for the next run, whatever this one's outcome
             drop(env_guard);
+            phase.mark("run_parallel");
             out
         }
         #[cfg(not(unix))]
@@ -302,12 +306,15 @@ impl EngineHandler {
 
     /// The same run, as the engine's own `TestResult`s — what a report is built from (TID-84).
     pub fn run_full_results(&mut self) -> Result<Vec<TestResult>, String> {
+        let mut phase = PhaseTimer::start("run_full");
         let state_path = self.root.join(STATE_FILE);
         let mut state = PersistedState::load(&state_path);
+        phase.mark("load state");
 
         // Trusted = recorded pure AND none of its recorded deps changed since it was last verified.
         let current = self.hash_known_files(&state);
         let changed = changed_files(&state, &current);
+        phase.mark("hash known files");
         let trusted: HashSet<String> = state
             .tests
             .iter()
@@ -326,6 +333,7 @@ impl EngineHandler {
             .map(|(node, _)| node.clone())
             .collect();
         let durations = recorded_durations(&state);
+        phase.mark("trusted / must-fork / durations");
 
         // ADR-E015 / TID-11: with the sub-interpreter tier on (`TIDERACE_SUBINTERP=1`), route the
         // sub-interp-**safe** modules through a parallel sub-interpreter pool (no fork; sound because
@@ -338,6 +346,7 @@ impl EngineHandler {
             .iter()
             .map(|i| i.node_id.to_string())
             .collect();
+        phase.mark("collect candidates");
         let fresh = if subinterp_enabled() {
             let items = self.collect()?;
             let modules: Vec<String> = {
@@ -376,11 +385,12 @@ impl EngineHandler {
         } else {
             self.run_items_parallel(&[], &trusted, &must_fork, &durations, true)?
         };
-
+        phase.mark("run");
         self.persist_results(&mut state, &all_candidates, &fresh);
         state
             .save(&state_path)
             .map_err(|e| format!("state save failed: {e}"))?;
+        phase.mark("persist");
         Ok(fresh)
     }
 
@@ -846,6 +856,41 @@ impl RpcHandler for EngineHandler {
             },
             RpcRequest::Shutdown => RpcResponse::ShuttingDown,
         }
+    }
+}
+
+/// Where a daemon-served run's time goes, phase by phase, on stderr when `TIDERACE_TIMING=1` —
+/// the daemon's counterpart of the shim's start-up timer (TID-91). Silent otherwise.
+struct PhaseTimer {
+    on: bool,
+    name: &'static str,
+    started: std::time::Instant,
+    last: std::time::Instant,
+}
+
+impl PhaseTimer {
+    fn start(name: &'static str) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            on: std::env::var_os("TIDERACE_TIMING").is_some(),
+            name,
+            started: now,
+            last: now,
+        }
+    }
+
+    fn mark(&mut self, label: &str) {
+        if !self.on {
+            return;
+        }
+        let now = std::time::Instant::now();
+        eprintln!(
+            "tiderace-daemon: timing: {}: {label} {}ms (at {}ms)",
+            self.name,
+            now.duration_since(self.last).as_millis(),
+            now.duration_since(self.started).as_millis()
+        );
+        self.last = now;
     }
 }
 
