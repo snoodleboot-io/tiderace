@@ -536,8 +536,34 @@ class _FinalizingHandle:
 # declared option always reads as its default — which is exactly what an opt-in guard like
 # `if not request.config.getoption("--real"): pytest.skip(...)` needs to resolve correctly.
 _CLI_OPTIONS: dict[str, object] = {}
+# `parser.addini(name, help, type, default)` declarations, as `name -> (type, default)` (TID-87). A
+# value the project's config sets wins over the declared default; `getini` of a name nobody
+# declared is `None`, as before.
+_INI_DECLARED: dict[str, tuple] = {}
+_CONFIG_DIR: str = ""  # where the project's config was read from, for `getini`
 
 _NOTSET = object()
+
+
+def _ini_value(name: str):
+    """`config.getini(name)`: the project's configured value if set, else the declared default,
+    else `None`. Typed the way pytest types it — `bool` parses, list types split."""
+    declared = _INI_DECLARED.get(name)
+    ini_type = declared[0] if declared else None
+    values = _config_values(_CONFIG_DIR, name) if _CONFIG_DIR else []
+    if values:
+        if ini_type == "bool":
+            text = str(values[0]).strip().lower()
+            return text in ("1", "true", "yes", "on")
+        if ini_type in ("linelist", "args", "paths", "pathlist"):
+            return [str(v) for v in values]
+        return values[0] if len(values) == 1 else values
+    if declared is None:
+        return None
+    default = declared[1]
+    if default is not _NOTSET:
+        return default
+    return {"bool": False, "linelist": [], "args": [], "paths": [], "pathlist": []}.get(ini_type, "")
 
 
 class _OptionRecorder:
@@ -564,11 +590,13 @@ class _OptionRecorder:
             default = {"store_true": False, "store_false": True, "count": 0, "append": []}.get(action)
         self._options[dest] = default
 
+    _addoption = addoption  # the private spelling plugins use on a group (xdist)
+
     def getgroup(self, *_a, **_kw):
         return self  # groups expose the same `addoption`, so the recorder can be its own group
 
-    def addini(self, *_a, **_kw) -> None:
-        pass  # ini declarations carry no option value; nothing to record
+    def addini(self, name, help=None, type=None, default=_NOTSET, **_kw) -> None:  # noqa: A002
+        _INI_DECLARED[name] = (type, default)  # read back through `config.getini` (TID-87)
 
 
 def _collect_addoption(module) -> None:
@@ -603,7 +631,7 @@ class _Config:
         return value
 
     def getini(self, name: str):
-        return None  # ini values are not modelled yet; `None` reads as "unset" at every call site
+        return _ini_value(name)
 
 
 # Node ids a collection hook (or a direct `@pytest.mark.skip`) decided to skip, as `node_id -> reason`
@@ -939,12 +967,15 @@ def _native_fixture_def(obj, location: str, type_index: dict) -> FixtureDef:
     )
 
 
-def _fixture_def(obj, location: str, owner=None) -> FixtureDef:
+def _fixture_def(obj, location: str, owner=None, attr_name: str | None = None) -> FixtureDef:
     # Both accessors handle pytest before and after 8.4 (TID-44); see `_fixture_marker`.
     marker = _fixture_marker(obj)
     func = _fixture_function(obj)
+    # pytest names a fixture by `name=` when given, else by the **attribute** it is bound to in its
+    # module or class — not by the function's `__name__`. `mocker = pytest.fixture()(_mocker)` and
+    # its four scope-siblings are five fixtures wrapping one function (TID-87).
     return FixtureDef(
-        name=_safe_getattr(obj, "name", None) or getattr(marker, "name", None) or func.__name__,
+        name=getattr(marker, "name", None) or attr_name or func.__name__,
         scope=getattr(marker, "scope", "function"),
         params=getattr(marker, "params", None),
         autouse=getattr(marker, "autouse", False),
@@ -1407,8 +1438,9 @@ def _discover(root: str) -> Registry:
     # The project's own config, read before the walk: `--ignore` has to prune it, and the `-m` filter
     # below is read from the same place.
     addopts, config_dir = _read_addopts_at(root)
-    global _IGNORED
+    global _IGNORED, _CONFIG_DIR
     _IGNORED = _ignores_from(addopts, config_dir)
+    _CONFIG_DIR = config_dir
     native: list[tuple] = []  # (provider obj, location) — resolved in a second pass (see below)
     conftests: list = []  # every conftest module, for the collection hooks (TID-20)
     _CONFTEST_SCOPES.clear()  # rebuilt with them: which directory each one governs (TID-85)
@@ -1418,11 +1450,11 @@ def _discover(root: str) -> Registry:
     for module, location in _load_ancestor_conftests(root):
         conftests.append(module)
         _CONFTEST_SCOPES.append((location, module))
-        for obj in vars(module).values():
+        for attr, obj in list(vars(module).items()):
             if _is_native_provider(obj):
                 native.append((obj, location))
             elif _is_fixture(obj):
-                reg.add(_fixture_def(obj, location))
+                reg.add(_fixture_def(obj, location, attr_name=attr))
     for current, dirs, files in _walk_suite(root):
         rel_dir = os.path.relpath(current, root)
         rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
@@ -1469,11 +1501,11 @@ def _discover(root: str) -> Registry:
                 continue
             if module is None:
                 continue
-            for obj in vars(module).values():
+            for attr, obj in list(vars(module).items()):
                 if _is_native_provider(obj):  # native-first (ADR-E012); pytest is compat fallback
                     native.append((obj, location))
                 elif _is_fixture(obj):
-                    reg.add(_fixture_def(obj, location))
+                    reg.add(_fixture_def(obj, location, attr_name=attr))
                 elif isinstance(obj, type):
                     # Fixtures defined inside a test class. pytest scopes these to the class, where
                     # they commonly *override* a conftest fixture of the same name for that class
@@ -1520,7 +1552,108 @@ def _discover(root: str) -> Registry:
     for obj, location in native:
         reg.add(_native_fixture_def(obj, location, type_index))
     _register_builtins(reg)
+    # Last, so everything above — a conftest at any depth, the builtins, the native anyio_backend —
+    # takes precedence over a plugin's fixture of the same name, as in pytest (TID-87).
+    _register_plugin_fixtures(reg, addopts, config_dir, conftests)
     return reg
+
+
+# --------------------------------------------------------------------------- plugin fixtures
+# pytest's own plugins are what the shim replaces; their fixtures come from `tiderace.builtins`.
+_PYTEST_OWN_PLUGINS = ("pytester", "_pytest", "pytest")
+
+
+def _plugin_modules(addopts: str, config_dir: str, conftests: list) -> list:
+    """`(plugin name, module name)` for every pytest plugin the project would load (TID-87):
+    the `pytest11` entry points of the installed distributions, `-p NAME` in `addopts`, and each
+    conftest's `pytest_plugins` — minus `-p no:NAME`, minus pytest's own, and subject to
+    `TIDERACE_PLUGINS` (`none`, or a comma-separated allow-list) or `[tool.tiderace] plugins`.
+    `PYTEST_DISABLE_PLUGIN_AUTOLOAD` turns the entry points off, as it does for pytest; the
+    explicit spellings still load."""
+    allow = os.environ.get("TIDERACE_PLUGINS")
+    if allow is None and config_dir:
+        configured = _config_setting(config_dir, "plugins")
+        if isinstance(configured, (list, tuple)):
+            allow = ",".join(str(v) for v in configured) or "none"  # `plugins = []`: none at all
+        elif isinstance(configured, str):
+            allow = configured
+    if allow is not None and allow.strip().lower() in ("none", ""):
+        return []
+    allowed = {n.strip() for n in allow.split(",") if n.strip()} if allow is not None else None
+    explicit: list = []
+    disabled: set = set()
+    try:
+        import shlex
+        argv = shlex.split(addopts or "")
+    except ValueError:
+        argv = []
+    for i, arg in enumerate(argv):
+        value = None
+        if arg == "-p" and i + 1 < len(argv):
+            value = argv[i + 1]
+        elif arg.startswith("-p") and len(arg) > 2:
+            value = arg[2:].lstrip("=")
+        if value is None:
+            continue
+        if value.startswith("no:"):
+            disabled.add(value[3:])
+        else:
+            explicit.append(value)
+    found: list = []
+    seen: set = set()
+
+    def take(name: str, module: str) -> None:
+        if name in disabled or module in disabled or module in seen:
+            return
+        if any(module == own or module.startswith(own + ".") for own in _PYTEST_OWN_PLUGINS):
+            return
+        if allowed is not None and name not in allowed and module not in allowed:
+            return
+        seen.add(module)
+        found.append((name, module))
+
+    if not os.environ.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD"):
+        try:
+            from importlib.metadata import entry_points
+            eps = list(entry_points(group="pytest11"))
+        except Exception:  # noqa: BLE001 — no metadata machinery: no entry points
+            eps = []
+        for ep in sorted(eps, key=lambda e: e.name):
+            take(ep.name, ep.value.split(":", 1)[0].strip())
+    for value in explicit:
+        take(value, value)
+    for module in conftests:
+        declared = _safe_getattr(module, "pytest_plugins", None)
+        if isinstance(declared, str):
+            declared = [declared]
+        for value in declared or ():
+            if isinstance(value, str):
+                take(value, value)
+    return found
+
+
+def _register_plugin_fixtures(reg: Registry, addopts: str, config_dir: str, conftests: list) -> None:
+    """Import each plugin module and register the fixtures it defines at the root location, after
+    everything else (TID-87): a suite's own fixture of the same name — a conftest at any depth, a
+    test module's — already outranks it, and a name the shim itself provides (a builtin, the native
+    `anyio_backend`) is left alone. Only fixtures are taken; the plugin's hooks are never called,
+    except `pytest_addoption`, which is recorded exactly as a conftest's is (TID-14) so its
+    options and ini defaults read back through `config`."""
+    for name, module_name in _plugin_modules(addopts, config_dir, conftests):
+        try:
+            module = importlib.import_module(module_name)
+        except (Exception, *_skip_exceptions()) as exc:  # noqa: BLE001 — one plugin, not the run
+            print(f"tiderace: pytest plugin {name!r} ({module_name}) not loaded: {exc!r}",
+                  file=sys.stderr, flush=True)
+            continue
+        _collect_addoption(module)
+        for attr, obj in list(vars(module).items()):
+            if not _is_fixture(obj):
+                continue
+            fdef = _fixture_def(obj, "", attr_name=attr)
+            if any(d.location == "" for d in reg.by_name.get(fdef.name, ())):
+                continue  # the shim's own, or a root conftest's: theirs wins
+            reg.add(fdef)
 
 
 def _register_class_fixtures(reg: Registry, cls: type, module_key: str) -> None:
@@ -1536,7 +1669,7 @@ def _register_class_fixtures(reg: Registry, cls: type, module_key: str) -> None:
         for attr, obj in list(vars(base).items()):
             if not _is_fixture(obj):
                 continue
-            fdef = _fixture_def(obj, f"{module_key}::{cls.__name__}", owner=cls)
+            fdef = _fixture_def(obj, f"{module_key}::{cls.__name__}", owner=cls, attr_name=attr)
             # A subclass that redefines the name has already registered its own def for this class;
             # the base's copy would be an identical location and must not shadow it.
             if any(d.location == fdef.location for d in reg.by_name.get(fdef.name, ())):
@@ -1710,11 +1843,16 @@ def _closure(reg: Registry, module_key: str, requested: dict, extra: list | None
             seen.add(key)
             ordered.append(d)
 
+    # pytest's closure order, which is also the order its parametrised-fixture axes take in a node
+    # id: the autouse fixtures, then `usefixtures` (and what a marker implies — anyio's backend),
+    # then the signature's arguments. anyio's `TestConnectedUDPSocket.test_iterate(family)` is
+    # `[asyncio-ipv4]` under pytest, the backend the plugin's `usefixtures` injects before the
+    # `family` the test asks for (TID-87).
     for d in reg.autouse_for(module_key, classes):
         visit(d.name)
-    for provider_name in requested.values():
-        visit(provider_name)
     for provider_name in extra or ():
+        visit(provider_name)
+    for provider_name in requested.values():
         visit(provider_name)
     return ordered
 
@@ -4389,10 +4527,36 @@ def _registered_marks(addopts: str, config_dir: str) -> tuple:
     return frozenset(names), strict
 
 
+def _config_setting(config_dir: str, key: str):
+    """`key` as the project's config spells it — the raw value of the first section that sets it —
+    or `_NOTSET`. What `_config_values` flattens; this is for a setting whose *emptiness* means
+    something (`plugins = []`)."""
+    for section in _config_sections(config_dir):
+        value = section.get(key)
+        if value is not None:
+            return value
+    return _NOTSET
+
+
 def _config_values(config_dir: str, key: str) -> list:
     """`key` from `[tool.pytest.ini_options]` and `[tool.tiderace]` in the project's pyproject.toml,
     plus the ini-style configs, as a flat list."""
     out: list = []
+    for section in _config_sections(config_dir):
+        value = section.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            out.extend(v for v in value.splitlines() if v.strip())
+        elif isinstance(value, (list, tuple)):
+            out.extend(value)
+        else:
+            out.append(value)
+    return out
+
+
+def _config_sections(config_dir: str):
+    """Every config section a setting may live in, in the order pytest reads the files."""
     for name in ("pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"):
         path = os.path.join(config_dir, name)
         if not os.path.exists(path):
@@ -4411,17 +4575,7 @@ def _config_values(config_dir: str, key: str) -> list:
                 sections = [dict(parser[header]) if parser.has_section(header) else {}]
         except Exception:  # noqa: BLE001 — an unreadable config must not stop the run
             continue
-        for section in sections:
-            value = section.get(key)
-            if value is None:
-                continue
-            if isinstance(value, str):
-                out.extend(v for v in value.splitlines() if v.strip())
-            elif isinstance(value, (list, tuple)):
-                out.extend(value)
-            else:
-                out.append(value)
-    return out
+        yield from sections
 
 
 def _skip_decision(marks: list):
@@ -5382,6 +5536,11 @@ def serve() -> int:
 
 
 if __name__ == "__main__":
+    # `tiderace.builtins` reaches back into the running shim with `import shim` — for the options
+    # and ini defaults discovery recorded, and the run root. Run as a script this module is
+    # `__main__`, and a bare `import shim` would execute the file a second time as an empty twin
+    # (its own script directory is `sys.path[0]`), so every `pytestconfig` read came back unset.
+    sys.modules.setdefault("shim", sys.modules[__name__])
     if "--probe" in sys.argv[2:]:
         sys.exit(probe())
     if "--subinterp" in sys.argv[2:]:

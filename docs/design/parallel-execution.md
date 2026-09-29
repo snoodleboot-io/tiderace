@@ -68,8 +68,10 @@ unit start/end, and `benchmarks/harness/timeline.py` draws them, so a slow run c
 it is — a schedule, a start-up, or a test — rather than guessed at (TID-78).
 
 **Being a plugin host.** Parametrisation a pytest plugin injects — anyio's backends — is expanded so
-the node ids match, but a suite whose purpose is to test a pytest plugin through `pytester` is
-testing pytest, and running it means becoming pytest. See
+the node ids match, and the **fixtures** a plugin defines (`mocker`, `anyio_backend_name`) are
+registered at the lowest precedence, as ordinary fixture functions in an importable module, which
+is all they are (TID-87). The plugin's hooks never run. A suite whose purpose is to test a pytest
+plugin through `pytester` is testing pytest, and running it means becoming pytest. See
 [12-plugin-host](../../planning/current/pure-rust-test-engine/design/12-plugin-host.md) for the
 boundary.
 

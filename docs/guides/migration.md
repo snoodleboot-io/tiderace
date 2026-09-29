@@ -63,6 +63,10 @@ rather than guessed:
 5. **`@pytest.mark.usefixtures("x")`** — a string name carries no type; request it as a typed param, or
    mark the provider `autouse=True`.
 6. **pytest builtins** (`tmp_path`, `monkeypatch`, `capsys`, …) — provide your own resource.
+   A fixture a **plugin** provides — `mocker` from pytest-mock, `anyio_backend_name` from anyio —
+   keeps working under the compat path: the shim registers every installed plugin's fixtures at the
+   lowest precedence, exactly as a conftest's, without running the plugin's hooks. It is still a
+   pytest fixture, so migrating the test means replacing it too.
 7. **`pytest_*` hooks / `from pytest import …`** — port manually.
 8. **Order-dependent tests** — not flagged, because they are not visible in the source. A test that
    passes under pytest only because of what an earlier test imported or left behind fails under

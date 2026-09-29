@@ -59,8 +59,10 @@ CORPORA = [
 # `TIDERACE_BIN` lets a pass point at a binary built from a branch without touching the tree the
 # other pass is using — the A/B between two builds has to be able to run them side by side.
 TIDERACE = os.environ.get("TIDERACE_BIN", os.path.join(R, "engine", "target", "release", "tiderace"))
-SHIM = os.path.join(R, "engine", "py-shim", "shim.py")
-TR_PATH = os.path.join(R, "engine", "py-tiderace")
+# `TIDERACE_SHIM` / `TIDERACE_PY_TIDERACE` point a pass at a branch's shim and package the same way
+# `TIDERACE_BIN` points it at a branch's binary (read here, before `clean_env` strips them).
+SHIM = os.environ.get("TIDERACE_SHIM") or os.path.join(R, "engine", "py-shim", "shim.py")
+TR_PATH = os.environ.get("TIDERACE_PY_TIDERACE") or os.path.join(R, "engine", "py-tiderace")
 
 
 def by_name(name: str):
