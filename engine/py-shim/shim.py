@@ -1377,7 +1377,7 @@ def _load_ancestor_conftests(root: str) -> list:
 # walks must agree, or the shim reports fixtures for files collection never saw (and vice versa).
 _SKIP_DIRS = frozenset({
     "__pycache__", ".git", ".venv", "venv", ".tox", ".nox", "site-packages",
-    ".tiderace-spike-venv", ".tiderace-bench-venv", ".tiderace-fx-venv",
+    ".tiderace-spike-venv", ".tiderace-bench-venv", ".tiderace-fx-venv", ".tiderace-cache",
     ".pytest_cache", "node_modules", ".mypy_cache", ".ruff_cache",
 })
 
@@ -2522,6 +2522,12 @@ async def _invoke_async_body(node_id: str, style: str, args: dict) -> tuple[str,
 # the process, and inherited by every forked child.
 _IMPORT_CLOSURE: dict[str, frozenset] = {}
 _FILE_DEPS: dict[str, tuple[str, ...]] = {}  # per source file: the in-tree files it imports (TID-76)
+# The same, carried across runs (TID-82): `path -> [mtime_ns, size, sys.path hash, deps]`, loaded by
+# the pool parent before it forks and extended by every worker at teardown. An entry is used only
+# when the file is unchanged and the import roots are the ones it was resolved under.
+_FILE_DEPS_CACHE: dict[str, list] = {}
+_FILE_DEPS_NEW: dict[str, list] = {}  # what this process computed, to be written at teardown
+_FILE_DEPS_STATS = {"hits": 0, "parsed": 0}
 _RESOLVED: dict[tuple, str | None] = {}  # (dotted, level, importing dir) → file, memoised (TID-76)
 # An import statement starts a line, or follows `;` or a compound statement's `:` on one. `yield from`
 # and `from_x = ...` do not match. What this finds is parsed as a statement, so names are exact.
@@ -2657,13 +2663,116 @@ def _file_deps(path: str, root: str) -> tuple[str, ...]:
     `sys.path` are fixed for the life of a process, so the key is the file alone."""
     cached = _FILE_DEPS.get(path)
     if cached is None:
-        deps: dict[str, None] = {}
-        for dotted, level in _imported_names(path):
-            resolved = _resolve_module_file(dotted, level, path, root)
-            if resolved:
-                deps[resolved] = None
-        cached = _FILE_DEPS[path] = tuple(deps)
+        cached = _file_deps_from_cache(path)
+        if cached is None:
+            deps: dict[str, None] = {}
+            for dotted, level in _imported_names(path):
+                resolved = _resolve_module_file(dotted, level, path, root)
+                if resolved:
+                    deps[resolved] = None
+            cached = tuple(deps)
+            _FILE_DEPS_STATS["parsed"] += 1
+            try:
+                st = os.stat(path)
+                _FILE_DEPS_NEW[path] = [st.st_mtime_ns, st.st_size, _sys_path_key(), list(cached)]
+            except OSError:
+                pass
+        _FILE_DEPS[path] = cached
     return cached
+
+
+def _sys_path_key() -> str:
+    """The import roots a resolution ran under, as one short token: a cached dependency list is only
+    right for the `sys.path` that produced it."""
+    import hashlib
+    return hashlib.sha1("\n".join(p for p in sys.path if p).encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _file_deps_from_cache(path: str):
+    entry = _FILE_DEPS_CACHE.get(path)
+    if entry is None:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    mtime_ns, size, key, deps = entry
+    if st.st_mtime_ns != mtime_ns or st.st_size != size or key != _sys_path_key():
+        return None
+    _FILE_DEPS_STATS["hits"] += 1
+    return tuple(deps)
+
+
+def _file_deps_cache_dir(root: str) -> str:
+    return os.path.join(os.path.abspath(root), ".tiderace-cache", "file-deps")
+
+
+def _load_file_deps_cache(root: str) -> None:
+    """Read the index and every worker file left by earlier runs, fold them into one index, and
+    drop the worker files. Called once per process that serves a run — in the pool that is the
+    parent, and the workers inherit the result through the fork (TID-82). Any file that does not
+    parse is ignored; a concurrent run can lose an entry, never hand us a corrupt one."""
+    d = _file_deps_cache_dir(root)
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    merged: dict[str, list] = {}
+    worker_files = []
+    for name in sorted(names):
+        if not name.endswith(".json"):
+            continue
+        full = os.path.join(d, name)
+        try:
+            with open(full, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if data.get("v") == 1 and isinstance(data.get("files"), dict):
+                merged.update(data["files"])
+        except (OSError, ValueError):
+            pass
+        if name != "index.json":
+            worker_files.append(full)
+    _FILE_DEPS_CACHE.update(merged)
+    if worker_files:
+        _write_file_deps_index(d, merged)
+        for full in worker_files:
+            try:
+                os.unlink(full)
+            except OSError:
+                pass
+
+
+def _write_file_deps_index(d: str, files: dict) -> None:
+    tmp = os.path.join(d, f".index-{os.getpid()}.tmp")
+    try:
+        os.makedirs(d, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"v": 1, "files": files}, fh)
+        os.replace(tmp, os.path.join(d, "index.json"))
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _save_file_deps_cache() -> None:
+    """What this process parsed, to its own file under the cache dir; the next run's parent folds it
+    in. Nothing to write is nothing written."""
+    if not _FILE_DEPS_NEW or not _ROOT:
+        return
+    d = _file_deps_cache_dir(_ROOT)
+    try:
+        os.makedirs(d, exist_ok=True)
+        tmp = os.path.join(d, f".w-{os.getpid()}.tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"v": 1, "files": _FILE_DEPS_NEW}, fh)
+        os.replace(tmp, os.path.join(d, f"w-{os.getpid()}.json"))
+    except OSError:
+        pass
+    if os.environ.get("TIDERACE_TIMING"):
+        print(f"tiderace: closure cache: {_FILE_DEPS_STATS['hits']} files from cache, "
+              f"{_FILE_DEPS_STATS['parsed']} parsed", file=sys.stderr, flush=True)
 
 
 def _import_closure(module_key: str, root: str) -> frozenset:
@@ -3889,6 +3998,7 @@ class Engine:
         return _parametrize_cases(func, *(o for o in (owner, module) if o is not None))
 
     def teardown_all(self) -> None:
+        _save_file_deps_cache()  # what this worker parsed, for the next run (TID-82)
         self._module_child_close()  # its module's tests are done: its fixtures, hooks and exit (TID-80)
         while self.active:
             _teardown(self.active.pop().gen)
@@ -4991,6 +5101,7 @@ def serve() -> int:
     purity = "--purity" in sys.argv[2:] or os.environ.get("TIDERACE_PURITY") == "1"
     restore = "--restore" in sys.argv[2:] or os.environ.get("TIDERACE_RESTORE") == "1"
     _insert_run_root(root)
+    _load_file_deps_cache(root)  # earlier runs' import closures, before anything computes one (TID-82)
     # Ancestor conftests before `_preimport` (TID-19): a root conftest exists to set things up that
     # must already be true when test modules import — env defaults, warning filters, `sys.path`. pytest
     # loads conftests first for the same reason. `_discover` reads the memoised result back.

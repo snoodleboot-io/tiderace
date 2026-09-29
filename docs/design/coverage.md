@@ -69,7 +69,11 @@ with it on, each test module's closure walked ~100 files, parsing and resolving 
 230ms per module — and the closures of different modules are almost the same files. 575 modules,
 once per worker, is the whole of the gap. The parse and resolution are now memoised per source file
 (`_file_deps`): all 537 pirn-core closures take 3.2s of CPU in total instead of ~124s, spread across
-the workers.
+the workers. The per-file result is also carried across runs (TID-82): each worker writes what it
+parsed under `.tiderace-cache/file-deps/`, the next run's pool parent folds those files into one
+index before it forks, and an entry is used only while the file's mtime and size are unchanged and
+`sys.path` is the one it was resolved under. On pirn-core the second run parses ~30 files per worker
+instead of ~300.
 
 ### `DISABLE` outlives the tool id
 

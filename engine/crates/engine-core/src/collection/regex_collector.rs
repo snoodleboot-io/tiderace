@@ -15,6 +15,7 @@ const SKIP_DIRS: &[&str] = &[
     "venv",
     ".tiderace-spike-venv",
     ".tiderace-bench-venv",
+    ".tiderace-cache",
     ".pytest_cache",
     "node_modules",
 ];
