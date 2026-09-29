@@ -286,17 +286,30 @@ def _module_name(module_key: str) -> str:
     directory directly renames the module and the errors vanish, which makes the
     bug look like a batch-size effect rather than a naming one.
     """
-    path = module_key[:-3] if module_key.endswith(".py") else module_key
     base = os.path.abspath(_ROOT) if _ROOT else os.getcwd()
+    directory, name = _module_name_walk(module_key, base)
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    return name
+
+
+@functools.lru_cache(maxsize=None)
+def _module_name_walk(module_key: str, base: str) -> tuple[str, str]:
+    """The walk behind `_module_name`, memoised: `(import directory, dotted name)`.
+
+    Every node asks for its module's name four or five times — the fixture check, the requested
+    params, the marks, the class chain — and each walk is a `stat` per directory level. On a
+    5,600-node suite that was 19,000 `stat`s and 61% of the cost of deselecting a node, which is
+    what a `-k` run does to every node it does not select (TID-91). The answer depends only on
+    which `__init__.py` files exist, which does not change within a run."""
+    path = module_key[:-3] if module_key.endswith(".py") else module_key
     absolute = os.path.join(base, path.replace("/", os.sep))
     directory, stem = os.path.split(absolute)
     parts = [stem]
     while os.path.exists(os.path.join(directory, "__init__.py")):
         directory, package = os.path.split(directory)
         parts.insert(0, package)
-    if directory not in sys.path:
-        sys.path.insert(0, directory)
-    return ".".join(parts)
+    return directory, ".".join(parts)
 
 
 def _class_method(node_id: str) -> tuple[str, str]:
@@ -1526,6 +1539,11 @@ def _discover(root: str) -> Registry:
     expr = os.environ.get("TIDERACE_MARKER_EXPR") or _marker_expr_from(addopts)
     _MARKER_EXPR = _compile_marker_expr(expr) if expr else None
     _DECLARED_MARKS, _STRICT_MARKS = _registered_marks(addopts, config_dir)
+    if _STRICT_MARKS:
+        # Ask pytest for the plugins' marks *now*, in the process every worker is forked from: the
+        # answer was fetched lazily by the first strict node each worker met, a 0.5s subprocess
+        # per worker per run — and the largest single cost of a `-k` run on pirn-core (TID-91).
+        _plugin_marks()
     # `-k EXPR`, same precedence (TID-63): the command line over the project's own `addopts`.
     global _KEYWORD_EXPR
     kexpr = os.environ.get("TIDERACE_KEYWORD_EXPR") or _marker_expr_from(addopts, "-k")
@@ -4500,6 +4518,7 @@ _BUILTIN_MARKS = frozenset({
     "skip", "skipif", "xfail", "parametrize", "usefixtures", "filterwarnings", "tryfirst", "trylast",
 })
 _PLUGIN_MARKS: frozenset | None = None  # markers the installed plugins register; None = not asked yet
+_PLUGIN_MARKS_ASKED = False  # `_plugin_marks` asks pytest once per process, whatever it answers
 
 
 def _plugin_marks() -> frozenset | None:
@@ -4517,9 +4536,10 @@ def _plugin_marks() -> frozenset | None:
 
     `None` means we could not get an answer, and the caller must then **not** enforce: a false error
     on a valid mark is worse than a missed typo, because it fails a suite that is correct."""
-    global _PLUGIN_MARKS
-    if _PLUGIN_MARKS is not None:
-        return _PLUGIN_MARKS
+    global _PLUGIN_MARKS, _PLUGIN_MARKS_ASKED
+    if _PLUGIN_MARKS_ASKED:
+        return _PLUGIN_MARKS  # asked once per process — a "could not find out" included (TID-91)
+    _PLUGIN_MARKS_ASKED = True
     import re
     import subprocess
     try:

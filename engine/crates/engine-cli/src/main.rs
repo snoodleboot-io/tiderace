@@ -555,6 +555,7 @@ fn cmd_run(
     report_path: Option<&Path>,
     daemon: Option<engine_core::exec::Selection>,
 ) -> ExitCode {
+    let t_start = std::time::Instant::now();
     let python = std::env::var("TIDERACE_PYTHON").unwrap_or_else(|_| engine_core::default_python());
     let shim = match std::env::var("TIDERACE_SHIM") {
         Ok(s) => PathBuf::from(s),
@@ -588,7 +589,15 @@ fn cmd_run(
     // A daemon serving this root runs it from its warm image (TID-84): the same results, reported
     // here the same way, and the daemon persists durations and verdicts itself. No daemon, or one
     // that refuses, and the run happens in this process as before.
+    let t_daemon = std::time::Instant::now();
     let via_daemon = daemon.and_then(|selection| daemon_run(root, selection));
+    if std::env::var_os("TIDERACE_TIMING").is_some() {
+        eprintln!(
+            "tiderace: timing: cli: collect+plan {}ms, daemon round trip {}ms",
+            t_daemon.duration_since(t_start).as_millis(),
+            t_daemon.elapsed().as_millis()
+        );
+    }
     let results = match via_daemon {
         Some(Ok(results)) => {
             eprintln!("tiderace: {}{learned} via daemon", effective.header());
