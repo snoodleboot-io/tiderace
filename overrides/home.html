@@ -195,9 +195,9 @@
         <a class="btn btn-ghost" href="https://github.com/snoodleboot-io/tiderace">View on GitHub</a>
       </div>
       <div class="hero-meta">
-        <span><b>~90&times;</b> warm, nothing changed</span>
-        <span><b>~5 ms</b> inner loop, 1 test changed</span>
-        <span><b>509</b> fixture tests · numpy / sqlite</span>
+        <span><b>0.16 s</b> warm, nothing changed &middot; 5,600 tests</span>
+        <span><b>0.6 s</b> one test by name, warm daemon</span>
+        <span><b>8 suites</b> identical outcomes on 7 &middot; 1.5&times; over xdist</span>
         <span><b>Windows</b> parallel, no fork()</span>
       </div>
       <p class="disclaimer">Ships as <span class="mono rust">tiderace</span> (one-shot) &amp; <span class="mono rust">tiderace-daemon</span> (warm server)</p>
@@ -213,13 +213,13 @@
       <div class="impact-grid">
         <div class="dish reveal">
           <div class="dish-head">
-            <span class="lbl">fx_corpus · 509 tests</span>
+            <span class="lbl">pirn-core · 5,602 tests</span>
             <button class="runbtn" id="reset" type="button">Reset &#8635;</button>
           </div>
-          <div class="dots" id="dots" role="img" aria-label="A grid of 509 tests. Selecting a file lights up only the tests affected by it."></div>
+          <div class="dots" id="dots" role="img" aria-label="A grid of tests, one dot per ten. Selecting a file lights up only the tests affected by it."></div>
           <div class="dish-foot">
             <span class="pill">ran <span class="n" id="ranN">0</span></span>
-            <span class="pill">skipped <span class="n" id="skipN">509</span></span>
+            <span class="pill">cached <span class="n" id="skipN">5,602</span></span>
             <span class="pill">wall <span class="n" id="wallN">&mdash;</span></span>
           </div>
         </div>
@@ -227,15 +227,15 @@
           <h3>Touch a file. See the ripple.</h3>
           <p class="muted mono" style="font-size:13px; letter-spacing:.05em; text-transform:uppercase">edit one of these</p>
           <div class="filerow" role="group" aria-label="Choose a changed file">
-            <button class="chip" data-file="linalg" aria-pressed="false">src/linalg.py</button>
-            <button class="chip" data-file="io" aria-pressed="false">src/db_io.py</button>
+            <button class="chip" data-file="leaf" aria-pressed="false">connectors/bdf_format.py</button>
+            <button class="chip" data-file="test" aria-pressed="false">tests/test_shape_guard.py</button>
             <button class="chip" data-file="README" aria-pressed="false">README.md</button>
-            <button class="chip" data-file="everything" aria-pressed="false">src/core.py</button>
+            <button class="chip" data-file="hub" aria-pressed="false">core/shape_guard.py</button>
           </div>
           <p class="readout" id="readout" aria-live="polite">Nothing changed. Nothing runs &mdash; the interpreter isn't even launched.</p>
           <div class="terminalmini" aria-hidden="true"><span class="m"># edited README.md</span>
 <span class="c">$ tiderace-daemon run tests/</span>
-<span class="g">0 ran, 509 cached, 509 total, 0 failing &middot; 9.4ms</span></div>
+<span class="g">0 ran, 5602 cached, 5602 total, 0 failing &middot; 0.16s</span></div>
         </div>
       </div>
     </div>
@@ -275,38 +275,38 @@
   <section id="bench" aria-labelledby="bench-h">
     <div class="wrap">
       <p class="eyebrow reveal">The numbers, measured &mdash; not vibes</p>
-      <h2 class="big reveal" id="bench-h">509 fixture tests. hyperfine. numpy &amp; sqlite.</h2>
-      <p class="lead reveal">The corpus is real (<span class="mono">fx_corpus</span>), the tool is <span class="mono">hyperfine</span>, the comparison is honest &mdash; including the run where tiderace only wins 1.4&times;.</p>
+      <h2 class="big reveal" id="bench-h">Eight real suites. Compared test by test first.</h2>
+      <p class="lead reveal">click, flask, cachetools, anyio and four packages of a 10,000-test monorepo, run by pytest and by tiderace in the same virtualenv. Outcomes identical on seven of the eight, node id for node id, before a single timing is taken. Then wall clock &mdash; against serial pytest and against <span class="mono">pytest -n auto</span>, medians of interleaved rounds. The 5,600-test suite below is the honest one: both runners parallel, five thousand real tests.</p>
       <div class="bench-grid">
         <div class="bench reveal">
-          <span class="tag">Cold · full run</span>
-          <div class="headline-n">1.4&times;</div>
-          <div class="desc">A clean full run &mdash; no cache to lean on. Still ahead, honestly modest.</div>
+          <span class="tag">Full run &middot; 5,036 tests</span>
+          <div class="headline-n">2.9&times;</div>
+          <div class="desc">The whole suite, every test executed. 1.5&times; the parallel baseline, <span class="mono">pytest -n auto</span>, at 40.4 s.</div>
           <div class="versus" aria-hidden="true">
-            <div class="vs-row pt"><span class="who">pytest</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="val">0.94 s</span></div>
-            <div class="vs-row tr"><span class="who">tiderace</span><span class="track"><span class="fill" style="width:70%"></span></span><span class="val">0.66 s</span></div>
+            <div class="vs-row pt"><span class="who">pytest</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="val">77.9 s</span></div>
+            <div class="vs-row tr"><span class="who">tiderace</span><span class="track"><span class="fill" style="width:34%"></span></span><span class="val">26.7 s</span></div>
           </div>
         </div>
         <div class="bench reveal">
-          <span class="tag">Warm · no change</span>
-          <div class="headline-n">~90&times;</div>
-          <div class="desc">Nothing changed since last run. Content-addressed outcomes make it nearly free.</div>
+          <span class="tag">Warm &middot; nothing changed</span>
+          <div class="headline-n">500&times;</div>
+          <div class="desc">Every result served from the recorded verdicts; the interpreter is never launched. pytest has no warm mode, so its number is the full run.</div>
           <div class="versus" aria-hidden="true">
-            <div class="vs-row pt"><span class="who">pytest</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="val">0.84 s</span></div>
-            <div class="vs-row tr"><span class="who">tiderace</span><span class="track"><span class="fill" style="width:1.5%"></span></span><span class="val">9.4 ms</span></div>
+            <div class="vs-row pt"><span class="who">pytest</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="val">80 s</span></div>
+            <div class="vs-row tr"><span class="who">tiderace</span><span class="track"><span class="fill" style="width:1%"></span></span><span class="val">0.16 s</span></div>
           </div>
         </div>
         <div class="bench reveal">
-          <span class="tag">Warm · 1 test changed</span>
-          <div class="headline-n">~50&ndash;70&times;</div>
-          <div class="desc">The inner loop you live in. Impact analysis re-runs only what moved.</div>
+          <span class="tag">Warm &middot; one module edited</span>
+          <div class="headline-n">57&times;</div>
+          <div class="desc">The inner loop you live in. A leaf module edited: its four dependents re-run, the rest are served. One test by name through the daemon: 0.6 s.</div>
           <div class="versus" aria-hidden="true">
-            <div class="vs-row pt"><span class="who">pytest</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="val">~0.84 s</span></div>
-            <div class="vs-row tr"><span class="who">tiderace</span><span class="track"><span class="fill" style="width:1%"></span></span><span class="val">~5 ms</span></div>
+            <div class="vs-row pt"><span class="who">pytest</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="val">80 s</span></div>
+            <div class="vs-row tr"><span class="who">tiderace</span><span class="track"><span class="fill" style="width:2%"></span></span><span class="val">1.4 s</span></div>
           </div>
         </div>
       </div>
-      <p class="bench-foot">Method: fx_corpus (509 fixture tests, numpy/sqlite), measured with hyperfine. tiderace runs its own engine &mdash; collection, fixture graph, scheduling, hashing and impact analysis are all native Rust. There is no pytest in the loop at runtime. <a class="rust" href="guides/benchmarks/">Reproduce the benchmarks &rarr;</a></p>
+      <p class="bench-foot">Method: pinned corpora, one virtualenv per suite for both runners, parity by node id before speed, interleaved rounds with the load average recorded on every sample, medians. Numbers from the 29 September 2026 pass on the internal monorepo's <span class="mono">pirn-core</span> (5,036 tests); the other seven suites, the second-run table and every caveat are in the guide. <a class="rust" href="guides/benchmarks/">Read the benchmarks &rarr;</a></p>
     </div>
   </section>
 
@@ -353,11 +353,11 @@
             <div class="term-body"><span class="p">$</span> <span class="w">python -m tiderace.migrate tests/ --write</span>
 <span class="g">mapped 463 / 509</span> <span class="m">(91%) &middot; 46 flagged for review</span>
 
-<span class="p">$</span> <span class="w">tiderace-daemon run tests/ --all</span>
-<span class="g">509 tests, 0 failing</span> <span class="m">&middot; 0.66s (pytest 0.94s)</span>
+<span class="p">$</span> <span class="w">tiderace run tests/</span>
+<span class="g">5036 passed, 0 failed, 0 error, 566 skipped, 5602 total</span> <span class="m">&middot; 26.7s (pytest 77.9s)</span>
 
 <span class="p">$</span> <span class="w">tiderace-daemon run tests/</span> <span class="m"># nothing changed</span>
-<span class="g">0 ran, 509 cached, 509 total, 0 failing</span> <span class="m">&middot; 9.4ms</span></div>
+<span class="g">0 ran, 5602 cached, 5602 total, 0 failing</span> <span class="m">&middot; 0.16s</span></div>
           </div>
         </div>
       </div>
@@ -420,16 +420,17 @@
   buildStreams(document.querySelector('.tr-home .stream'), 26, 1200, 640);
   buildStreams(document.querySelector('.tr-home .stream2'), 16, 1200, 420);
 
-  var TOTAL = 509;
+  var TOTAL = 560;  // one dot per ten of pirn-core's 5,602 nodes
   var dotsEl = document.getElementById('dots');
   if(!dotsEl) return;
   var dots = [];
   for(var i=0;i<TOTAL;i++){ var d = document.createElement('span'); d.className='dot'; dotsEl.appendChild(d); dots.push(d); }
   var scenarios = {
-    linalg:   {ran:2,  wall:'~5 ms',  label:'src/linalg.py changed', note:'2 tests import linalg. 507 skip.'},
-    io:       {ran:7,  wall:'~11 ms', label:'src/db_io.py changed',   note:'7 sqlite tests re-run. 502 skip.'},
-    README:   {ran:0,  wall:'9.4 ms', label:'README.md changed',      note:'No test depends on it. Nothing runs.'},
-    everything:{ran:509,wall:'0.66 s',label:'src/core.py changed',    note:'Core touched — full run. Still 1.4× vs pytest cold.'}
+    // ran/cached are pirn-core's measured counts (second_run.py, 29 Sept 2026); dots is one per ten.
+    leaf:     {dots:1,  ran:4,    cached:5598, wall:'1.4 s',  label:'connectors/bdf_format.py changed', note:'4 tests depend on it. 5,598 served from cache.'},
+    test:     {dots:1,  ran:7,    cached:5595, wall:'1.4 s',  label:'tests/test_shape_guard.py changed', note:'That file\'s 7 tests re-run. Nothing else.'},
+    README:   {dots:0,  ran:0,    cached:5602, wall:'0.16 s', label:'README.md changed',      note:'No test depends on it. Nothing runs; the interpreter is never launched.'},
+    hub:      {dots:379,ran:3793, cached:1809, wall:'25.9 s', label:'core/shape_guard.py changed', note:'3,958 tests depend on it: 3,793 re-run. Selection degrades to a large run rather than pretending.'}
   };
   var rand = (function(){ var s=1337; return function(){ s=(s*16807)%2147483647; return s/2147483647; }; })();
   var order = dots.map(function(_,i){return i;}).sort(function(){return rand()-0.5;});
@@ -439,21 +440,21 @@
   function apply(file){
     var sc = scenarios[file]; clearDots();
     chips.forEach(function(c){ c.setAttribute('aria-pressed', c.dataset.file===file ? 'true':'false'); });
-    var affected = {}; for(var k=0;k<sc.ran;k++){ affected[order[k]]=true; }
+    var affected = {}; for(var k=0;k<sc.dots;k++){ affected[order[k]]=true; }
     dots.forEach(function(d,idx){
       if(affected[idx]){
         if(reduce){ d.className='dot ran'; }
         else { setTimeout((function(el){return function(){ el.className='dot ran'; };})(d), 60 + Math.random()*420); }
       } else { d.className='dot skipped'; }
     });
-    ranN.textContent = sc.ran; skipN.textContent = TOTAL - sc.ran; wallN.textContent = sc.wall;
+    ranN.textContent = sc.ran.toLocaleString(); skipN.textContent = sc.cached.toLocaleString(); wallN.textContent = sc.wall;
     readout.innerHTML = '<span class="hit">'+sc.label+'</span> — '+sc.note;
   }
   chips.forEach(function(c){ c.addEventListener('click', function(){ apply(c.dataset.file); }); });
   var resetB = document.getElementById('reset');
   if(resetB) resetB.addEventListener('click', function(){
     clearDots(); chips.forEach(function(c){ c.setAttribute('aria-pressed','false'); });
-    ranN.textContent='0'; skipN.textContent=TOTAL; wallN.textContent='—';
+    ranN.textContent='0'; skipN.textContent='5,602'; wallN.textContent='—';
     readout.textContent='Nothing changed. Nothing runs — the interpreter isn’t even launched.';
   });
   var copyBtn = document.getElementById('copy');

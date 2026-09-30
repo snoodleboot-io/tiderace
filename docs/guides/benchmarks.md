@@ -1,59 +1,44 @@
 # Benchmarks
 
-tiderace ships a reproducible benchmark harness. Run it yourself rather than trusting a fixed number
-— results vary by machine and, especially, by how fast your Python imports the test suite's
-dependencies.
+Every number here comes from a harness in the repository; run it rather than trust it. Results
+vary by machine and, above all, by how fast your Python imports your suite's dependencies.
 
-## The three-way harness
+## The short version
+
+Eight real suites — four public projects vendored at fixed commits, four internal ones from a
+pinned monorepo snapshot — run by pytest and by tiderace in the same virtualenv, compared **test
+by test** before anything is timed. As of the 29 September pass on main at `ad3481f`:
+
+| | |
+| -- | -- |
+| parity | identical outcomes on seven of eight suites, node id for node id; the eighth (anyio) collects the same 1,479 nodes and differs on ten outcomes, eight of them tests that drive pytest itself |
+| a full run, against serial pytest | 2.0× to 5.0× faster on seven suites |
+| a full run, against `pytest -n auto` | 1.5× on the two 5,000-test suites; more on small suites, where xdist's start-up is the whole run |
+| a warm run with nothing edited | 0.16s and 0.13s on the two 5,000-test suites, against pytest's 80s and 106s |
+| one leaf module edited | 1.4s and 1.8s |
+| one test by name through a warm daemon | 0.6s on a 5,600-test suite (5s without the daemon) |
+
+The published document with the full tables, the method and every caveat is
+[Tiderace on Eight Suites](https://claude.ai/artifact/WNYBgGqwbtQuW9iW14EyBn); the sections below
+carry the same numbers and the history of how they moved.
+
+## The fixture microbenchmark
 
 `benchmarks/bench_3way.sh` compares **pytest** vs the **old** (retired) engine vs the **native**
-pure-Rust engine over the same corpus:
+engine over the repository's own 509-test fixture corpus (`benchmarks/fixtures/fx_corpus`;
+numpy/sqlite), with [hyperfine](https://github.com/sharkdp/hyperfine):
 
 ```bash
 # defaults: corpus = benchmarks/fixtures/fx_corpus, python = .tiderace-fx-venv/bin/python
 benchmarks/bench_3way.sh [corpus-dir] [venv-python]
 ```
 
-It needs [hyperfine](https://github.com/sharkdp/hyperfine) and both engines built. The script sets
-`TIDERACE_PYTHON` and `TIDERACE_SHIM` for you and runs three scenarios. Note how it drives the native
-engine:
-
-- **Cold full run** uses `tiderace-daemon run . --all` — no-fork + restore is the **default** path
-  (no flag). The `TIDERACE_FORCE_FORK=1` variant is the debug/benchmark baseline that reverts to
-  fork-per-test, so the script can show what removing the fork buys.
-- **Warm no-change** uses `tiderace-daemon run .` (impact-aware) against persisted
-  `.tiderace-state.json` — nothing should execute.
-- **Inner loop** uses `tiderace-daemon bench <dir> 4` to time a warm rerun of one test.
-
-## The scenarios & the measured numbers
-
-Measured on `benchmarks/fixtures/fx_corpus` (509 fixture tests; numpy/sqlite), hyperfine. From
-[`RESULTS-3way.md`](https://github.com/snoodleboot-io/tiderace/blob/main/benchmarks/RESULTS-3way.md):
-
-| scenario | pytest | **tiderace** | speedup |
-|---|---:|---:|---:|
-| **Cold** — full run (all 509 execute) | 0.94 s | **0.66 s** | **1.4× faster** |
-| **Warm** — no changes (impact-skip) | 0.84 s | **9.4 ms** | **89×** |
-| **Warm** — inner loop, 1 changed test | 0.27 s | **~5 ms** | **~50–70×** |
-
-## How to read it (the honest framing)
-
-Two levers compound, and they matter in different scenarios:
-
-- **Cold full run — tiderace now *beats* pytest (1.4×).** This is the surprising result: deleting the
-  per-test `fork()` via the [no-fork ladder](../design/architecture.md#the-isolation-ladder) drops
-  System time roughly 3.6 s → 0.5 s (about 6× fewer syscalls), and the snapshot/restore that replaces
-  it is cheap while keeping full per-test isolation. The residual cost is the **per-worker import**
-  (each pool wellspring imports the project once), not the fork.
-
-- **Warm / impact — where tiderace dominates.** With no changes, impact-skip runs **nothing** — the
-  wellspring isn't even launched — so a re-run is ~9 ms (89× pytest). A one-test inner loop is ~5 ms
-  (~50–70×). This is the everyday edit→test loop, and it's the design's whole point.
-
-!!! note "Honest framing"
-    The cold full run *used* to trail pytest (pytest runs one process, isolates nothing). The no-fork
-    ladder closed and then reversed that gap. But the impact loop is still where the order-of-magnitude
-    wins live — fork-vs-no-fork is in the noise there because impact-skip already ran (almost) nothing.
+Read it as a microbenchmark of the engine's own overheads, not as a suite: fx_corpus is one
+500-test file, and since TID-80 a file runs whole on one worker, as under pytest — so the default
+full run is serial, **0.95s against pytest's 0.83s**, and `--shard-modules` (for suites whose
+files are known independent) runs it in 0.56s. The warm and inner-loop rows the script also
+measures (a no-change run in single-digit milliseconds, one changed test in ~5 ms) are the
+impact-skip path and hold; the real-suite equivalents are in the tables below.
 
 ## Real suites: parity first, then the second run
 
@@ -236,17 +221,25 @@ Read with the same care as the cold numbers:
 ## Reproduce
 
 ```bash
-# Build both engines first
-cargo build --release --manifest-path engine/Cargo.toml   # native engine
+cargo build --release --manifest-path engine/Cargo.toml        # the engine
 
-# Then run the three-way harness on the generated fixture
+# The real-suite harness: one venv per corpus (see benchmarks/harness/README.md);
+# PIRN_SNAPSHOT points at the internal monorepo snapshot for the four internal suites.
+python benchmarks/harness/parity.py                             # pytest vs tiderace tallies, every corpus
+python benchmarks/harness/nodediff.py click                     # per-node outcome diff — the only sound comparison
+ROUNDS=3 python benchmarks/harness/timing_rr.py                 # pytest / xdist / tiderace, interleaved, medians
+PIRN_SNAPSHOT=… python benchmarks/harness/second_run.py pirn-core   # the run after an edit
+PIRN_SNAPSHOT=… python benchmarks/harness/warm_vs_xdist.py pirn-core
+
+# The fixture microbenchmark
 benchmarks/bench_3way.sh
-
-# And the real-suite harness (see above; one venv per vendored corpus)
-python benchmarks/harness/parity.py cachetools
 ```
 
-Full result tables and methodology live in
+`TIDERACE_BIN`, `TIDERACE_SHIM` and `TIDERACE_PY_TIDERACE` point a pass at a branch's binary and
+shim, so two builds can be compared side by side. The method — pinned inputs, parity before speed,
+interleaved rounds, load recorded, node-id comparison — is in
+[`benchmarks/harness/README.md`](https://github.com/snoodleboot-io/tiderace/blob/main/benchmarks/harness/README.md);
+the fixture microbenchmark's history is in
 [`benchmarks/RESULTS-3way.md`](https://github.com/snoodleboot-io/tiderace/blob/main/benchmarks/RESULTS-3way.md)
 and [`benchmarks/RESULTS-inproc.md`](https://github.com/snoodleboot-io/tiderace/blob/main/benchmarks/RESULTS-inproc.md)
 (the in-process / FFI transport experiment, which confirmed the fork — not the pipe — was the cost).

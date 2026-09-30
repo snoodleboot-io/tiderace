@@ -81,7 +81,7 @@ the node ids match, and the **fixtures** a plugin defines (`mocker`, `anyio_back
 registered at the lowest precedence, as ordinary fixture functions in an importable module, which
 is all they are (TID-87). The plugin's hooks never run. A suite whose purpose is to test a pytest
 plugin through `pytester` is testing pytest, and running it means becoming pytest. See
-[12-plugin-host](../../planning/current/pure-rust-test-engine/design/12-plugin-host.md) for the
+[12-plugin-host](https://github.com/snoodleboot-io/tiderace/blob/main/planning/current/pure-rust-test-engine/design/12-plugin-host.md) for the
 boundary.
 
 ## The parallel pool

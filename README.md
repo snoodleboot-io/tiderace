@@ -45,16 +45,23 @@ That design unlocks two things no pytest plugin can do together:
 
 ## Benchmarks
 
-Measured on `benchmarks/fixtures/fx_corpus` (509 fixture tests; numpy/sqlite), hyperfine. Reproduce with
-`benchmarks/bench_3way.sh`.
+Eight real suites — click, flask, cachetools, anyio, and four packages of an internal monorepo —
+run by pytest and by tiderace in the same virtualenv, compared **test by test** before anything is
+timed. Medians of interleaved rounds; the full tables, method and caveats are in the
+[benchmarks guide](https://snoodleboot-io.github.io/tiderace/guides/benchmarks/).
 
-| scenario | pytest | **tiderace** | speedup |
-|---|---:|---:|---:|
-| **Cold** — full run (all 509 execute) | 0.94 s | **0.66 s** | **1.4× faster** |
-| **Warm** — no changes (impact-skip) | 0.84 s | **9.4 ms** | **89×** |
-| **Warm** — inner loop, 1 changed test | 0.27 s | **~5 ms** | **~50–70×** |
+| suite | tests | pytest | pytest -n auto | **tiderace** | vs pytest | vs xdist |
+|---|---:|---:|---:|---:|---:|---:|
+| pirn-core (monorepo) | 5,036 | 77.9 s | 40.4 s | **26.7 s** | 2.9× | 1.5× |
+| pirn-agents (monorepo) | 4,652 | 105.9 s | 47.6 s | **31.1 s** | 3.4× | 1.5× |
+| anyio | 1,479 | 48.2 s | 14.9 s | **9.7 s** | 5.0× | 1.5× |
+| click | 589 | 1.36 s | 1.82 s | **0.56 s** | 2.4× | 3.3× |
+| flask | 482 | 2.08 s | 2.40 s | **0.99 s** | 2.1× | 2.4× |
 
-The no-fork isolation ladder makes even a *cold* full run beat pytest; impact-skip is where it dominates.
+Outcomes are identical to pytest's on seven of the eight suites, node id for node id. And the run
+a developer actually waits on, on the 5,600-test suite: **nothing edited, 0.16 s** (pytest has no
+warm mode: 80 s); **one leaf module edited, 1.4 s**; **one test by name through a warm daemon,
+0.6 s**.
 
 ## Install
 
@@ -80,27 +87,24 @@ cd tiderace/engine && cargo build --release
 ## Quick start
 
 ```bash
-# The engine needs to know your shim + interpreter (it inherits these via env)
-export TIDERACE_SHIM="$PWD/py-shim/shim.py"
-export TIDERACE_PYTHON="$(which python3)"
+pip install tiderace                  # into the interpreter your tests run under
 
-# First run — executes all tests, records coverage footprints + state
-./target/release/tiderace-daemon run /path/to/tests
+tiderace run tests/                   # the whole suite, pytest's outcomes and exit code
+tiderace run -k test_login tests/     # one test by name
 
-# Subsequent runs — only tests affected by changed files (no change → nothing runs)
-./target/release/tiderace-daemon run /path/to/tests
+tiderace daemon start tests/          # keep the imported suite warm for the session…
+tiderace run -k test_login tests/     # …0.6s on a 5,600-test suite instead of 5s
+tiderace daemon stop tests/
 
-# Forced full run
-./target/release/tiderace-daemon run /path/to/tests --all
-
-# Watch — warm interpreter, re-run impacted tests on save (millisecond loops)
-./target/release/tiderace-daemon watch /path/to/tests
-
-# Or keep a daemon warm and use the one-shot CLI: later runs import nothing
-./target/release/tiderace daemon start /path/to/tests
-./target/release/tiderace run /path/to/tests      # "via daemon"
-./target/release/tiderace daemon stop /path/to/tests
+tiderace-daemon run tests/            # first pass records footprints; later passes run only
+tiderace-daemon run tests/            #   what an edit touched — nothing changed, nothing runs
+tiderace-daemon run tests/ --all      # the CI gate: everything, every time
+tiderace-daemon watch tests/          # the editor loop: re-run what each save impacts
 ```
+
+Built from source, the binaries are under `engine/target/release/` and need `TIDERACE_SHIM`
+pointed at `engine/py-shim/shim.py`; the wheel bundles the shim. `TIDERACE_PYTHON` picks the
+interpreter when tiderace is not installed into it.
 
 ## How it works
 
@@ -122,13 +126,16 @@ See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full design with diagrams.
 
 ```gitignore
 .tiderace-state.json
+.tiderace-cache/
 ```
 
 ## Documentation
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — full system architecture, diagrams, code map
 - [Quick Start](https://snoodleboot-io.github.io/tiderace/guides/quickstart/)
-- [Architecture](https://snoodleboot-io.github.io/tiderace/design/architecture/)
+- [Migrating from pytest](https://snoodleboot-io.github.io/tiderace/guides/migration/)
+- [Benchmarks](https://snoodleboot-io.github.io/tiderace/guides/benchmarks/)
+- [Execution model](https://snoodleboot-io.github.io/tiderace/design/parallel-execution/)
 - [Impact Analysis](https://snoodleboot-io.github.io/tiderace/design/impact-analysis/)
 - [CLI Reference](https://snoodleboot-io.github.io/tiderace/api/cli/)
 - [Design decisions (ADRs)](planning/current/pure-rust-test-engine/design/adr/)

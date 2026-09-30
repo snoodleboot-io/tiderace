@@ -1,136 +1,119 @@
 # Quick Start
 
-This walks you from a fresh build to the warm inner loop in a few minutes. tiderace is a
-**pure-Rust test engine** — it runs your Python tests directly, with **no pytest at runtime**.
+From an install to the warm inner loop in a few minutes. tiderace is a **pure-Rust test engine** —
+it runs your Python tests directly, with **no pytest at runtime** — and it runs an unmodified
+pytest suite: fixtures, marks, parametrize, conftests, plugin fixtures.
 
-## 1. Build the engine
-
-tiderace builds from source from the `engine/` Cargo workspace. You need a Rust toolchain and a
-Python 3.12+ interpreter (the engine uses CPython's `sys.monitoring` for coverage).
+## 1. Install
 
 ```bash
-git clone https://github.com/snoodleboot-io/tiderace
-cd tiderace/engine
-cargo build --release
+pip install tiderace        # or: uv pip install tiderace
 ```
 
-This produces two binaries under `engine/target/release/`:
+That ships two binaries, `tiderace` and `tiderace-daemon`, with the Python shim bundled — no
+`TIDERACE_SHIM`, no configuration. Install it into the interpreter your tests run under, or point
+`TIDERACE_PYTHON` at that interpreter. Requires Python 3.12+.
 
-- `tiderace` — one-shot CLI (`collect`, `run`).
-- `tiderace-daemon` — the warm server (`run`, `run --all`, `serve`, `watch`, `bench`, `probe`).
+Building from source instead (`cd engine && cargo build --release`) leaves the binaries under
+`engine/target/release/` and needs `TIDERACE_SHIM` pointed at `engine/py-shim/shim.py`; see
+[Installation](installation.md).
 
 !!! info "Platforms"
     Linux, macOS, and **Windows** are all supported. Windows has no `fork()`, so isolation there is
     no-fork + snapshot/restore, and the opt-in [sub-interpreter tier](configuration.md#windows-parallelism-the-sub-interpreter-tier-opt-in)
-    (CPython 3.14+) adds parallel no-fork execution. `run` / `run --all` / `watch` work everywhere; only
-    the `serve` RPC socket is Unix-only.
+    (CPython 3.14+) adds parallel no-fork execution. The daemon's socket, and with it
+    `tiderace daemon`, is Unix-only.
 
-## 2. Point the engine at Python
-
-The engine is **env-driven**. Two variables matter to start:
+## 2. Run the suite
 
 ```bash
-# Required: the Python shim the engine runs inside CPython (it imports your code & invokes bodies).
-export TIDERACE_SHIM="$PWD/py-shim/shim.py"
-
-# Optional: the interpreter (defaults to python3). Use your project's venv if it has deps.
-export TIDERACE_PYTHON="$(which python3)"
+tiderace run tests/
 ```
 
-`TIDERACE_SHIM` is mandatory — without it the binaries exit with an error. See
-[Configuration](configuration.md) for the full set of variables.
+```
+tiderace: strategy=fork scheduler=locality workers=8 timeout=60000ms optimistic-no-fork shared-import
+PASS	tests/test_auth.py::test_login
+…
+5036 passed, 0 failed, 0 error, 0 skipped, 5036 total
+```
 
-## 3. First run — everything executes
+The same tests pytest would collect, the same outcomes, the pytest-style exit code (`0` green,
+`1` on any failure). Behind that line, tiderace:
 
-Point the daemon at your tests. The impact-aware `run` does a full pass the first time (there's no
-prior state to compare against), recording each test's coverage footprint:
+1. Collected the tests with a regex scan of the files — no Python started yet.
+2. Imported the suite **once**, in one process, and forked a worker per core from that image.
+3. Handed out the files as work units, each file's tests in file order on one worker, and ran every
+   test through the [isolation ladder](../design/architecture.md#the-isolation-ladder): in-process
+   when the test's module can be snapshotted and restored, forked only when it cannot.
+
+`-k EXPR`, `-m EXPR`, `--strict-markers`, `--workers N`, `--timeout MS` and `--report path.json`
+do what you expect; the [CLI reference](../api/cli.md) has the rest.
+
+## 3. Keep it warm
+
+The suite's import graph is most of what a run pays before the first test starts. Keep a daemon
+for the tree and later runs skip it:
 
 ```bash
-./target/release/tiderace-daemon run /path/to/tests
+tiderace daemon start tests/     # once per session
+tiderace run tests/              # "tiderace: … via daemon"
+tiderace run -k test_login tests/
 ```
 
-```
-12 ran, 0 cached, 12 total, 0 failing
-```
+A `-k` run of one test on a 5,600-test suite is **0.6s** through the daemon and 5s without. The
+daemon re-imports its image whenever a `.py` or pytest config file under the tree changes, so a
+stale module is never executed. `tiderace daemon status` says whether one is serving and whether
+its image is warm; `tiderace daemon stop` ends it. Set `TIDERACE_NO_DAEMON=1` for a run that must
+not share an image with earlier runs — a gate.
 
-Behind that line, tiderace:
+## 4. Only run what changed
 
-1. Collected your tests via fast regex scanning (Rust).
-2. Built the fixture closure per test (Rust).
-3. Launched a warm wellspring per core and ran every test through the
-   [isolation ladder](../design/architecture.md#the-isolation-ladder) — pure tests in-process, the
-   rest snapshot/restored, only opaque modules forked.
-4. Captured per-test coverage via `sys.monitoring` and persisted it to **`.tiderace-state.json`**
-   (per-test deps + file content hashes).
-
-## 4. Second run — nothing changes, nothing runs
-
-Run the exact same command again without touching any files:
+`tiderace run` always runs what you asked for. The daemon's own `run` mode runs what an edit
+**touched**: the first pass records every test's source footprint, and later passes hash the
+files and re-run only the tests whose recorded dependencies changed.
 
 ```bash
-./target/release/tiderace-daemon run /path/to/tests
+tiderace-daemon run tests/        # first pass: everything runs, footprints recorded
+tiderace-daemon run tests/        # nothing changed: nothing runs
 ```
 
 ```
-0 ran, 12 cached, 12 total, 0 failing
+0 ran, 5602 cached, 5602 total, 0 failing
 ```
 
-**Zero tests execute** — tiderace hashes the files, sees nothing changed, and serves the prior
-outcomes. With no changes the warm interpreter isn't even launched. This is the impact-skip path.
+Edit a source file and run again:
 
-## 5. After an edit — only impacted tests re-run
+```
+4 ran, 5598 cached, 5602 total, 0 failing
+```
 
-Edit a test file or a source file it depends on, then run again:
+Selection is by recorded footprint, not by guess, and conservative: a test re-runs when its own
+file changed, when a recorded dependency changed, or when it has no footprint yet. A hub module
+that thousands of tests depend on re-runs thousands of tests. `run --all` forces the whole suite
+— the CI gate. The state lives in `.tiderace-state.json`; add it and `.tiderace-cache/` to
+`.gitignore`.
+
+## 5. The editor loop — `watch`
 
 ```bash
-# edit src/auth.py, then:
-./target/release/tiderace-daemon run /path/to/tests
+tiderace-daemon watch tests/
 ```
 
 ```
-2 ran, 10 cached, 12 total, 0 failing
-```
-
-Only the tests whose recorded dependencies include the changed file re-execute. Impact analysis is
-**conservative**: a test is re-run when its own file changed, when a recorded dependency changed, or
-when it has no recorded footprint yet (e.g. the very first run).
-
-## 6. Force a full run
-
-When you want every test to execute regardless of state — a clean baseline, or a CI gate — use
-`run --all`:
-
-```bash
-./target/release/tiderace-daemon run /path/to/tests --all
-```
-
-This runs the whole suite across the parallel pool. (`--all` opts out of the impact-skip and its
-coverage recording; use plain `run` to keep the dependency graph fresh.)
-
-## 7. The inner loop — `watch`
-
-For an editor loop, keep the interpreter warm and re-run only what each save impacts:
-
-```bash
-./target/release/tiderace-daemon watch /path/to/tests
-```
-
-```
-watching /path/to/tests (Ctrl-C to stop)…
+watching tests/ (Ctrl-C to stop)…
 src/auth.py: Ran(2)
 test_auth.py: Recollected(5)
 conftest.py: Recycled(12)
 ```
 
-Each save classifies the change (source edit → re-run impacted; test file → re-collect; conftest →
-recycle the warm interpreter) and does the **minimum** work — millisecond feedback. `watch` keeps a
-long-lived warm process, so it's a **local-dev** tool; CI should use fresh `run` / `run --all`. See
-[Watch Mode](watch.md).
+Each save classifies the change — source edit, test file, conftest — and does the minimum: re-run
+the impacted tests, re-collect the file, recycle the interpreter. `watch` and `daemon start` keep a
+long-lived warm process, so they are local-development tools; CI runs a fresh `run` / `run --all`.
+See [Watch Mode](watch.md).
 
 ## Next steps
 
-- [Configuration](configuration.md) — every environment variable and the `--all` flag
-- [Watch Mode](watch.md) — the warm inner loop in detail
+- [Configuration](configuration.md) — every environment variable and the project config tiderace reads
+- [Migrating from pytest](migration.md) — what runs unchanged, and the native API
 - [CI](ci.md) — safe vs fast modes, caching `.tiderace-state.json`
-- [How impact analysis works](../design/impact-analysis.md)
-- [Benchmarks](benchmarks.md) — run the comparison yourself
+- [Benchmarks](benchmarks.md) — eight real suites against pytest and pytest-xdist
