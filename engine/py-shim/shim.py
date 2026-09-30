@@ -3341,52 +3341,6 @@ class Engine:
         case_ids = [cid for _, cid, *_ in raw_cases] or [None]
         case_pos_maps = [(rest[0] if rest else None) for _, _, *rest in raw_cases] or [None]
 
-        # Soundness gate for BOTH in-process paths. A module whose shared state we can't snapshot/restore
-        # (opaque globals — an open file, a generator, a live socket) must fork: running it in-process
-        # leaks whatever the test mutated into the next test on the same module.
-        #
-        # This applies to `--no-fork` mode too, not just an optimistic per-test request. It previously
-        # checked only `force_no_fork`, so whole-run no-fork (`--no-fork`, i.e. the SubprocessWorker /
-        # Windows path) ran opaque modules in-process regardless and silently produced wrong results —
-        # e.g. a module-level generator stayed advanced across tests. See
-        # `py-tiderace/proof_windows_opaque_fork.py`.
-        #
-        # A trusted-pure test skips the check: known pure ⇒ it won't mutate, so restorability is moot.
-        must_fork = False
-        if self.restore and not trusted_pure and (force_no_fork or self.no_fork):
-            try:
-                must_fork = not _restorable(importlib.import_module(_module_name(module_key)))
-            except Exception:  # noqa: BLE001 — can't import/inspect ⇒ be safe, fork
-                must_fork = True
-            if must_fork:
-                force_no_fork = False
-        # A recorded state-disturber (TID-33) is denied the in-process tier the same way, and takes
-        # the same route as an opaque module below (TID-96). It used to fall through to a fork per
-        # test, each child a fresh process in which a unittest class's `setUpClass` had not run —
-        # pirn-agents' cross-process replay class paid its 5s set-up seven times, where pytest and
-        # the module child pay it once. With the ladder off (`TIDERACE_FORCE_FORK=1`) nothing is
-        # recorded as a disturber, so that mode keeps its fork per test.
-        if recorded_must_fork and self.restore and not self.no_fork:
-            must_fork = True
-            force_no_fork = False
-        # And a module child already open for this file takes the rest of the file: only the
-        # method that left the thread behind is recorded, its siblings arrive unflagged, and sending
-        # them back to the worker would run them in a second process — a unittest class's
-        # `setUpClass` a second time. TID-80 made the child the boundary between modules; a file
-        # whose tests are split across two processes is what pytest never does (TID-96).
-        if (self._module_child is not None and not self._in_module_child and _FORK_AVAILABLE
-                and self._module_child.module_key == module_key and self.restore
-                and not self.no_fork):
-            must_fork = True
-            force_no_fork = False
-        # An opaque module's tests run in ONE forked child, sequentially, for as long as the batch
-        # stays on that module (TID-80). Forking per test kept the module's own tests apart, which
-        # pytest never does: an object one test put into a module-scoped moto mock was gone for the
-        # next, because it lived and died in that test's child. The child is the isolation boundary
-        # between modules, which is what opacity is about; inside it the file behaves as under
-        # pytest. Fewer forks, too.
-        if must_fork and _FORK_AVAILABLE and not self._in_module_child:
-            return self._module_child_run(node_id, style, deadline_ms)
 
         uses = self._uses(node_id, style)  # @tiderace.uses: set up by type, not injected (B2)
         # `@pytest.mark.usefixtures("a", "b")` — on the function, its class or its module — sets those
@@ -3486,6 +3440,58 @@ class Engine:
                     "variants": [{"node_id": vid, "outcome": "skipped", "detail": skip_reason,
                                   "duration_ms": 0}
                                  for i, vid in enumerate(variant_ids) if i in selected]}
+        # Only now — after `-k` has chosen and a whole-node skip has returned — does the node's
+        # *route* get decided (TID-99). It used to sit above the case expansion, so every node
+        # `-k` was about to deselect first paid the restorability snapshot (a deepcopy of its
+        # module's shared state), and one in an opaque module was forked into a module child
+        # only to be deselected there. Nothing below the old position set anything up: the
+        # closure, the combos and the ids are graph and registry reads.
+        # Soundness gate for BOTH in-process paths. A module whose shared state we can't snapshot/restore
+        # (opaque globals — an open file, a generator, a live socket) must fork: running it in-process
+        # leaks whatever the test mutated into the next test on the same module.
+        #
+        # This applies to `--no-fork` mode too, not just an optimistic per-test request. It previously
+        # checked only `force_no_fork`, so whole-run no-fork (`--no-fork`, i.e. the SubprocessWorker /
+        # Windows path) ran opaque modules in-process regardless and silently produced wrong results —
+        # e.g. a module-level generator stayed advanced across tests. See
+        # `py-tiderace/proof_windows_opaque_fork.py`.
+        #
+        # A trusted-pure test skips the check: known pure ⇒ it won't mutate, so restorability is moot.
+        must_fork = False
+        if self.restore and not trusted_pure and (force_no_fork or self.no_fork):
+            try:
+                must_fork = not _restorable(importlib.import_module(_module_name(module_key)))
+            except Exception:  # noqa: BLE001 — can't import/inspect ⇒ be safe, fork
+                must_fork = True
+            if must_fork:
+                force_no_fork = False
+        # A recorded state-disturber (TID-33) is denied the in-process tier the same way, and takes
+        # the same route as an opaque module below (TID-96). It used to fall through to a fork per
+        # test, each child a fresh process in which a unittest class's `setUpClass` had not run —
+        # pirn-agents' cross-process replay class paid its 5s set-up seven times, where pytest and
+        # the module child pay it once. With the ladder off (`TIDERACE_FORCE_FORK=1`) nothing is
+        # recorded as a disturber, so that mode keeps its fork per test.
+        if recorded_must_fork and self.restore and not self.no_fork:
+            must_fork = True
+            force_no_fork = False
+        # And a module child already open for this file takes the rest of the file: only the
+        # method that left the thread behind is recorded, its siblings arrive unflagged, and sending
+        # them back to the worker would run them in a second process — a unittest class's
+        # `setUpClass` a second time. TID-80 made the child the boundary between modules; a file
+        # whose tests are split across two processes is what pytest never does (TID-96).
+        if (self._module_child is not None and not self._in_module_child and _FORK_AVAILABLE
+                and self._module_child.module_key == module_key and self.restore
+                and not self.no_fork):
+            must_fork = True
+            force_no_fork = False
+        # An opaque module's tests run in ONE forked child, sequentially, for as long as the batch
+        # stays on that module (TID-80). Forking per test kept the module's own tests apart, which
+        # pytest never does: an object one test put into a module-scoped moto mock was gone for the
+        # next, because it lived and died in that test's child. The child is the isolation boundary
+        # between modules, which is what opacity is about; inside it the file behaves as under
+        # pytest. Fewer forks, too.
+        if must_fork and _FORK_AVAILABLE and not self._in_module_child:
+            return self._module_child_run(node_id, style, deadline_ms)
         variant_index = 0
         per_combo = len(case_kwargs_list)
         for combo, combo_ids in zip(combos, combo_id_maps):
