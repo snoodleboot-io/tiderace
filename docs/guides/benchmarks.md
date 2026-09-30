@@ -87,6 +87,22 @@ reads `-v`, one line per node. anyio went from 222 failed/error and 332 / 384 id
 fixture name not in the signature is indirect; duplicate ids take pytest 8's `_` suffix; a skip-marked
 parametrized test is skipped per variant; a fixture named `test*` is not a test).
 
+**Selection parity.** A runner that agrees with pytest on outcomes but not on *what `-k` and `-m`
+select* is still a different runner. Measured 30 September, after TID-100, as sets of node ids —
+tiderace's `--report` against pytest's `--collect-only` for the same expression, in the same venv:
+
+| suite (pytest) | expressions | result |
+| -- | -- | -- |
+| pirn-core (9.1) | `-k unit`, `end_to_end`, `connectors` — directory names | 4,557 / 38 / 2,337, pytest's exactly (plus the 522 module-import skips tiderace reports either way) |
+| click (7.4) | `-k context`, `utils and not echo`, `not shell`, `tests` | identical sets, 611 for `tests` |
+| anyio (9.1) | `-k socket`, `asyncio and not trio`, `streams`, `tls and asyncio` | identical sets |
+| pirn-core, anyio, pirn-agents | ten `-m` expressions (`slow`, `not slow`, `anyio`, `needs_postgres or needs_kafka`, `heavy`, `network`, `not network`, …) | identical sets |
+
+Directory names were the gap: pytest 8 puts every directory below the rootdir on a node's chain,
+so `-k unit` selected 4,557 pirn-core tests under pytest and none under tiderace until TID-100;
+pytest 7 names a module by its whole path from the rootdir unless its own directory is a package,
+and the shim follows whichever pytest the venv has.
+
 **Cold timings**, median wall clock in seconds. tiderace here is `tiderace run` with durations
 already recorded from an earlier run, so its work units are cost-ordered; xdist is `pytest -n auto`.
 
