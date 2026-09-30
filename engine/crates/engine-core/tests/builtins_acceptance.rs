@@ -143,7 +143,11 @@ fn every_builtin_provider_resolves_and_tears_down() {
     };
     let dir = write_corpus("run");
     let items = RegexCollector::new().collect(&dir).expect("collection");
-    assert_eq!(items.len(), 8, "one test per builtin, the undo check, and caplog's two parity checks");
+    assert_eq!(
+        items.len(),
+        8,
+        "one test per builtin, the undo check, and caplog's two parity checks"
+    );
 
     // `pool_size = 1` and the no-fork tier on purpose: the monkeypatch-undo assertion is only
     // meaningful if the previous test's teardown ran in *this* process. Under fork each child is a
