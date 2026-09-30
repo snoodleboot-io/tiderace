@@ -50,6 +50,7 @@ benchmark document is produced from it.
 ```bash
 python benchmarks/harness/parity.py             # pytest vs tiderace tallies, per corpus
 python benchmarks/harness/nodediff.py click     # per-node outcome diff — the only sound comparison
+python benchmarks/harness/selection_diff.py click -k context "not shell"   # what -k / -m select, vs pytest
 python benchmarks/harness/timing_rr.py          # pytest / xdist / tiderace, interleaved, medians
 PIRN_SNAPSHOT=... python benchmarks/harness/second_run.py pirn-core   # the run after an edit
 ```

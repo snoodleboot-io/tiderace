@@ -10,6 +10,7 @@ anything, checks that tiderace agrees with pytest on them test for test.
 | `corpora.py` | the corpus list; every other script imports it |
 | `parity.py` | pytest vs tiderace tallies per corpus, from `tiderace run --report` |
 | `nodediff.py` | per-node outcome diff for one corpus — the only sound comparison |
+| `selection_diff.py` | what `-k` / `-m` select, as node-id sets, against pytest's `--collect-only` (TID-100) |
 | `timing_rr.py` | pytest / `pytest -n auto` / tiderace, interleaved rounds, medians, load recorded |
 | `binab.py` | two tiderace binaries A/B'd on the same corpora, interleaved |
 | `analyse_bins.py` | rebuild the scheduler's bins from a report and charge them measured durations |
