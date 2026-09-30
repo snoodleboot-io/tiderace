@@ -68,6 +68,18 @@ fn write_project() -> PathBuf {
          class TestDerived(Base):\n    pass\n",
     )
     .unwrap();
+    // A directory below the rootdir is a node on the chain, so its name is a keyword (TID-100):
+    // `-k unit` is how a suite's unit tests get run by name. `__init__.py` makes it a `Package`,
+    // which pytest 7 also had; pytest 8 gives every directory a node.
+    let unit = tests.join("unit");
+    std::fs::create_dir_all(&unit).unwrap();
+    std::fs::write(unit.join("__init__.py"), "").unwrap();
+    std::fs::write(
+        unit.join("test_delta.py"),
+        "def test_delta_one():\n    assert True\n\n\
+         def test_delta_two():\n    assert True\n",
+    )
+    .unwrap();
     std::fs::write(
         tests.join("test_beta.py"),
         "import pytest\n\n\
@@ -150,6 +162,9 @@ fn k_selects_exactly_what_pytest_selects() {
         "test_cases[1-a]",      // the whole case id, brackets and all
         "beta and not skipped", // a deselected skip is not a skip
         "inherited",            // an inherited method, collected as its class (TID-74)
+        "unit", // a directory below the rootdir, as pytest's chain names it (TID-100)
+        "unit and not delta_two",
+        "not unit", // and its absence
     ] {
         let want = pytest_selects(&python, &tests, expr);
         assert!(
@@ -176,7 +191,8 @@ fn an_expression_that_selects_nothing_is_an_empty_run_not_an_error() {
     // The second expression deselects the only method of an inherited-methods class. Every child of
     // such a class deselected used to come back as a phantom pass — and then as a dead worker, once
     // the empty expansion reached an aggregate of nothing (TID-74).
-    for expr in ["nomatch", "TestDerived and not inherited"] {
+    // `tests` is the rootdir here — the root `Directory`, whose name pytest leaves out (TID-100).
+    for expr in ["nomatch", "TestDerived and not inherited", "tests"] {
         let (got, stderr) = tiderace_selects(&python, &tests, expr);
         assert!(
             got.is_empty(),

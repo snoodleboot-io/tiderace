@@ -1326,11 +1326,45 @@ def _compile_selection_tree(expr: str, flag: str):
         return None
 
 
+def _keyword_dirs(module_key: str) -> tuple:
+    """The directory names pytest's `-k` matches for a module (TID-100).
+
+    pytest's `KeywordMatcher` takes the name of every node on the item's chain except the session
+    and the root `Directory`. Since pytest 8 every directory is a `Dir` / `Package` node, so
+    `-k unit` selects everything under `tests/unit/` — 4,557 of pirn-core's tests, where matching
+    the file and test names alone selected none. pytest 7 had `Package` nodes only for directories
+    holding an `__init__.py`, and no `Dir` nodes. The rootdir — the directory the ini was read
+    from, else the run root — is the root `Directory`, whose name pytest leaves out."""
+    cached = _KEYWORD_DIRS.get(module_key)
+    if cached is not None:
+        return cached
+    root = os.path.abspath(_ROOT or ".")
+    rootdir = os.path.abspath(_CONFIG_DIR) if _CONFIG_DIR else root
+    module_dir = os.path.dirname(os.path.join(root, module_key))
+    rel = os.path.relpath(module_dir, rootdir)
+    if rel.startswith(os.pardir):  # the ini sits beside, not above: the run root is the rootdir
+        rel = os.path.relpath(module_dir, root)
+    parts = [p for p in rel.split(os.sep) if p and p != os.curdir and p != os.pardir]
+    if _pytest_major() < 8:
+        kept, cur = [], rootdir
+        for part in parts:
+            cur = os.path.join(cur, part)
+            if os.path.exists(os.path.join(cur, "__init__.py")):
+                kept.append(part)
+        parts = kept
+    _KEYWORD_DIRS[module_key] = tuple(parts)
+    return _KEYWORD_DIRS[module_key]
+
+
+_KEYWORD_DIRS: dict[str, tuple] = {}  # per module: fixed for the life of the process
+
+
 def _keyword_names(node_id: str, marks: set) -> list:
-    """What pytest's `-k` matches against: the module's file name, every `::` segment — class,
-    function, the function with its parametrize id — and the node's mark names."""
+    """What pytest's `-k` matches against: the directories below the rootdir (TID-100), the
+    module's file name, every `::` segment — class, function, the function with its parametrize
+    id — and the node's mark names."""
     parts = node_id.split("::")
-    return [os.path.basename(parts[0]), *parts[1:], *sorted(marks)]
+    return [*_keyword_dirs(parts[0]), os.path.basename(parts[0]), *parts[1:], *sorted(marks)]
 
 
 def _keyword_matches(ident: str, names: list) -> bool:
