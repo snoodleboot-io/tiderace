@@ -36,6 +36,12 @@ pub struct EngineHandler {
     warm: Option<engine_core::exec::WellspringPool>,
     #[cfg(unix)]
     warm_stamp: Option<u64>,
+    /// The last collection and the tree stamp it was taken under (TID-101). Collection is a walk
+    /// of every test file, 52 ms of a 390 ms `-k` round trip on a 5,600-node suite, and the daemon
+    /// already takes the stamp per run to validate the warm image; the same stamp validates the
+    /// collection, which depends on exactly the files the stamp covers.
+    #[cfg(unix)]
+    collected: Option<(u64, Vec<TestItem>)>,
     /// The `-k` / `-m` / `--strict-markers` of the `RunFull` being served (TID-90): handed to the
     /// warm image's workers, or to a one-shot pool through its environment. `None` between runs.
     /// Read on the Unix path only; the non-Unix pool takes no selection (TID-90).
@@ -67,13 +73,37 @@ impl EngineHandler {
             warm: None,
             #[cfg(unix)]
             warm_stamp: None,
+            #[cfg(unix)]
+            collected: None,
             selection: None,
         }
     }
 
-    fn collect(&self) -> Result<Vec<TestItem>, String> {
+    /// The tree's test items: collected afresh when the tree stamp has moved, else the last
+    /// collection (TID-101). A stamp covers every `.py` and pytest config file under the root by
+    /// path, size and mtime — an added, removed or edited test file changes it.
+    fn collect(&mut self) -> Result<Vec<TestItem>, String> {
+        #[cfg(unix)]
+        {
+            let stamp = Self::tree_stamp(&self.root);
+            if let Some((seen, items)) = &self.collected {
+                if *seen == stamp {
+                    return Ok(items.clone());
+                }
+            }
+            let items = Self::collect_tree(&self.root)?;
+            self.collected = Some((stamp, items.clone()));
+            Ok(items)
+        }
+        #[cfg(not(unix))]
+        {
+            Self::collect_tree(&self.root)
+        }
+    }
+
+    fn collect_tree(root: &Path) -> Result<Vec<TestItem>, String> {
         RegexCollector::new()
-            .collect(&self.root)
+            .collect(root)
             .map_err(|e| format!("collection failed: {e}"))
     }
 
@@ -1002,6 +1032,51 @@ fn recorded_durations(state: &PersistedState) -> HashMap<String, u64> {
 
 #[cfg(test)]
 mod tests {
+    /// TID-101: the collection is reused while the tree stamp holds, and taken again — with the
+    /// change in it — the moment a test file is added, edited or removed.
+    #[cfg(unix)]
+    #[test]
+    fn the_collection_follows_the_tree_stamp() {
+        use super::EngineHandler;
+        let dir = std::env::temp_dir().join(format!("tiderace_t101_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("test_one.py");
+        std::fs::write(&file, "def test_a():\n    assert True\n").unwrap();
+        let mut h = EngineHandler::new("python3", "shim.py", &dir);
+        let ids = |items: &[engine_core::domain::TestItem]| {
+            items
+                .iter()
+                .map(|i| i.node_id.to_string())
+                .collect::<Vec<_>>()
+        };
+        let first = h.collect().unwrap();
+        assert_eq!(ids(&first), ["test_one.py::test_a"]);
+        assert!(
+            h.collected.is_some(),
+            "the collection is kept with its stamp"
+        );
+        // Unchanged tree: the kept collection, not a walk.
+        let (stamp_before, _) = h.collected.clone().unwrap();
+        assert_eq!(ids(&h.collect().unwrap()), ids(&first));
+        assert_eq!(h.collected.as_ref().unwrap().0, stamp_before);
+        // An edit that grows the file moves the stamp (size, and mtime) and the collection with it.
+        std::fs::write(
+            &file,
+            "def test_a():\n    assert True\n\ndef test_b():\n    assert True\n",
+        )
+        .unwrap();
+        assert_eq!(
+            ids(&h.collect().unwrap()),
+            ["test_one.py::test_a", "test_one.py::test_b"]
+        );
+        assert_ne!(h.collected.as_ref().unwrap().0, stamp_before);
+        // A removed file, likewise.
+        std::fs::remove_file(&file).unwrap();
+        assert!(h.collect().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_candidate_with_no_result_of_its_own_or_of_its_expansions_is_deselected() {
         use super::{deselected_candidates, expands};
