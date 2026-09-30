@@ -141,6 +141,36 @@ The first measurement of this table (20 September) read 7.6s / 2.3s for the no-c
 is now 30.7s against the 51.8s it was: the coverage-closure fix (TID-76) and the rest of the same
 list.
 
+### The warm daemon, measured
+
+`tiderace daemon start` keeps the imported suite as an image and forks each run's workers from it
+(TID-84); a `-k` run travels to it with its selection (TID-90). Measured 30 September on main at
+`27d7abe`, after TID-96 — one-minute load 8–10, which is the run itself on an 8-thread machine;
+three runs where three numbers are shown, otherwise one.
+
+| run | pirn-core (5,602 nodes) | pirn-agents (4,657 nodes) |
+| -- | --: | --: |
+| `tiderace run`, no daemon | 26.3 / 26.6 s | 31.8 / 31.8 s |
+| `tiderace run -k <one test>`, no daemon | 4.1 s | 3.9 s |
+| daemon, first run (the image import) | 26.2 s | 31.4 s |
+| daemon, warm, unfiltered | **23.0 / 23.5 / 23.0 s** | **28.4 / 28.5 / 28.2 s** |
+| daemon, `-k <one test>` | **0.64 / 0.62 / 0.63 s** | **0.42 / 0.43 / 0.40 s** |
+| daemon, `-k` matching nothing | 0.63 / 0.60 / 0.59 s | 0.39 / 0.39 / 0.39 s |
+| daemon, after a source edit (re-import) | 26.5 s | 32.1 s |
+| daemon, warm again | 22.7 s | 28.6 s |
+
+What the image buys is the start-up — the interpreter and the suite's import graph, ~3.5 s here —
+so a full run through the daemon is 12% faster and a run of one test by name is **6× to 9×**
+faster than without it. An edit under the tree drops the image and the next run pays the import
+once; the impact-aware `tiderace-daemon run` above, which imports only what it will execute, is
+still the cheaper inner loop after a source edit.
+
+pirn-agents' 31.8 s local run is 0.7 s slower than the pass's 31.1 s, and honest where that one
+was not: the cross-process replay class in that suite paid its 5 s `setUpClass` once per method
+under tiderace — a recorded state-disturber was forked per test — and the pass's number was
+taken before the disturber records existed (TID-96). The class alone was 38 s against pytest's
+6.8 s; it is 7.9 s now.
+
 Read with the same care as the cold numbers:
 
 - **The warm path is 13× and 48× pytest's full run, and most of what is left is a bug.** The
