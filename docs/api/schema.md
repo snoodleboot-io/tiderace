@@ -6,7 +6,7 @@ code.
 
 ## `.tiderace-state.json` — impact-skip state
 
-Written at `<root>/.tiderace-state.json` by impact-aware `tiderace-daemon run` (`engine-daemon/src/persist.rs`).
+Written at `<root>/.tiderace-state.json` by the daemon — impact-aware `tiderace-daemon run`, `run --all`, and a `tiderace run` it serves (`engine-daemon/src/persist.rs`).
 It records each test's last outcome and dependency footprint plus the content hash of every touched
 file, so a later run re-executes only the tests whose dependencies changed. A missing or unparseable
 file is treated as a cold start (empty state).
@@ -91,7 +91,7 @@ Request:
 
 ```json
 { "node_id": "tests/test_auth.py::test_login", "style": "pytest_func",
-  "deadline_ms": 5000, "force_no_fork": true }
+  "deadline_ms": 60000, "force_no_fork": true }
 ```
 
 Response:

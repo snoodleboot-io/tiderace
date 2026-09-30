@@ -84,13 +84,14 @@ The wheel is built by [`scripts/build-wheel.sh`](https://github.com/snoodleboot-
 `tiderace` authoring package (`@tiderace.provides`, `tiderace migrate`) alongside the binaries.
 
 !!! note "PyPI"
-    `pip install tiderace` from PyPI isn't live yet — publishing happens on the first tagged `v*`
-    release (the `Wheels` workflow uploads via maturin once a `PYPI_API_TOKEN` is configured). Until
-    then, build the wheel locally as above.
+    `pip install tiderace` is live: every tagged `v*` release publishes wheels for Linux x86_64 and
+    aarch64, macOS universal2 and Windows x86_64, and the sdist for everything else. The wheel
+    bundles the shim, so an installed `tiderace` needs no `TIDERACE_SHIM`.
 
 ## Add to `.gitignore`
 
 ```gitignore
-# tiderace impact-analysis state — machine-local, do not commit
+# tiderace impact-analysis state and caches — machine-local, do not commit
 .tiderace-state.json
+.tiderace-cache/
 ```

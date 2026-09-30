@@ -77,7 +77,7 @@ timeout error, then forks from the next run on; a worker that stays silent ten s
 deadline — a wait no signal can reach — is killed, its in-flight node reported as the fault and
 the rest of its unit as not run, while the other workers finish the run (TID-93).
 
-When a daemon is serving `<path>` (see [`tiderace daemon`](#tiderace-daemon-startstatusstop-path--a-warm-image-for-run)),
+When a daemon is serving `<path>` (see [`tiderace daemon`](#tiderace-daemon-startstatusstop-path-a-warm-image-for-run)),
 the `run` is handed to it instead and the header says `via daemon`: the same results, the same
 report and exit code, but the workers fork from an image that already imported the suite. `-k`,
 `-m` and `--strict-markers` travel with the request and are applied by those workers after the

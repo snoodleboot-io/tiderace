@@ -84,7 +84,11 @@ The pattern is identical anywhere — cache one path, run the daemon:
 
 ## What *not* to use in CI
 
-`tiderace-daemon watch` and the long-lived `serve` session are **local-development** tools — they
+`tiderace run tests/` is a third option for a gate: the whole suite as pytest would run it, the
+pytest-style exit code, `--report` for the JSON, and no state written but durations. Set
+`TIDERACE_NO_DAEMON=1` in CI so it never picks up a developer's daemon on a shared machine.
+
+`tiderace-daemon watch`, `tiderace daemon start` and the long-lived `serve` session are **local-development** tools — they
 keep a warm process and share interpreter state across runs, which suits an editor loop, not a
 one-shot CI job. CI should use a fresh `run` (impact-aware) or `run --all` (full). See
 [Watch Mode](watch.md).
