@@ -80,6 +80,15 @@ fn write_project() -> PathBuf {
          def test_delta_two():\n    assert True\n",
     )
     .unwrap();
+    // And a directory without one: a `Dir` on pytest 8; on pytest 7 no node at all, and the
+    // module is named `integration/test_epsilon.py` — matched the same way (TID-100).
+    let integration = tests.join("integration");
+    std::fs::create_dir_all(&integration).unwrap();
+    std::fs::write(
+        integration.join("test_epsilon.py"),
+        "def test_epsilon():\n    assert True\n",
+    )
+    .unwrap();
     std::fs::write(
         tests.join("test_beta.py"),
         "import pytest\n\n\
@@ -164,7 +173,9 @@ fn k_selects_exactly_what_pytest_selects() {
         "inherited",            // an inherited method, collected as its class (TID-74)
         "unit", // a directory below the rootdir, as pytest's chain names it (TID-100)
         "unit and not delta_two",
-        "not unit", // and its absence
+        "not unit",    // and its absence
+        "integration", // a directory with no `__init__.py`
+        "integration or unit",
     ] {
         let want = pytest_selects(&python, &tests, expr);
         assert!(
