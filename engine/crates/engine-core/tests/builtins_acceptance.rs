@@ -93,6 +93,26 @@ def test_capfd_captures_fd_writes(capfd):
 def test_caplog_records_carry_messages(caplog):
     logging.getLogger(\"probe\").warning(\"span finish\")
     assert any(\"span finish\" in rec.message for rec in caplog.records)
+
+
+LONELY = logging.getLogger(\"probe.lonely\")  # exists before capture starts, as pytest requires
+LONELY.propagate = False
+
+
+def test_caplog_leaves_the_root_level_alone(caplog):
+    # pytest parity (TID-97): an unconfigured root sits at WARNING, so a DEBUG record is dropped
+    # before any handler sees it — `assert not caplog.messages` must hold against a library that
+    # logs at DEBUG. `set_level` is how a test asks for more, and it is undone at teardown.
+    logging.getLogger(\"probe.quiet\").debug(\"dropped at the root's level\")
+    assert caplog.records == []
+    caplog.set_level(logging.DEBUG)
+    logging.getLogger(\"probe.quiet\").debug(\"now captured\")
+    assert caplog.messages == [\"now captured\"]
+
+
+def test_caplog_hears_a_non_propagating_logger(caplog):
+    LONELY.warning(\"heard directly\")
+    assert \"heard directly\" in caplog.messages
 ";
 
 /// Every builtin the shim advertises. Named explicitly so *adding* one without covering it is a
@@ -123,7 +143,11 @@ fn every_builtin_provider_resolves_and_tears_down() {
     };
     let dir = write_corpus("run");
     let items = RegexCollector::new().collect(&dir).expect("collection");
-    assert_eq!(items.len(), 6, "one test per builtin, plus the undo check");
+    assert_eq!(
+        items.len(),
+        8,
+        "one test per builtin, the undo check, and caplog's two parity checks"
+    );
 
     // `pool_size = 1` and the no-fork tier on purpose: the monkeypatch-undo assertion is only
     // meaningful if the previous test's teardown ran in *this* process. Under fork each child is a
