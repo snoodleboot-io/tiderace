@@ -77,7 +77,7 @@ interleaved rounds after a discarded warm-up, medians.
 | cachetools | 215 | 0 | 0 |
 | click | 589 + 1 xfail + 21 skipped | 0 | 0 |
 | flask | 475 + 4 failed + 3 error + 2 skipped (both sides) | 0 | 0 |
-| anyio | 1,479 | 10 tiderace-only failures, 8 of them `pytester`'s `testdir` (the plugin-host boundary) | 0 |
+| anyio | 1,479 | 8 tiderace-only failures, every one `pytester`'s `testdir` (the plugin-host boundary) | 0 |
 
 The click and flask "skipped" rows read as tiderace-only until [TID-88](https://linear.app/snoodleboot/issue/TID-88):
 `nodediff.py` took pytest's side from `-rA`, whose summary folds every skip into a `SKIPPED [16]
