@@ -56,6 +56,10 @@ fn a_keyword_run_that_selects_nothing_does_not_turn_the_suite_deselected() {
         skip_live("no Python interpreter available");
         return;
     };
+    // Footprints are what an impacted run reads to know an edit matters; `tiderace-daemon run`
+    // sets this itself, a handler built here does not.
+    // SAFETY: this binary holds one test; nothing else reads the environment concurrently.
+    unsafe { std::env::set_var("TIDERACE_COVERAGE", "1") };
     let dir = std::env::temp_dir().join(format!("tiderace_t92_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -110,5 +114,30 @@ fn a_keyword_run_that_selects_nothing_does_not_turn_the_suite_deselected() {
     assert_eq!(warm.results.len(), 3, "{:?}", warm.results);
     assert_eq!(warm.ran, 0);
     assert_eq!(warm.cached, 3);
+
+    // An edit, then a `-k` that does not select the edited test: the filtered run must not
+    // re-baseline the edited file's hash, or the impacted run after it would serve test_three's
+    // stale pass from cache (TID-94). It re-runs it and reports the new failure.
+    std::fs::write(
+        dir.join("test_b.py"),
+        "def test_three():\n    assert False\n",
+    )
+    .unwrap();
+    match handler.handle(RpcRequest::RunFull {
+        keyword: Some("test_one".into()),
+        marker: None,
+        strict_markers: false,
+    }) {
+        RpcResponse::RanFull { results } => assert_eq!(results.len(), 1, "{results:?}"),
+        other => panic!("expected RanFull, got {other:?}"),
+    }
+    let after_edit = handler.run_impacted().expect("impacted run after the edit");
+    assert_eq!(after_edit.ran, 1, "{:?}", after_edit.results);
+    let three = after_edit
+        .results
+        .iter()
+        .find(|r| r.node_id.ends_with("test_three"))
+        .expect("test_three reported");
+    assert_eq!(three.outcome, "failed", "{:?}", after_edit.results);
     let _ = std::fs::remove_dir_all(&dir);
 }

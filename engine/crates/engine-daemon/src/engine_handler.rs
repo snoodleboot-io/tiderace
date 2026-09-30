@@ -226,9 +226,15 @@ impl EngineHandler {
         must_fork: &HashSet<String>,
         durations: &HashMap<String, u64>,
         full_run: bool,
+        collected: Option<Vec<TestItem>>,
     ) -> Result<Vec<TestResult>, String> {
         let mut phase = PhaseTimer::start("run_items");
-        let all = self.collect()?;
+        // A caller that already collected the tree hands it over (TID-94): a full run collected
+        // it for its candidates a moment ago, and collection is a walk of every test file.
+        let all = match collected {
+            Some(items) => items,
+            None => self.collect()?,
+        };
         phase.mark("collect items");
         let items: Vec<TestItem> = if requested.is_empty() {
             all
@@ -341,14 +347,11 @@ impl EngineHandler {
         // pool. Sub-interpreters are the only parallelism Windows (no fork) has. Off ⇒ fork pool only.
         // Every collected node id: what the planner will be asked about next time, so a candidate
         // that executes and produces nothing can be recorded as deselected (TID-73).
-        let all_candidates: Vec<String> = self
-            .collect()?
-            .iter()
-            .map(|i| i.node_id.to_string())
-            .collect();
+        let collected = self.collect()?;
+        let all_candidates: Vec<String> = collected.iter().map(|i| i.node_id.to_string()).collect();
         phase.mark("collect candidates");
         let fresh = if subinterp_enabled() {
-            let items = self.collect()?;
+            let items = collected;
             let modules: Vec<String> = {
                 let mut m: Vec<String> = items.iter().map(|it| module_of(&it.node_id)).collect();
                 m.sort();
@@ -379,21 +382,25 @@ impl EngineHandler {
                     &must_fork,
                     &durations,
                     true,
+                    None,
                 )?);
             }
             fresh
         } else {
-            self.run_items_parallel(&[], &trusted, &must_fork, &durations, true)?
+            self.run_items_parallel(&[], &trusted, &must_fork, &durations, true, Some(collected))?
         };
         phase.mark("run");
         // A filtered run (TID-90) learns nothing about deselection: every unselected node
         // produces nothing by design, which is indistinguishable from an `addopts` deselection
         // (TID-73) — and recording it as one would make the next warm run skip the suite (TID-92).
         let unfiltered = self.selection.as_ref().is_none_or(|s| s.is_empty());
-        self.persist_results(&mut state, &all_candidates, &fresh, unfiltered);
-        state
-            .save(&state_path)
-            .map_err(|e| format!("state save failed: {e}"))?;
+        // Saved only when the run changed something (TID-94): a `-k` that selected nothing
+        // records nothing, and the state is a few megabytes.
+        if self.persist_results(&mut state, &all_candidates, &fresh, unfiltered) {
+            state
+                .save(&state_path)
+                .map_err(|e| format!("state save failed: {e}"))?;
+        }
         phase.mark("persist");
         Ok(fresh)
     }
@@ -422,7 +429,8 @@ impl EngineHandler {
         executed: &[String],
         results: &[TestResult],
         learn_deselection: bool,
-    ) {
+    ) -> bool {
+        let mut changed = !results.is_empty();
         state.record_durations(results); // TID-62: the next run's scheduler weights
                                          // A candidate that ran and produced nothing is one the project's own `addopts` deselects
                                          // or ignores: the shim answers it with an empty expansion, so it never had a record, so
@@ -450,7 +458,11 @@ impl EngineHandler {
                     .is_some_and(|rec| rec.outcome == DESELECTED)
             {
                 state.tests.remove(cand);
+                changed = true;
             }
+        }
+        if !deselected.is_empty() {
+            changed = true;
         }
         for cand in deselected {
             let mut deps = vec![engine_core::runner::locality_key(&cand)];
@@ -506,7 +518,14 @@ impl EngineHandler {
                 },
             );
         }
-        self.rebaseline_hashes(state);
+        // The dependency hashes move to "as of now" only after an unfiltered run (TID-94): a
+        // filtered run re-ran only what it selected, and re-baselining then would mark an edited
+        // file as current while the tests that depend on it still carry the verdicts from before
+        // the edit — the next impacted run would serve them from cache.
+        if learn_deselection {
+            self.rebaseline_hashes(state);
+        }
+        changed
     }
 
     /// **Impact-aware run** (the warm-mode gap): load persisted state, re-run only the tests whose
@@ -610,6 +629,7 @@ impl EngineHandler {
                     &disturbers,
                     &durations,
                     false,
+                    None,
                 )?;
                 for r in &fresh {
                     results.push(to_rpc(r.clone()));
