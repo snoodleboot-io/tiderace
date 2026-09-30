@@ -98,10 +98,12 @@ pub(crate) fn run_batch_lost<T: ShimTransport + ?Sized>(
         // TID-33: a test recorded as disturbing interpreter state never takes the in-process ladder
         // again. The shim still catches a first offence at runtime and re-runs it forked, but that
         // costs a wasted in-process run every time; this is what stops paying it repeatedly.
-        let force_no_fork = force_no_fork && !must_fork.contains(item.node_id.as_str());
+        let recorded_disturber = must_fork.contains(item.node_id.as_str());
+        let force_no_fork = force_no_fork && !recorded_disturber;
         req.force_no_fork = force_no_fork; // optimistic no-fork; the shim forks non-restorable modules
-                                           // TID-1: a recorded-pure, unchanged test runs BARE no-fork (skip the snapshot). Only meaningful
-                                           // on a no-fork request; the shim ignores it otherwise.
+        req.must_fork = recorded_disturber; // TID-96: the shim gives it the module-child route
+                                            // TID-1: a recorded-pure, unchanged test runs BARE no-fork (skip the snapshot). Only meaningful
+                                            // on a no-fork request; the shim ignores it otherwise.
         req.trusted_pure = force_no_fork && trusted.contains(item.node_id.as_str());
         let start = Instant::now();
         let resp = match transport.exchange(&req) {

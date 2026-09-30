@@ -33,6 +33,12 @@ pub struct ExecRequest<'a> {
     /// still forks if the module isn't snapshot-restorable (soundness). `false` ⇒ byte-identical frame.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force_no_fork: bool,
+    /// This test is a *recorded state-disturber* (TID-33): it must not take the in-process tier.
+    /// Said explicitly so the shim can route it the way it routes an opaque module — one forked
+    /// child per module, tests in file order, a class's `setUpClass` once — rather than a fork
+    /// per test, which paid that set-up once per method (TID-96). `false` ⇒ byte-identical frame.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub must_fork: bool,
     /// This test is *recorded pure and unchanged* (TID-1): run it BARE no-fork — skip the snapshot/restore
     /// entirely. Only ever set for a `force_no_fork` request. `false` ⇒ byte-identical frame.
     ///
@@ -57,6 +63,7 @@ impl<'a> ExecRequest<'a> {
             fixture_args: FixtureArgs::new(),
             force_no_fork: false,
             trusted_pure: false,
+            must_fork: false,
         }
     }
 

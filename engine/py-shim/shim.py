@@ -3212,7 +3212,7 @@ class Engine:
         _restore_state(guard["state"])
 
     def run(self, node_id: str, style: str, deadline_ms: int, force_no_fork: bool = False,
-            trusted_pure: bool = False) -> dict:
+            trusted_pure: bool = False, recorded_must_fork: bool = False) -> dict:
         # `force_no_fork`: run THIS test in-process (no fork). On a trivial test that is ~90× cheaper than a
         # fork; on a real suite the win is smaller and depends on the parent's size (TID-18, TID-41).
         # The caller asserts it's pure (purity guard); the guard re-checks and flags any escapee.
@@ -3238,7 +3238,8 @@ class Engine:
                     "skip_origin": module_key}
         if style in ("inherited_methods", "unresolved_class"):
             return self._run_inherited(node_id, deadline_ms, force_no_fork, trusted_pure,
-                                       own_too=style == "unresolved_class")
+                                       own_too=style == "unresolved_class",
+                                       recorded_must_fork=recorded_must_fork)
         # A `@pytest.fixture` whose name starts with `test` (anyio's `TestAsyncFile.testdata`) is
         # what the regex collector cannot tell from a test; pytest never collects it. Reported as
         # an empty expansion, like a deselected node: absent from the tally (TID-88).
@@ -3359,6 +3360,25 @@ class Engine:
                 must_fork = True
             if must_fork:
                 force_no_fork = False
+        # A recorded state-disturber (TID-33) is denied the in-process tier the same way, and takes
+        # the same route as an opaque module below (TID-96). It used to fall through to a fork per
+        # test, each child a fresh process in which a unittest class's `setUpClass` had not run —
+        # pirn-agents' cross-process replay class paid its 5s set-up seven times, where pytest and
+        # the module child pay it once. With the ladder off (`TIDERACE_FORCE_FORK=1`) nothing is
+        # recorded as a disturber, so that mode keeps its fork per test.
+        if recorded_must_fork and self.restore and not self.no_fork:
+            must_fork = True
+            force_no_fork = False
+        # And a module child already open for this file takes the rest of the file: only the
+        # method that left the thread behind is recorded, its siblings arrive unflagged, and sending
+        # them back to the worker would run them in a second process — a unittest class's
+        # `setUpClass` a second time. TID-80 made the child the boundary between modules; a file
+        # whose tests are split across two processes is what pytest never does (TID-96).
+        if (self._module_child is not None and not self._in_module_child and _FORK_AVAILABLE
+                and self._module_child.module_key == module_key and self.restore
+                and not self.no_fork):
+            must_fork = True
+            force_no_fork = False
         # An opaque module's tests run in ONE forked child, sequentially, for as long as the batch
         # stays on that module (TID-80). Forking per test kept the module's own tests apart, which
         # pytest never does: an object one test put into a module-scoped moto mock was gone for the
@@ -3577,7 +3597,8 @@ class Engine:
         return _note_import_history(resp)
 
     def _run_inherited(self, node_id: str, deadline_ms: int, force_no_fork: bool,
-                       trusted_pure: bool, own_too: bool = False) -> dict:
+                       trusted_pure: bool, own_too: bool = False,
+                       recorded_must_fork: bool = False) -> dict:
         """Run the test methods a class INHERITS rather than defines (TID-26).
 
         Collection scans source text, so `class TestKuzuConformance(GraphStoreConformance)` looks
@@ -3620,7 +3641,7 @@ class Engine:
         for name in inherited:
             child = f"{module_key}::{cls_name}::{name}"
             started = time.perf_counter()
-            res = self.run(child, style, deadline_ms, force_no_fork, trusted_pure)
+            res = self.run(child, style, deadline_ms, force_no_fork, trusted_pure, recorded_must_fork)
             # A parametrized inherited method expands again; splice its cases in rather than nesting.
             if res.get("variants"):
                 variants.extend(res["variants"])
@@ -5631,7 +5652,8 @@ def _fork_pool_workers(size: int, socket_path: str, engine_args: dict,
                     _write_frame(
                         _STDOUT,
                         engine.run(req["node_id"], req["style"], req.get("deadline_ms", 5000),
-                                   req.get("force_no_fork", False), req.get("trusted_pure", False)),
+                                   req.get("force_no_fork", False), req.get("trusted_pure", False),
+                                   req.get("must_fork", False)),
                     )
             finally:
                 engine.teardown_all()
@@ -5692,7 +5714,8 @@ def serve() -> int:
             _write_frame(
                 _STDOUT,
                 engine.run(req["node_id"], req["style"], req.get("deadline_ms", 5000),
-                           req.get("force_no_fork", False), req.get("trusted_pure", False)),
+                           req.get("force_no_fork", False), req.get("trusted_pure", False),
+                           req.get("must_fork", False)),
             )
     finally:
         engine.teardown_all()
