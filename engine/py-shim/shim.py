@@ -4715,7 +4715,12 @@ def _config_sections(config_dir: str):
                 import tomllib
                 with open(path, "rb") as fh:
                     tool = tomllib.load(fh).get("tool", {})
-                sections = [tool.get("pytest", {}).get("ini_options", {}), tool.get("tiderace", {})]
+                pytest_tool = tool.get("pytest") if isinstance(tool.get("pytest"), dict) else {}
+                # `[tool.pytest.ini_options]`, then pytest 9's native `[tool.pytest]` table — the
+                # same keys, typed (TID-100) — then `[tool.tiderace]`.
+                sections = [pytest_tool.get("ini_options") or {},
+                            {k: v for k, v in pytest_tool.items() if k != "ini_options"},
+                            tool.get("tiderace", {})]
             else:
                 import configparser
                 parser = configparser.ConfigParser()
