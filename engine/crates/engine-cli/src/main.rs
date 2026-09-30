@@ -571,35 +571,22 @@ fn cmd_run(
         },
     };
 
-    let items = match RegexCollector::new().collect(root) {
-        Ok(items) => items,
-        Err(e) => {
-            eprintln!("error: collection failed: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // Pick up what earlier runs learned. The daemon writes these verdicts; `run` reads them and
-    // writes nothing, so a one-shot command never mutates the tree and never needs coverage capture
-    // turned on — the dependency footprints that keep a purity verdict honest are already recorded,
-    // and checking them is a re-hash.
-    //
-    let (effective, learned) = effective_plan(plan, items.len(), root);
-
     // A daemon serving this root runs it from its warm image (TID-84): the same results, reported
-    // here the same way, and the daemon persists durations and verdicts itself. No daemon, or one
-    // that refuses, and the run happens in this process as before.
+    // here the same way, and the daemon persists durations and verdicts itself. Asked first, so a
+    // run it serves never walks the tree here (TID-94). No daemon, or one that refuses, and the
+    // run happens in this process as before.
     let t_daemon = std::time::Instant::now();
     let via_daemon = daemon.and_then(|selection| daemon_run(root, selection));
     if std::env::var_os("TIDERACE_TIMING").is_some() {
         eprintln!(
-            "tiderace: timing: cli: collect+plan {}ms, daemon round trip {}ms",
+            "tiderace: timing: cli: before daemon {}ms, daemon round trip {}ms",
             t_daemon.duration_since(t_start).as_millis(),
             t_daemon.elapsed().as_millis()
         );
     }
     let results = match via_daemon {
         Some(Ok(results)) => {
+            let (effective, learned) = effective_plan(plan, results.len(), root);
             eprintln!("tiderace: {}{learned} via daemon", effective.header());
             results
         }
@@ -608,6 +595,19 @@ fn cmd_run(
             return ExitCode::FAILURE;
         }
         None => {
+            let items = match RegexCollector::new().collect(root) {
+                Ok(items) => items,
+                Err(e) => {
+                    eprintln!("error: collection failed: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            // Pick up what earlier runs learned. The daemon writes these verdicts; `run` reads
+            // them and writes nothing, so a one-shot command never mutates the tree and never
+            // needs coverage capture turned on — the dependency footprints that keep a purity
+            // verdict honest are already recorded, and checking them is a re-hash.
+            let (effective, learned) = effective_plan(plan, items.len(), root);
             eprintln!("tiderace: {}{learned}", effective.header());
 
             // `&effective`, not `plan`: the header and the run must describe the same thing. They
