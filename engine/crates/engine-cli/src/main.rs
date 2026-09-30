@@ -48,8 +48,10 @@ Options for `run`:
                           Matches pytest marks and tiderace tags alike, and overrides any -m the
                           project sets in its own addopts
   -k, --keyword <EXPR>    run only tests whose name matches, e.g. 'TestClient and not slow'.
-                          Case-insensitive substrings of the file, class, function and case
-                          id, as pytest's -k; overrides any -k in the project's addopts
+                          Case-insensitive substrings of the directories below the rootdir,
+                          the file, class, function, case id and mark names, as pytest's -k
+                          (so -k unit runs tests/unit/); overrides any -k in the project's
+                          addopts
       --report <PATH>     also write a machine-readable JSON run report to PATH: one record per
                           node with its id, outcome, duration and flags. Compare runs by node id;
                           tallies hide two errors that cancel
