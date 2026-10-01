@@ -174,8 +174,8 @@ interleaved rounds after a discarded warm-up, medians.
 | -- | --: | --: | -- |
 | fx_corpus | 511 | 0 | 0 |
 | pirn-data | 1,463 | 0 | 0 |
-| pirn-core | 5,036 | 0 | pytest's `addopts` deselections (tiderace reports them as skipped) |
-| pirn-agents | 4,652 | 0 | the same |
+| pirn-core | 5,036 | 0 | 522 tests in 47 modules that skip at import (`pytest.importorskip`): pytest counts each module as one skip, tiderace reports every test in it — 91 skipped against 566, the same 47 modules. The 32 tests the project's `addopts -m` deselects are absent on both sides |
+| pirn-agents | 4,652 | 0 | 0 |
 | cachetools | 215 | 0 | 0 |
 | click | 589 + 1 xfail + 21 skipped | 0 | 0 |
 | flask | 475 + 4 failed + 3 error + 2 skipped (both sides) | 0 | 0 |
