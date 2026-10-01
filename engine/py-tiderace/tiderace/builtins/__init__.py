@@ -25,6 +25,7 @@ import tiderace
 
 from ._capture import Capfd, Capsys, CaptureResult
 from ._config import NullPluginManager, RunConfig
+from ._pytester import pytester, testdir
 from ._logging import CapLog
 from ._monkeypatch import MonkeyPatch
 from ._paths import TmpPath
@@ -51,6 +52,8 @@ __all__ = [
     "tmpdir_factory",
     "TmpPathFactory",
     "pytestconfig",
+    "pytester",
+    "testdir",
     "providers",
 ]
 
@@ -237,4 +240,4 @@ def tmpdir_factory(tmp_path_factory) -> _TmpdirFactory:
 def providers() -> list:
     """The builtin provider callables, for the shim to register globally (always-available)."""
     return [monkeypatch, tmp_path, capsys, capfd, caplog, recwarn, tmpdir, tmp_path_factory,
-            tmpdir_factory, pytestconfig]
+            tmpdir_factory, pytestconfig, pytester, testdir]
