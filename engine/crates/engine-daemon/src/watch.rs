@@ -5,8 +5,8 @@ use std::time::Duration;
 use engine_core::cache::Cache;
 
 use crate::fs_watcher::{Debouncer, FsWatcher};
-use crate::rpc_method::{RpcRequest, RpcResponse};
-use crate::rpc_server::RpcHandler;
+use crate::rpc::method::{RpcRequest, RpcResponse};
+use crate::rpc::server::RpcHandler;
 use crate::session::{ChangeOutcome, Session};
 
 /// What `tiderace watch` did in response to one edit (the visible inner-loop result).
@@ -113,7 +113,7 @@ mod tests {
     }
     impl RpcHandler for FakeHandler {
         fn handle(&mut self, request: RpcRequest) -> RpcResponse {
-            use crate::rpc_method::RpcResult;
+            use crate::rpc::method::RpcResult;
             let tag = match &request {
                 RpcRequest::Run { node_ids } => format!("run:{}", node_ids.len()),
                 RpcRequest::Recycle => "recycle".to_string(),

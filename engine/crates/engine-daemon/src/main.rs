@@ -245,10 +245,9 @@ fn cmd_watch(root: &Path, handler: &mut EngineHandler) -> ExitCode {
 
 #[cfg(unix)]
 fn cmd_serve(handler: &mut EngineHandler) -> ExitCode {
-    // Per project: `tiderace run` looks here for a live daemon (TID-84). `TIDERACE_SOCKET` overrides.
-    let path = std::env::var("TIDERACE_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| engine_daemon::daemon_socket_path(handler.root()));
+    // Per project: `tiderace run` looks here for a live daemon (TID-84); `TIDERACE_SOCKET`
+    // overrides, through the configuration.
+    let path = handler.config().socket_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }

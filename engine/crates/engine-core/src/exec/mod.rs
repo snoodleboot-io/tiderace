@@ -38,7 +38,7 @@ pub use memory_governor::MemoryGovernor;
 pub use process::{reap_lost, BudgetedReader, ShimLaunch, ShimMode, ShimProcess, ShimTarget};
 pub use results::NotRun;
 pub use safe_set_cache::{SafeModule, SafeSetCache};
-pub use selection::{KeywordExpr, Selection};
+pub use selection::{KeywordExpr, Selection, SelectionEnvGuard};
 pub use shim_protocol::{read_frame, write_frame, ExecRequest, ExecResponse};
 pub use tier::{LaneSeed, TierFactory, WarmImage, WorkerStrategy};
 pub use tiers::fork::ForkWorker;

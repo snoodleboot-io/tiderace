@@ -82,6 +82,27 @@ pub fn run_parallel_with_pool_notes(
     )
 }
 
+/// [`run_parallel_with_notes`], forking this run's workers off `warm` when it holds an image
+/// (TID-84). The handle is a plain type on every platform, so a caller that may or may not hold
+/// an image — the daemon — carries it without a `cfg` of its own.
+pub fn run_parallel_warm_notes(
+    python: &str,
+    shim: &Path,
+    root: &Path,
+    items: Vec<TestItem>,
+    plan: &RunPlan,
+    learned: &Learned,
+    warm: WarmImage<'_>,
+) -> Result<RunOutcome> {
+    run_with(
+        &ShimTarget::new(python, shim, root),
+        items,
+        plan,
+        learned,
+        warm,
+    )
+}
+
 /// The run: the tier claims what it runs itself, the scheduler partitions the rest into units,
 /// the tier prepares for the lane count, and one lane per thread drains the queue. The runner
 /// knows the tier only as a [`TierFactory`](crate::exec::TierFactory); which tier, and what it
