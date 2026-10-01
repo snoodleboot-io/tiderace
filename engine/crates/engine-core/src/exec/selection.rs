@@ -22,6 +22,102 @@ impl Selection {
     pub fn is_empty(&self) -> bool {
         self.keyword.is_none() && self.marker.is_none() && !self.strict_markers
     }
+
+    /// The environment variables the shim reads a selection from at start-up — the one spelling
+    /// of the three names (TID-119).
+    pub const ENV_KEYS: [&'static str; 3] = [
+        "TIDERACE_KEYWORD_EXPR",
+        "TIDERACE_MARKER_EXPR",
+        "TIDERACE_STRICT_MARKERS",
+    ];
+
+    /// The selection as the shim would read it from this process's environment.
+    pub fn from_env() -> Self {
+        Self {
+            keyword: std::env::var("TIDERACE_KEYWORD_EXPR").ok(),
+            marker: std::env::var("TIDERACE_MARKER_EXPR").ok(),
+            strict_markers: std::env::var("TIDERACE_STRICT_MARKERS").as_deref() == Ok("1"),
+        }
+    }
+
+    /// The three variables and the values this selection gives them; `None` unsets.
+    pub fn env_vars(&self) -> [(&'static str, Option<String>); 3] {
+        [
+            (Self::ENV_KEYS[0], self.keyword.clone()),
+            (Self::ENV_KEYS[1], self.marker.clone()),
+            (
+                Self::ENV_KEYS[2],
+                self.strict_markers.then(|| "1".to_string()),
+            ),
+        ]
+    }
+
+    /// Put this selection in the process environment for a shim launched now, restoring what
+    /// was there when the guard drops — so one run's `-k` never leaks into the next request or
+    /// a later image launch (TID-90).
+    ///
+    /// # Safety
+    ///
+    /// Writes the process environment: the caller must be the only thread reading it until the
+    /// guard drops (the CLI before it spawns workers; the daemon serving one request at a time).
+    pub unsafe fn apply_env(&self) -> SelectionEnvGuard {
+        let saved = Self::ENV_KEYS
+            .iter()
+            .map(|k| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in self.env_vars() {
+            // SAFETY: the caller's contract, above.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        SelectionEnvGuard { saved }
+    }
+}
+
+impl Selection {
+    /// As [`apply_env`](Self::apply_env), but writes only what this selection sets and leaves the
+    /// rest as the environment has it — the CLI's semantics, where an absent `-k` must not unset
+    /// a `TIDERACE_KEYWORD_EXPR` the user exported.
+    ///
+    /// # Safety
+    ///
+    /// As [`apply_env`](Self::apply_env).
+    pub unsafe fn apply_env_set_only(&self) -> SelectionEnvGuard {
+        let saved = Self::ENV_KEYS
+            .iter()
+            .map(|k| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in self.env_vars() {
+            if let Some(v) = value {
+                // SAFETY: the caller's contract.
+                unsafe { std::env::set_var(key, v) };
+            }
+        }
+        SelectionEnvGuard { saved }
+    }
+}
+
+/// Restores the selection variables to what they were before [`Selection::apply_env`].
+pub struct SelectionEnvGuard {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl Drop for SelectionEnvGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..) {
+            // SAFETY: the same contract as `apply_env`, whose caller holds this guard.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 }
 
 /// pytest's `-k` expression, parsed (TID-102): identifiers, `and`, `or`, `not` and parentheses,

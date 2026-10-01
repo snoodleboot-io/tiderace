@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 
-use crate::rpc_method::{RpcRequest, RpcResponse};
+use crate::rpc::method::{RpcRequest, RpcResponse};
 
 /// Handles one decoded RPC request, producing a response. The daemon implements this over its warm
 /// state (session/wellspring/cache); tests implement it as a pure double. Keeping it a trait makes the
@@ -61,7 +61,7 @@ pub fn read_frame<R: Read, T: serde::de::DeserializeOwned>(r: &mut R) -> io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc_method::RpcResult;
+    use crate::rpc::method::RpcResult;
 
     /// An in-memory bidirectional stream: serves preloaded request frames, captures written responses.
     struct Duplex {
