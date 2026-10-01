@@ -1,14 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::domain::{NodeId, TestItem, TestResult};
 use crate::error::{EngineError, Result};
+use crate::exec::RunKnobs;
 #[cfg(unix)]
 use crate::exec::{ForkWorker, PooledWorker, WellspringPool};
 use crate::exec::{SafeSetCache, ShimTarget, SubInterpWorker, SubprocessWorker, Worker};
-use crate::runner::{RunNotes, RunOutcome, RunPlan, WorkerStrategy};
+use crate::runner::{Learned, RunNotes, RunOutcome, RunPlan, Sharding, WorkerStrategy};
 use crate::scheduler::{ScheduleInput, ScheduledTest};
 
 /// Run `items` across a pool of workers in parallel, using the tier and scheduler named by `plan`
@@ -27,8 +28,9 @@ pub fn run_parallel(
     root: &Path,
     items: Vec<TestItem>,
     plan: &RunPlan,
+    learned: &Learned,
 ) -> Result<Vec<TestResult>> {
-    run_parallel_with_notes(python, shim, root, items, plan).map(|o| o.results)
+    run_parallel_with_notes(python, shim, root, items, plan, learned).map(|o| o.results)
 }
 
 /// [`run_parallel`], with the notes the run collected on the way — the memory sizing it
@@ -39,6 +41,7 @@ pub fn run_parallel_with_notes(
     root: &Path,
     items: Vec<TestItem>,
     plan: &RunPlan,
+    learned: &Learned,
 ) -> Result<RunOutcome> {
     if items.is_empty() {
         return Ok(RunOutcome::default());
@@ -55,6 +58,7 @@ pub fn run_parallel_with_notes(
             &ShimTarget::new(python, shim, root),
             items,
             plan,
+            learned,
             &mut notes,
         )?
     } else {
@@ -62,6 +66,7 @@ pub fn run_parallel_with_notes(
             &ShimTarget::new(python, shim, root),
             items,
             plan,
+            learned,
             plan.strategy,
             None,
             &mut notes,
@@ -91,9 +96,10 @@ pub fn run_parallel_with_pool(
     root: &Path,
     items: Vec<TestItem>,
     plan: &RunPlan,
+    learned: &Learned,
     pool: &mut WellspringPool,
 ) -> Result<Vec<TestResult>> {
-    run_parallel_with_pool_notes(python, shim, root, items, plan, pool).map(|o| o.results)
+    run_parallel_with_pool_notes(python, shim, root, items, plan, learned, pool).map(|o| o.results)
 }
 
 /// [`run_parallel_with_pool`], with the run's notes (TID-115).
@@ -104,6 +110,7 @@ pub fn run_parallel_with_pool_notes(
     root: &Path,
     items: Vec<TestItem>,
     plan: &RunPlan,
+    learned: &Learned,
     pool: &mut WellspringPool,
 ) -> Result<RunOutcome> {
     let mut notes = RunNotes::default();
@@ -111,6 +118,7 @@ pub fn run_parallel_with_pool_notes(
         &ShimTarget::new(python, shim, root),
         items,
         plan,
+        learned,
         WorkerStrategy::Fork,
         Some(pool),
         &mut notes,
@@ -122,6 +130,7 @@ fn run_batched(
     target: &ShimTarget,
     items: Vec<TestItem>,
     plan: &RunPlan,
+    learned: &Learned,
     strategy: WorkerStrategy,
     #[cfg(unix)] warm: Option<&mut WellspringPool>,
     #[cfg(not(unix))] warm: Option<()>,
@@ -144,7 +153,7 @@ fn run_batched(
     // suite whose per-test cost spans four orders of magnitude. The recorded weight is what turns
     // the queue's order from "most tests first" into "most time first", which is what keeps a heavy
     // module off the tail of the run.
-    let recorded = RecordedWeights::new(&plan.durations);
+    let recorded = RecordedWeights::new(&learned.durations);
     let scheduled: Vec<ScheduledTest> = items
         .iter()
         .map(|i| {
@@ -155,10 +164,10 @@ fn run_batched(
             )
         })
         .collect();
-    let units = plan
-        .scheduler
-        .build()
-        .units(&ScheduleInput::new(scheduled, workers).with_module_sharding(plan.shard_modules));
+    let units = plan.scheduler.build().units(
+        &ScheduleInput::new(scheduled, workers)
+            .with_module_sharding(plan.sharding == Sharding::SplitModules),
+    );
 
     // The queue. `units` come heaviest first and `pop` takes from the back, so the list is built
     // reversed once here rather than searched on every take. Handing out the heaviest unit first is
@@ -193,7 +202,7 @@ fn run_batched(
     // sub-interpreter tiers have no wellspring to share, by construction.
     #[cfg(unix)]
     let mut owned_pool =
-        if warm.is_none() && plan.shared_import && matches!(strategy, WorkerStrategy::Fork) {
+        if warm.is_none() && plan.fork.shared_import && matches!(strategy, WorkerStrategy::Fork) {
             // Launched with restore unconditionally, exactly as `ForkWorker::launch_optimistic` does:
             // it costs nothing when the ladder is off, and it makes the unsound combination — in-process
             // execution with no snapshot — unreachable rather than merely unused.
@@ -222,7 +231,7 @@ fn run_batched(
     if let Some(p) = pool.as_deref_mut() {
         let sizing = super::memory::workers_by_memory(
             threads,
-            plan.workers_explicit,
+            plan.workers.is_explicit(),
             super::memory::process_rss_bytes(p.pid()),
             super::memory::available_memory_bytes(),
             plan.memory_limit_mb.map(|mb| mb << 20),
@@ -234,17 +243,16 @@ fn run_batched(
         p.spawn_workers(threads)?;
     }
 
+    // The whole run's sets, not one unit's slice: a thread runs many units and cannot know in
+    // advance which node ids it will see. Shared by `Arc`, so a thread costs a pointer, not a copy.
     let exec = BatchExec {
         strategy,
-        deadline_ms: plan.deadline_ms,
-        optimistic_no_fork: plan.optimistic_no_fork,
+        knobs: RunKnobs::new(plan.deadline_ms)
+            .with_optimistic_no_fork(plan.fork.ladder)
+            .with_trusted_pure(learned.trusted_pure.clone())
+            .with_must_fork(learned.must_fork.clone()),
     };
     let modules_path = modules_file.path.clone();
-    // The whole run's sets, not one unit's slice: a thread now runs many units and cannot know in
-    // advance which node ids it will see. Membership is what both are used for, so a larger set
-    // costs a hash lookup and nothing else.
-    let trusted: HashSet<NodeId> = plan.trusted_pure.clone();
-    let must_fork: HashSet<NodeId> = plan.must_fork.clone();
 
     // The run's clock for the schedule stamps (TID-78): every unit's start and end is measured
     // from here, so a report can be drawn as one lane per worker.
@@ -255,7 +263,8 @@ fn run_batched(
     let mut handles = Vec::new();
     for worker_index in 0..threads {
         let target = target.clone();
-        let (queue, trusted, must_fork) = (queue.clone(), trusted.clone(), must_fork.clone());
+        let exec = exec.clone();
+        let queue = queue.clone();
         let unit_counter = unit_counter.clone();
         let modules_path = modules_path.clone();
         // A pooled transport is owned outright, so it moves into the thread without borrowing the
@@ -274,18 +283,16 @@ fn run_batched(
                 {
                     match pooled {
                         Some(transport) => Box::new(
-                            PooledWorker::new(transport, exec.deadline_ms)
-                                .with_optimistic_no_fork(exec.optimistic_no_fork)
-                                .with_trusted_pure(trusted)
-                                .with_must_fork(must_fork),
+                            PooledWorker::new(transport, exec.knobs.deadline_ms)
+                                .with_knobs(exec.knobs),
                         ),
-                        None => new_worker(exec, &target, &modules_path, trusted, must_fork)?,
+                        None => new_worker(exec, &target, &modules_path)?,
                     }
                 }
                 #[cfg(not(unix))]
                 {
                     let _ = pooled;
-                    new_worker(exec, &target, &modules_path, trusted, must_fork)?
+                    new_worker(exec, &target, &modules_path)?
                 }
             };
             let mut mine = Vec::new();
@@ -365,6 +372,7 @@ fn run_subinterp_hybrid(
     target: &ShimTarget,
     items: Vec<TestItem>,
     plan: &RunPlan,
+    learned: &Learned,
     notes: &mut RunNotes,
 ) -> Result<Vec<TestResult>> {
     let mut modules: Vec<String> = items.iter().map(|i| i.node_id.file().to_string()).collect();
@@ -401,6 +409,7 @@ fn run_subinterp_hybrid(
             target,
             rest,
             plan,
+            learned,
             plan.strategy.fallback(),
             None,
             notes,
@@ -409,13 +418,12 @@ fn run_subinterp_hybrid(
     Ok(all)
 }
 
-/// The per-batch execution settings, split out so a batch can be handed across a thread boundary as
-/// one `Copy` value instead of a fistful of positional scalars.
-#[derive(Debug, Clone, Copy)]
+/// The per-batch execution settings, split out so a batch can be handed across a thread boundary
+/// as one value instead of a fistful of positional scalars.
+#[derive(Debug, Clone)]
 struct BatchExec {
     strategy: WorkerStrategy,
-    deadline_ms: u64,
-    optimistic_no_fork: bool,
+    knobs: RunKnobs,
 }
 
 /// Build this thread's worker for the named tier, once, to be reused across every unit it takes.
@@ -424,18 +432,8 @@ struct BatchExec {
 /// thread runs an unknown number of units, so construction is separated from execution — otherwise
 /// every module would cost a fresh interpreter on the subprocess tier, which is more than the idle
 /// time the queue removes.
-fn new_worker(
-    exec: BatchExec,
-    target: &ShimTarget,
-    modules: &Path,
-    trusted: HashSet<NodeId>,
-    must_fork: HashSet<NodeId>,
-) -> Result<Box<dyn Worker>> {
-    let BatchExec {
-        strategy,
-        deadline_ms,
-        optimistic_no_fork,
-    } = exec;
+fn new_worker(exec: BatchExec, target: &ShimTarget, modules: &Path) -> Result<Box<dyn Worker>> {
+    let BatchExec { strategy, knobs } = exec;
     match strategy {
         WorkerStrategy::Fork => {
             #[cfg(unix)]
@@ -445,19 +443,16 @@ fn new_worker(
                 Ok(Box::new(
                     ForkWorker::launch_target(
                         target,
-                        optimistic_no_fork,
+                        knobs.optimistic_no_fork,
                         Some(modules),
-                        deadline_ms,
+                        knobs.deadline_ms,
                     )?
-                    .with_trusted_pure(trusted)
-                    .with_must_fork(must_fork),
+                    .with_knobs(knobs),
                 ))
             }
             #[cfg(not(unix))]
             {
-                // The optimistic ladder and the trusted-pure set are fork-only knobs; name them here
-                // so this arm consumes them on platforms where the fork branch is compiled out.
-                let _ = (optimistic_no_fork, trusted, must_fork, modules);
+                let _ = modules;
                 Err(EngineError::Unavailable(
                     "fork is unavailable on this platform".to_string(),
                 ))
@@ -465,15 +460,11 @@ fn new_worker(
         }
         // The no-fork path always snapshots/restores (its only isolation without COW); the fork-only
         // knobs (optimistic ladder, trusted-pure bare no-fork) do not apply.
-        WorkerStrategy::Subprocess => {
-            // Nothing to demote to: this tier runs in-process by configuration, not by guess.
-            let _ = (must_fork, trusted);
-            Ok(Box::new(
-                SubprocessWorker::new(deadline_ms, 1)
-                    .with_shim_target(target.clone())
-                    .with_modules(modules),
-            ))
-        }
+        WorkerStrategy::Subprocess => Ok(Box::new(
+            SubprocessWorker::new(knobs.deadline_ms, 1)
+                .with_shim_target(target.clone())
+                .with_modules(modules),
+        )),
         // Routed before batching; reaching here would mean a nested pool.
         WorkerStrategy::SubInterp => Err(EngineError::Unavailable(
             "the subinterp tier is routed before batching, not per batch".to_string(),
@@ -555,9 +546,9 @@ impl Drop for ModulesFile {
 mod tests {
     use super::{run_parallel, RecordedWeights};
     use crate::domain::NodeId;
-    use crate::runner::RunPlan;
     #[cfg(not(unix))]
     use crate::runner::WorkerStrategy;
+    use crate::runner::{Learned, RunPlan};
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -604,6 +595,7 @@ mod tests {
             Path::new("."),
             Vec::new(),
             &plan,
+            &Learned::default(),
         );
         assert_eq!(out.expect("empty corpus runs"), Vec::new());
     }
@@ -629,6 +621,7 @@ mod tests {
             Path::new("."),
             items,
             &plan,
+            &Learned::default(),
         )
         .expect_err("fork must be refused where it does not exist");
         assert!(

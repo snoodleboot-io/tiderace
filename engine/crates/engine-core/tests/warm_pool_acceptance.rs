@@ -10,7 +10,10 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::WellspringPool;
-use engine_core::runner::{run_parallel_with_pool, RunPlan, SchedulerKind, WorkerStrategy};
+use engine_core::runner::{
+    run_parallel_with_pool, ForkOptions, Learned, RunPlan, SchedulerKind, WorkerCount,
+    WorkerStrategy,
+};
 use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::{Path, PathBuf};
 
@@ -59,16 +62,26 @@ fn a_persistent_parent_imports_once_and_every_run_forks_from_the_clean_image() {
     assert_eq!(imports(&dir), 1, "the launch imported the suite once");
 
     let plan = RunPlan {
-        workers: 1,
+        fork: ForkOptions {
+            shared_import: true,
+            ..ForkOptions::default()
+        },
+        workers: WorkerCount::Default(1),
         strategy: WorkerStrategy::Fork,
         scheduler: SchedulerKind::Locality,
-        shared_import: true,
         ..RunPlan::default()
     };
     for round in 1..=3 {
-        let results =
-            run_parallel_with_pool(&python, &shim(), &tests, items.clone(), &plan, &mut pool)
-                .unwrap_or_else(|e| panic!("run {round}: {e}"));
+        let results = run_parallel_with_pool(
+            &python,
+            &shim(),
+            &tests,
+            items.clone(),
+            &plan,
+            &Learned::default(),
+            &mut pool,
+        )
+        .unwrap_or_else(|e| panic!("run {round}: {e}"));
         assert_eq!(results.len(), 2, "run {round}");
         for r in &results {
             assert_eq!(

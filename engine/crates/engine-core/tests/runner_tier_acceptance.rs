@@ -15,7 +15,9 @@
 
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestResult};
-use engine_core::runner::{run_parallel, RunPlan, SchedulerKind, WorkerStrategy};
+use engine_core::runner::{
+    run_parallel, Learned, RunPlan, SchedulerKind, WorkerCount, WorkerStrategy,
+};
 use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -103,11 +105,18 @@ fn every_available_tier_runs_the_corpus_and_agrees() {
         }
         let plan = RunPlan {
             strategy,
-            workers: 2,
+            workers: WorkerCount::Default(2),
             ..RunPlan::default()
         };
-        let results = run_parallel(&python, &shim(), &dir, items.clone(), &plan)
-            .unwrap_or_else(|e| panic!("TID-17: the {strategy} tier must run the corpus: {e}"));
+        let results = run_parallel(
+            &python,
+            &shim(),
+            &dir,
+            items.clone(),
+            &plan,
+            &Learned::default(),
+        )
+        .unwrap_or_else(|e| panic!("TID-17: the {strategy} tier must run the corpus: {e}"));
         assert_eq!(
             results.len(),
             items.len(),
@@ -153,11 +162,18 @@ fn both_schedulers_agree_on_the_same_corpus() {
     let run = |scheduler: SchedulerKind| {
         let plan = RunPlan {
             scheduler,
-            workers: 3,
+            workers: WorkerCount::Default(3),
             ..RunPlan::default()
         };
-        let results = run_parallel(&python, &shim(), &dir, items.clone(), &plan)
-            .unwrap_or_else(|e| panic!("the {scheduler} scheduler must run the corpus: {e}"));
+        let results = run_parallel(
+            &python,
+            &shim(),
+            &dir,
+            items.clone(),
+            &plan,
+            &Learned::default(),
+        )
+        .unwrap_or_else(|e| panic!("the {scheduler} scheduler must run the corpus: {e}"));
         fingerprint(&results)
     };
 
@@ -181,12 +197,19 @@ fn worker_count_does_not_change_results() {
 
     let run = |workers: usize| {
         let plan = RunPlan {
-            workers,
+            workers: WorkerCount::Default(workers),
             ..RunPlan::default()
         };
         fingerprint(
-            &run_parallel(&python, &shim(), &dir, items.clone(), &plan)
-                .unwrap_or_else(|e| panic!("{workers} worker(s) must run the corpus: {e}")),
+            &run_parallel(
+                &python,
+                &shim(),
+                &dir,
+                items.clone(),
+                &plan,
+                &Learned::default(),
+            )
+            .unwrap_or_else(|e| panic!("{workers} worker(s) must run the corpus: {e}")),
         )
     };
 

@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::domain::{NodeId, TestItem, TestResult};
 use crate::error::Result;
+use crate::exec::knobs::RunKnobs;
 use crate::exec::process::{ShimLaunch, ShimMode, ShimProcess, ShimTarget};
 use crate::exec::transport::{run_batch, Live, PipeTransport, ShimTransport};
 use crate::exec::worker::Worker;
@@ -16,11 +17,7 @@ use crate::exec::worker::Worker;
 pub struct ForkWorker {
     transport: Live,
     process: ShimProcess,
-    deadline_ms: u64,
-    optimistic_no_fork: bool,
-    trusted: HashSet<NodeId>,
-    /// Node ids recorded as disturbing interpreter state — forked even under the ladder (TID-33).
-    must_fork: HashSet<NodeId>,
+    knobs: RunKnobs,
 }
 
 impl ForkWorker {
@@ -87,16 +84,19 @@ impl ForkWorker {
         Ok(Self {
             transport,
             process,
-            deadline_ms,
-            optimistic_no_fork: optimistic,
-            trusted: HashSet::new(),
-            must_fork: HashSet::new(),
+            knobs: RunKnobs::new(deadline_ms).with_optimistic_no_fork(optimistic),
         })
     }
 
     /// Per-test deadline (ms) after which the forked child is killed and reported as `Error`.
     pub fn with_deadline_ms(mut self, ms: u64) -> Self {
-        self.deadline_ms = ms;
+        self.knobs.deadline_ms = ms;
+        self
+    }
+
+    /// Every knob at once.
+    pub fn with_knobs(mut self, knobs: RunKnobs) -> Self {
+        self.knobs = knobs;
         self
     }
 
@@ -104,14 +104,14 @@ impl ForkWorker {
     /// still forks any module it can't snapshot-restore, so isolation is preserved. The wellspring
     /// must have been launched with `TIDERACE_RESTORE=1` (the daemon sets it) for this to be safe.
     pub fn with_optimistic_no_fork(mut self, on: bool) -> Self {
-        self.optimistic_no_fork = on;
+        self.knobs.optimistic_no_fork = on;
         self
     }
 
     /// Node ids known to be *pure and unchanged* (TID-1): each runs BARE no-fork (skip the snapshot).
     /// Only honored together with `with_optimistic_no_fork(true)`.
     pub fn with_trusted_pure(mut self, trusted: HashSet<NodeId>) -> Self {
-        self.trusted = trusted;
+        self.knobs = self.knobs.with_trusted_pure(trusted);
         self
     }
 
@@ -119,7 +119,7 @@ impl ForkWorker {
     /// `with_optimistic_no_fork(true)`. The shim catches a first offence on its own and re-runs it
     /// forked; this is what stops paying for that discovery on every subsequent run.
     pub fn with_must_fork(mut self, must_fork: HashSet<NodeId>) -> Self {
-        self.must_fork = must_fork;
+        self.knobs = self.knobs.with_must_fork(must_fork);
         self
     }
 
@@ -131,15 +131,6 @@ impl ForkWorker {
 
 impl Worker for ForkWorker {
     fn run(&mut self, items: &[TestItem]) -> Result<Vec<TestResult>> {
-        let deadline_ms = self.deadline_ms;
-        let nf = self.optimistic_no_fork;
-        run_batch(
-            &mut self.transport,
-            items,
-            deadline_ms,
-            nf,
-            &self.trusted,
-            &self.must_fork,
-        )
+        run_batch(&mut self.transport, items, &self.knobs)
     }
 }

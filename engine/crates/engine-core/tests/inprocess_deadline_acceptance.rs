@@ -12,7 +12,9 @@
 
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestResult};
-use engine_core::runner::{run_parallel, RunPlan, SchedulerKind, WorkerStrategy};
+use engine_core::runner::{
+    run_parallel, ForkOptions, Learned, RunPlan, SchedulerKind, WorkerCount, WorkerStrategy,
+};
 use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
 
@@ -33,11 +35,14 @@ fn write_corpus(tag: &str, body: &str) -> PathBuf {
 
 fn plan() -> RunPlan {
     RunPlan {
-        workers: 1,
+        fork: ForkOptions {
+            shared_import: true,
+            ..ForkOptions::default()
+        },
+        workers: WorkerCount::Default(1),
         strategy: WorkerStrategy::Fork,
         scheduler: SchedulerKind::Locality,
         deadline_ms: 2_000,
-        shared_import: true,
         ..RunPlan::default()
     }
 }
@@ -61,7 +66,8 @@ fn a_blocking_lock_on_the_in_process_tier_is_a_timeout_and_the_worker_goes_on() 
     );
     let items = RegexCollector::new().collect(&dir).expect("collection");
     let started = std::time::Instant::now();
-    let results = run_parallel(&python, &shim(), &dir, items, &plan()).expect("the run ends");
+    let results = run_parallel(&python, &shim(), &dir, items, &plan(), &Learned::default())
+        .expect("the run ends");
     let elapsed = started.elapsed();
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -105,7 +111,8 @@ fn a_worker_that_cannot_be_interrupted_is_killed_and_its_batch_reported() {
     );
     let items = RegexCollector::new().collect(&dir).expect("collection");
     let started = std::time::Instant::now();
-    let results = run_parallel(&python, &shim(), &dir, items, &plan()).expect("the run ends");
+    let results = run_parallel(&python, &shim(), &dir, items, &plan(), &Learned::default())
+        .expect("the run ends");
     let elapsed = started.elapsed();
     let _ = std::fs::remove_dir_all(&dir);
 

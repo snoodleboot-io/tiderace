@@ -16,7 +16,10 @@ use std::process::ExitCode;
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, RunReport};
 use engine_core::reporter::{JsonReporter, Reporter};
-use engine_core::runner::{record_durations, RunPlan, SchedulerKind, VerdictStore, WorkerStrategy};
+use engine_core::runner::{
+    record_durations, Learned, RunPlan, SchedulerKind, Sharding, VerdictStore, WorkerCount,
+    WorkerStrategy,
+};
 
 const USAGE: &str = "\
 usage: tiderace <command> [options] <path>
@@ -364,10 +367,10 @@ impl Options {
         // read it here too so one setting covers both front ends. Applied before the flags, so an
         // explicit `--optimistic` on the command line still wins over it.
         if std::env::var("TIDERACE_FORCE_FORK").as_deref() == Ok("1") {
-            plan.optimistic_no_fork = false;
+            plan.fork.ladder = false;
         }
         if std::env::var("TIDERACE_NO_SHARED_IMPORT").as_deref() == Ok("1") {
-            plan.shared_import = false;
+            plan.fork.shared_import = false;
         }
         let mut quiet = false;
         let mut marker_expr: Option<String> = None;
@@ -401,8 +404,7 @@ impl Options {
                     if n == 0 {
                         return Err("--workers must be at least 1".into());
                     }
-                    plan.workers = n;
-                    plan.workers_explicit = true;
+                    plan.workers = WorkerCount::Explicit(n);
                 }
                 "--memory-limit" => {
                     let raw = value("--memory-limit")?;
@@ -444,11 +446,11 @@ impl Options {
                     strategy_set = true;
                 }
                 // Accepted and inert: it is the default now, and it is in people's scripts.
-                "--optimistic" => plan.optimistic_no_fork = true,
-                "--no-optimistic" => plan.optimistic_no_fork = false,
-                "--shared-import" => plan.shared_import = true,
-                "--shard-modules" => plan.shard_modules = true,
-                "--no-shared-import" => plan.shared_import = false,
+                "--optimistic" => plan.fork.ladder = true,
+                "--no-optimistic" => plan.fork.ladder = false,
+                "--shared-import" => plan.fork.shared_import = true,
+                "--shard-modules" => plan.sharding = Sharding::SplitModules,
+                "--no-shared-import" => plan.fork.shared_import = false,
                 "-m" | "--markers" => marker_expr = Some(value("--markers")?),
                 "-k" | "--keyword" => keyword_expr = Some(value("--keyword")?),
                 "--strict-markers" => strict_markers = true,
@@ -507,7 +509,7 @@ fn cmd_collect(root: &Path) -> ExitCode {
 /// header was built from a clamped copy while `run_parallel` received the unclamped original, so the
 /// worker count shown was never the worker count used. Returning both from one place makes the two
 /// impossible to disagree, and makes the whole decision unit-testable without a live run.
-fn effective_plan(plan: &RunPlan, item_count: usize, root: &Path) -> (RunPlan, String) {
+fn effective_plan(plan: &RunPlan, item_count: usize, root: &Path) -> (RunPlan, Learned) {
     // **`must_fork` only.** The two persisted verdicts fail in opposite directions, and only one is
     // safe to take from a file this process did not write and cannot re-verify:
     //
@@ -527,22 +529,17 @@ fn effective_plan(plan: &RunPlan, item_count: usize, root: &Path) -> (RunPlan, S
     // Durations too (TID-62). Safe from a file nobody re-verified for the same reason `must_fork`
     // is: they only order work, so a stale one costs a little balance and never a wrong answer.
     let durations = store.durations();
-    let mut learned: Vec<String> = Vec::new();
-    if !must_fork.is_empty() {
-        learned.push(format!("{} forced-fork", must_fork.len()));
-    }
-    if !durations.is_empty() {
-        learned.push(format!("{} durations", durations.len()));
-    }
-    let learned = if learned.is_empty() {
-        String::new()
-    } else {
-        format!(" learned={}", learned.join(","))
-    };
-    let effective = RunPlan {
-        workers: plan.effective_workers(item_count),
+    let learned = Learned {
+        trusted_pure: Default::default(),
         must_fork,
         durations,
+    };
+    let effective = RunPlan {
+        workers: if plan.workers.is_explicit() {
+            WorkerCount::Explicit(plan.effective_workers(item_count))
+        } else {
+            WorkerCount::Default(plan.effective_workers(item_count))
+        },
         ..plan.clone()
     };
     (effective, learned)
@@ -574,7 +571,7 @@ fn cmd_run(
     let results = match via_daemon {
         Some(Ok(results)) => {
             let (effective, learned) = effective_plan(plan, results.len(), root);
-            eprintln!("tiderace: {}{learned} via daemon", effective.header());
+            eprintln!("tiderace: {} via daemon", effective.header_with(&learned));
             results
         }
         Some(Err(message)) => {
@@ -595,13 +592,13 @@ fn cmd_run(
             // needs coverage capture turned on — the dependency footprints that keep a purity
             // verdict honest are already recorded, and checking them is a re-hash.
             let (effective, learned) = effective_plan(plan, items.len(), root);
-            eprintln!("tiderace: {}{learned}", effective.header());
+            eprintln!("tiderace: {}", effective.header_with(&learned));
 
             // `&effective`, not `plan`: the header and the run must describe the same thing. They
             // did not, so the worker clamp shown in the header was never the clamp applied — and
             // the verdicts read above would have been reported and then dropped on the floor.
             let results = match engine_core::runner::run_parallel_with_notes(
-                &python, &shim, root, items, &effective,
+                &python, &shim, root, items, &effective, &learned,
             ) {
                 Ok(outcome) => {
                     for line in &outcome.notes.lines {
@@ -713,6 +710,7 @@ mod tests {
     use super::{effective_plan, Options};
     use engine_core::domain::Outcome;
     use engine_core::runner::RecordedOutcome;
+    use engine_core::runner::WorkerCount;
     use engine_core::runner::{RunPlan, SchedulerKind, WorkerStrategy, DEFAULT_DEADLINE_MS};
 
     fn parse(args: &[&str]) -> Result<Options, String> {
@@ -797,7 +795,7 @@ mod tests {
             ],
         ] {
             let o = parse(&args).expect("flags parse");
-            assert_eq!(o.plan.workers, 3);
+            assert_eq!(o.plan.workers, WorkerCount::Explicit(3));
             assert_eq!(o.plan.scheduler, SchedulerKind::RoundRobin);
             assert_eq!(o.plan.deadline_ms, 99);
             assert_eq!(o.root.to_str(), Some("tests"));
@@ -807,7 +805,7 @@ mod tests {
     #[test]
     fn flags_may_follow_the_path() {
         let o = parse(&["tests", "-n", "2"]).expect("order must not matter");
-        assert_eq!(o.plan.workers, 2);
+        assert_eq!(o.plan.workers, WorkerCount::Explicit(2));
         assert_eq!(o.root.to_str(), Some("tests"));
     }
 
@@ -821,7 +819,7 @@ mod tests {
     fn quiet_and_optimistic_are_recorded() {
         let o = parse(&["-q", "--optimistic", "tests"]).expect("parses");
         assert!(o.quiet);
-        assert!(o.plan.optimistic_no_fork);
+        assert!(o.plan.fork.ladder);
         assert!(o.plan.header().contains("optimistic-no-fork"));
     }
 
@@ -837,12 +835,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let asked = RunPlan {
-            workers: 16,
+            workers: WorkerCount::Default(16),
             ..RunPlan::default()
         };
         let (effective, _) = effective_plan(&asked, 3, &dir);
         assert_eq!(
-            effective.workers, 3,
+            effective.workers.get(),
+            3,
             "a 3-test corpus clamps to 3 workers, and that is what must execute"
         );
         assert!(effective.header().contains("workers=3"));
@@ -895,24 +894,27 @@ mod tests {
         );
         state.save(&dir.join(STATE_FILE)).unwrap();
 
-        let (effective, learned) = effective_plan(&RunPlan::default(), 2, &dir);
-        assert!(effective.must_fork.contains("t.py::disturber"));
+        let (_effective, learned) = effective_plan(&RunPlan::default(), 2, &dir);
+        assert!(learned.must_fork.contains("t.py::disturber"));
         assert!(
-            effective.trusted_pure.is_empty(),
+            learned.trusted_pure.is_empty(),
             "purity verdicts stay unwired until TID-40 makes the footprints sound"
         );
-        assert!(learned.contains("1 forced-fork"), "got: {learned:?}");
+        assert!(
+            learned.suffix().contains("1 forced-fork"),
+            "got: {learned:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn shared_import_is_the_default_and_the_header_says_which() {
         let d = parse(&["tests"]).expect("parses");
-        assert!(d.plan.shared_import);
+        assert!(d.plan.fork.shared_import);
         assert!(d.plan.header().contains("shared-import"));
 
         let off = parse(&["--no-shared-import", "tests"]).expect("parses");
-        assert!(!off.plan.shared_import);
+        assert!(!off.plan.fork.shared_import);
         let header = off.plan.header();
         assert!(header.contains("import-per-worker"), "got: {header}");
         assert!(!header.contains(" shared-import"), "got: {header}");
@@ -925,6 +927,7 @@ mod tests {
             parse(&["--shared-import", "tests"])
                 .expect("the old flag still parses")
                 .plan
+                .fork
                 .shared_import
         );
     }
@@ -935,25 +938,27 @@ mod tests {
             !parse(&["--shared-import", "--no-shared-import", "tests"])
                 .expect("parses")
                 .plan
+                .fork
                 .shared_import
         );
         assert!(
             parse(&["--no-shared-import", "--shared-import", "tests"])
                 .expect("parses")
                 .plan
+                .fork
                 .shared_import
         );
     }
 
     #[test]
     fn the_optimistic_ladder_is_the_default() {
-        assert!(parse(&["tests"]).expect("parses").plan.optimistic_no_fork);
+        assert!(parse(&["tests"]).expect("parses").plan.fork.ladder);
     }
 
     #[test]
     fn no_optimistic_forks_every_test_and_the_header_says_so() {
         let o = parse(&["--no-optimistic", "tests"]).expect("parses");
-        assert!(!o.plan.optimistic_no_fork);
+        assert!(!o.plan.fork.ladder);
         assert!(o.plan.header().contains("fork-per-test"));
     }
 
@@ -962,7 +967,7 @@ mod tests {
     #[test]
     fn the_old_optimistic_flag_still_parses() {
         let o = parse(&["--optimistic", "tests"]).expect("the old flag still parses");
-        assert!(o.plan.optimistic_no_fork);
+        assert!(o.plan.fork.ladder);
     }
 
     /// Last flag wins, so a script that appends `--no-optimistic` to an existing `--optimistic`
@@ -973,13 +978,15 @@ mod tests {
             !parse(&["--optimistic", "--no-optimistic", "tests"])
                 .expect("parses")
                 .plan
-                .optimistic_no_fork
+                .fork
+                .ladder
         );
         assert!(
             parse(&["--no-optimistic", "--optimistic", "tests"])
                 .expect("parses")
                 .plan
-                .optimistic_no_fork
+                .fork
+                .ladder
         );
     }
 

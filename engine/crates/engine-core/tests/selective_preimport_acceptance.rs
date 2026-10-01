@@ -11,7 +11,9 @@
 
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestItem};
-use engine_core::runner::{run_parallel, RunPlan, WorkerStrategy};
+use engine_core::runner::{
+    run_parallel, ForkOptions, Learned, RunPlan, WorkerCount, WorkerStrategy,
+};
 use engine_core::testing::{python, scratch, shim, skip_live, PythonNeeds};
 use std::path::{Path, PathBuf};
 
@@ -31,7 +33,8 @@ fn write_project(dir: &Path) -> PathBuf {
 }
 
 fn run(python: &str, dir: &Path, items: Vec<TestItem>, plan: &RunPlan) {
-    let results = run_parallel(python, &shim(), dir, items, plan).expect("the run completes");
+    let results = run_parallel(python, &shim(), dir, items, plan, &Learned::default())
+        .expect("the run completes");
     for r in &results {
         assert_eq!(r.outcome, Outcome::Passed, "{}: {}", r.node_id, r.detail);
     }
@@ -41,9 +44,12 @@ fn plans() -> Vec<(&'static str, RunPlan)> {
     let mut plans = vec![(
         "subprocess",
         RunPlan {
+            fork: ForkOptions {
+                shared_import: false,
+                ..ForkOptions::default()
+            },
             strategy: WorkerStrategy::Subprocess,
-            shared_import: false,
-            workers: 1,
+            workers: WorkerCount::Default(1),
             ..RunPlan::default()
         },
     )];
@@ -51,18 +57,24 @@ fn plans() -> Vec<(&'static str, RunPlan)> {
         plans.push((
             "fork, shared-import pool",
             RunPlan {
+                fork: ForkOptions {
+                    shared_import: true,
+                    ..ForkOptions::default()
+                },
                 strategy: WorkerStrategy::Fork,
-                shared_import: true,
-                workers: 2,
+                workers: WorkerCount::Default(2),
                 ..RunPlan::default()
             },
         ));
         plans.push((
             "fork, own wellspring",
             RunPlan {
+                fork: ForkOptions {
+                    shared_import: false,
+                    ..ForkOptions::default()
+                },
                 strategy: WorkerStrategy::Fork,
-                shared_import: false,
-                workers: 1,
+                workers: WorkerCount::Default(1),
                 ..RunPlan::default()
             },
         ));

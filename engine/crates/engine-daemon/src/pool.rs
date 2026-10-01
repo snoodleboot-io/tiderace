@@ -4,7 +4,7 @@ use std::path::Path;
 use engine_core::domain::{NodeId, TestItem, TestResult};
 #[cfg(unix)]
 use engine_core::exec::WellspringPool;
-use engine_core::runner::{RunPlan, WorkerStrategy};
+use engine_core::runner::{ForkOptions, Learned, RunPlan, WorkerCount, WorkerStrategy};
 
 /// Run `items` across a **pool of `workers` in parallel** (design 06 / ADR-E010).
 ///
@@ -32,29 +32,34 @@ pub fn run_parallel(
 ) -> Result<Vec<TestResult>, String> {
     let plan = RunPlan {
         strategy: WorkerStrategy::platform_default(),
-        workers,
+        workers: WorkerCount::Default(workers),
         deadline_ms,
-        optimistic_no_fork,
-        trusted_pure: trusted.clone(),
-        must_fork: must_fork.clone(),
-        durations: durations.clone(), // TID-62: last run's per-node cost, the scheduler's weights
+        fork: ForkOptions {
+            ladder: optimistic_no_fork,
+            ..ForkOptions::default()
+        },
         // The daemon honours the memory limit from the environment (TID-106); the plan itself
         // reads nothing from it.
         memory_limit_mb: engine_core::runner::memory_limit_mb_from_env(),
         ..RunPlan::default()
     };
+    let learned = Learned {
+        trusted_pure: trusted.clone(),
+        must_fork: must_fork.clone(),
+        durations: durations.clone(), // TID-62: last run's per-node cost, the scheduler's weights
+    };
     #[cfg(unix)]
     if let Some(pool) = warm {
         // The daemon's warm image (TID-84): this run's workers are forked off it, no import.
         return engine_core::runner::run_parallel_with_pool_notes(
-            python, shim, root, items, &plan, pool,
+            python, shim, root, items, &plan, &learned, pool,
         )
         .map(print_notes)
         .map_err(|e| e.to_string());
     }
     #[cfg(not(unix))]
     let _ = warm;
-    engine_core::runner::run_parallel_with_notes(python, shim, root, items, &plan)
+    engine_core::runner::run_parallel_with_notes(python, shim, root, items, &plan, &learned)
         .map(print_notes)
         .map_err(|e| e.to_string())
 }

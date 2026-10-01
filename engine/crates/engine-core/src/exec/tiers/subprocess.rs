@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use crate::domain::{TestItem, TestResult};
 use crate::error::{EngineError, Result};
+use crate::exec::knobs::RunKnobs;
 use crate::exec::process::{ShimLaunch, ShimMode, ShimProcess, ShimTarget};
 use crate::exec::transport::{
     run_batch_lost, Live, LostWorker, PipeTransport, ShimTransport, LOST_WORKER_MARGIN_MS,
@@ -132,17 +133,14 @@ impl Worker for SubprocessWorker {
             self.proc = Some(SubprocessWorker::launch(&target, self.deadline_ms)?);
         }
         let proc = self.proc.as_mut().expect("just launched");
+        // No ladder to gate and no recorded verdicts: this tier runs in-process by configuration
+        // rather than by optimistic guess (TID-33). A worker that stops answering is reported per
+        // node — the one that overran names the fault, the rest of the batch names it as not run —
+        // and replaced (TID-98).
         let (results, fault) = run_batch_lost(
             &mut proc.transport,
             items,
-            self.deadline_ms,
-            false,
-            &std::collections::HashSet::new(),
-            // No ladder to gate: `force_no_fork` is already false, and this tier runs in-process by
-            // configuration rather than by optimistic guess (TID-33).
-            &std::collections::HashSet::new(),
-            // A worker that stops answering is reported per node — the one that overran names
-            // the fault, the rest of the batch names it as not run — and replaced (TID-98).
+            &RunKnobs::new(self.deadline_ms),
             LostWorker::Report,
         )?;
         if fault.is_some() {

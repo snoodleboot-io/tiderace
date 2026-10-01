@@ -105,6 +105,7 @@ mod live {
     use engine_core::collection::{Collector, RegexCollector};
     use engine_core::domain::Outcome;
     use engine_core::runner::{run_parallel, RunPlan, SchedulerKind, WorkerStrategy};
+    use engine_core::runner::{ForkOptions, Learned, WorkerCount};
     use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 
     #[test]
@@ -116,13 +117,17 @@ mod live {
         let dir = write_corpus("run");
         let items = RegexCollector::new().collect(&dir).expect("collection");
         let plan = RunPlan {
-            workers: 4,
+            fork: ForkOptions {
+                shared_import: false,
+                ..ForkOptions::default()
+            },
+            workers: WorkerCount::Default(4),
             strategy: WorkerStrategy::Subprocess,
             scheduler: SchedulerKind::Locality,
-            shared_import: false,
             ..RunPlan::default()
         };
-        let results = run_parallel(&python, &shim(), &dir, items, &plan).expect("the corpus runs");
+        let results = run_parallel(&python, &shim(), &dir, items, &plan, &Learned::default())
+            .expect("the corpus runs");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(results.len(), 4);
         for r in &results {
@@ -155,13 +160,17 @@ mod live {
         let items = RegexCollector::new().collect(&dir).expect("collection");
         assert_eq!(items.len(), 4);
         let plan = RunPlan {
-            workers: 1,
+            fork: ForkOptions {
+                shared_import: false,
+                ..ForkOptions::default()
+            },
+            workers: WorkerCount::Default(1),
             strategy: WorkerStrategy::Subprocess,
             scheduler: SchedulerKind::Locality,
-            shared_import: false,
             ..RunPlan::default()
         };
-        let results = run_parallel(&python, &shim(), &dir, items, &plan).expect("the corpus runs");
+        let results = run_parallel(&python, &shim(), &dir, items, &plan, &Learned::default())
+            .expect("the corpus runs");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(results.len(), 4);
         for r in &results {

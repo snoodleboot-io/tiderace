@@ -11,32 +11,45 @@ pub fn default_workers() -> usize {
 /// The default per-test deadline, in milliseconds — see [`crate::exec::DEFAULT_DEADLINE_MS`].
 pub use crate::exec::DEFAULT_DEADLINE_MS;
 
-/// Everything a run needs to know about *how* to execute, separate from *what* to execute (TID-17).
+/// How many workers a run asks for, and whether that number was the user's own.
 ///
-/// Bundled into one value so a run can state its own configuration — the missing half of every
-/// benchmark taken through the old CLI, which measured one combination and reported it unqualified.
-#[derive(Debug, Clone)]
-pub struct RunPlan {
-    /// Which isolation tier executes each batch.
-    pub strategy: WorkerStrategy,
-    /// How the corpus is partitioned across workers.
-    pub scheduler: SchedulerKind,
-    /// How many workers to run in parallel. Clamped to at least 1, and never more than the test count.
-    pub workers: usize,
-    /// `workers` was the user's own (`--workers`), and is honoured as given; a default count is
-    /// capped by what memory allows once the imported image's size is known (TID-106).
-    pub workers_explicit: bool,
-    /// An explicit total for the workers' memory, in megabytes (`--memory-limit`,
-    /// `TIDERACE_MEMORY_LIMIT_MB`): caps the pool whatever the count (TID-106).
-    pub memory_limit_mb: Option<u64>,
-    /// Per-test deadline in milliseconds.
-    pub deadline_ms: u64,
-    /// Split a module heavier than one perfect bin across workers (TID-52). Off by default since
-    /// TID-80: a module's tests then share one process and run in file order, as under pytest, so
-    /// a file whose tests build on each other's state keeps working. On, a single-file suite uses
-    /// every worker and such files may break — `pytest-xdist --dist load`'s trade.
-    pub shard_modules: bool,
-    /// Whether the fork tier may take the optimistic in-process ladder for restorable tests.
+/// An explicit `--workers` is honoured as given: a count the user chose is theirs to pay for. A
+/// default is capped by what memory allows once the imported image's size is known (TID-106).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerCount {
+    Explicit(usize),
+    Default(usize),
+}
+
+impl WorkerCount {
+    pub fn get(self) -> usize {
+        match self {
+            WorkerCount::Explicit(n) | WorkerCount::Default(n) => n,
+        }
+    }
+
+    pub fn is_explicit(self) -> bool {
+        matches!(self, WorkerCount::Explicit(_))
+    }
+}
+
+/// Whether a module heavier than one perfect bin may be split across workers (TID-52).
+///
+/// Whole modules by default since TID-80: a module's tests then share one process and run in
+/// file order, as under pytest, so a file whose tests build on each other's state keeps working.
+/// Split, a single-file suite uses every worker and such files may break — `pytest-xdist --dist
+/// load`'s trade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Sharding {
+    #[default]
+    WholeModules,
+    SplitModules,
+}
+
+/// What the fork tier does beyond forking; inert on every other tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForkOptions {
+    /// Take the optimistic in-process ladder for restorable tests.
     ///
     /// **On by default**, as of TID-33. It has been on before and was reverted, so the history is
     /// worth stating plainly rather than trusting the current measurement on its own:
@@ -65,9 +78,7 @@ pub struct RunPlan {
     /// Measured on a 4,514-test corpus: outcomes identical to fork and to pytest, zero fingerprint
     /// trips, 2.18x faster than pytest against fork-per-test's 1.12x — and, the part wall clock
     /// hides, 69s of CPU against fork-per-test's 140s for the same work.
-    pub optimistic_no_fork: bool,
-    /// Node ids recorded pure, eligible for the bare no-fork tier (TID-1).
-    pub trusted_pure: HashSet<NodeId>,
+    pub ladder: bool,
     /// Import the project **once** and fork the workers from that image, instead of running N
     /// independent wellsprings that each import it (TID-4).
     ///
@@ -91,6 +102,23 @@ pub struct RunPlan {
     /// tier. `--no-shared-import` (or `TIDERACE_NO_SHARED_IMPORT=1`) goes back to one wellspring
     /// per worker.
     pub shared_import: bool,
+}
+
+impl Default for ForkOptions {
+    fn default() -> Self {
+        Self {
+            ladder: true,
+            shared_import: true,
+        }
+    }
+}
+
+/// What earlier runs recorded, loaded from the verdict store (TID-1, TID-33, TID-62): not
+/// configuration, which is why it travels beside the plan rather than inside it.
+#[derive(Debug, Clone, Default)]
+pub struct Learned {
+    /// Node ids recorded pure, eligible for the bare no-fork tier (TID-1).
+    pub trusted_pure: HashSet<NodeId>,
     /// Node ids recorded as disturbing interpreter state — forked even under the ladder (TID-33).
     ///
     /// The shim detects a first offence on its own and re-runs it forked, so correctness does not
@@ -106,21 +134,62 @@ pub struct RunPlan {
     pub durations: HashMap<NodeId, u64>,
 }
 
+impl Learned {
+    /// Nothing recorded: a cold run.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// The run header's account of what was learned: `" learned=3 forced-fork,5 durations"`, or
+    /// nothing when nothing was.
+    pub fn suffix(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if !self.must_fork.is_empty() {
+            parts.push(format!("{} forced-fork", self.must_fork.len()));
+        }
+        if !self.durations.is_empty() {
+            parts.push(format!("{} durations", self.durations.len()));
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" learned={}", parts.join(","))
+        }
+    }
+}
+
+/// Everything a run needs to know about *how* to execute, separate from *what* to execute (TID-17)
+/// and from what earlier runs [`Learned`].
+///
+/// Bundled into one value so a run can state its own configuration — the missing half of every
+/// benchmark taken through the old CLI, which measured one combination and reported it unqualified.
+#[derive(Debug, Clone)]
+pub struct RunPlan {
+    /// Which isolation tier executes each batch.
+    pub strategy: WorkerStrategy,
+    /// How the corpus is partitioned across workers.
+    pub scheduler: SchedulerKind,
+    /// How many workers to run in parallel. Clamped to at least 1, and never more than the test count.
+    pub workers: WorkerCount,
+    /// An explicit total for the workers' memory, in megabytes (`--memory-limit`,
+    /// `TIDERACE_MEMORY_LIMIT_MB`): caps the pool whatever the count (TID-106).
+    pub memory_limit_mb: Option<u64>,
+    /// Per-test deadline in milliseconds.
+    pub deadline_ms: u64,
+    pub sharding: Sharding,
+    pub fork: ForkOptions,
+}
+
 impl Default for RunPlan {
     fn default() -> Self {
         Self {
             strategy: WorkerStrategy::platform_default(),
             scheduler: SchedulerKind::default(),
-            workers: default_workers(),
-            workers_explicit: false,
+            workers: WorkerCount::Default(default_workers()),
             memory_limit_mb: None,
             deadline_ms: DEFAULT_DEADLINE_MS,
-            shard_modules: false,
-            optimistic_no_fork: true,
-            shared_import: true,
-            trusted_pure: HashSet::new(),
-            must_fork: HashSet::new(),
-            durations: HashMap::new(),
+            sharding: Sharding::default(),
+            fork: ForkOptions::default(),
         }
     }
 }
@@ -133,7 +202,10 @@ impl RunPlan {
     pub fn header(&self) -> String {
         let mut s = format!(
             "strategy={} scheduler={} workers={} timeout={}ms",
-            self.strategy, self.scheduler, self.workers, self.deadline_ms
+            self.strategy,
+            self.scheduler,
+            self.workers.get(),
+            self.deadline_ms
         );
         if self.strategy.is_hybrid() {
             // Say so explicitly: a `subinterp` run that quietly forked most of the corpus, reported
@@ -146,41 +218,46 @@ impl RunPlan {
         // Named in both directions. It used to be printed only when on, because it was the unusual
         // choice; now that it is the default the *absence* of the ladder is the fact a pasted
         // benchmark number needs, and a run that says nothing about it is uninterpretable either way.
-        s.push_str(if self.optimistic_no_fork {
+        s.push_str(if self.fork.ladder {
             " optimistic-no-fork"
         } else {
             " fork-per-test"
         });
         // Named in both directions, like the ladder: now that it is the default, its *absence* is
         // the fact a pasted benchmark number needs.
-        s.push_str(if self.shared_import {
+        s.push_str(if self.fork.shared_import {
             " shared-import"
         } else {
             " import-per-worker"
         });
-        if self.shard_modules {
+        if self.sharding == Sharding::SplitModules {
             s.push_str(" shard-modules");
         }
         s
     }
 
+    /// [`header`](Self::header) followed by what the run [`Learned`].
+    pub fn header_with(&self, learned: &Learned) -> String {
+        format!("{}{}", self.header(), learned.suffix())
+    }
+
     /// Clamp the worker count against the real test count — N workers for fewer than N tests just
     /// pays launch cost for idle wellsprings.
     pub fn effective_workers(&self, test_count: usize) -> usize {
-        self.workers.max(1).min(test_count.max(1))
+        self.workers.get().max(1).min(test_count.max(1))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{default_workers, RunPlan, DEFAULT_DEADLINE_MS};
+    use super::{default_workers, ForkOptions, RunPlan, WorkerCount, DEFAULT_DEADLINE_MS};
     use crate::runner::{SchedulerKind, WorkerStrategy};
 
     #[test]
     fn default_plan_is_runnable_on_this_platform() {
         let plan = RunPlan::default();
         assert!(plan.strategy.is_available());
-        assert!(plan.workers >= 1);
+        assert!(plan.workers.get() >= 1);
         assert_eq!(plan.deadline_ms, DEFAULT_DEADLINE_MS);
     }
 
@@ -194,7 +271,7 @@ mod tests {
         let plan = RunPlan {
             strategy: WorkerStrategy::Subprocess,
             scheduler: SchedulerKind::RoundRobin,
-            workers: 3,
+            workers: WorkerCount::Default(3),
             deadline_ms: 1234,
             ..RunPlan::default()
         };
@@ -226,13 +303,16 @@ mod tests {
         // On since TID-33: a test that disturbs state the restore cannot model is detected by the
         // fingerprint, re-run forked, and remembered — so the ladder no longer rests on our list of
         // restorable categories being complete, which is what forced the TID-26 revert.
-        assert!(RunPlan::default().optimistic_no_fork);
+        assert!(RunPlan::default().fork.ladder);
         assert!(RunPlan::default().header().contains("optimistic-no-fork"));
 
         // And the header names the other direction too, so a benchmark taken with the ladder off is
         // not silently indistinguishable from one taken with it on.
         let forking = RunPlan {
-            optimistic_no_fork: false,
+            fork: ForkOptions {
+                ladder: false,
+                ..ForkOptions::default()
+            },
             ..RunPlan::default()
         };
         let header = forking.header();
@@ -243,7 +323,7 @@ mod tests {
     #[test]
     fn effective_workers_never_exceeds_the_test_count_and_never_hits_zero() {
         let plan = RunPlan {
-            workers: 16,
+            workers: WorkerCount::Default(16),
             ..RunPlan::default()
         };
         assert_eq!(plan.effective_workers(3), 3);
@@ -252,7 +332,7 @@ mod tests {
         assert_eq!(plan.effective_workers(0), 1);
 
         let degenerate = RunPlan {
-            workers: 0,
+            workers: WorkerCount::Explicit(0),
             ..RunPlan::default()
         };
         assert_eq!(degenerate.effective_workers(10), 1);
