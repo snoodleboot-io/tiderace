@@ -158,6 +158,19 @@ pub struct VariantResult {
     pub must_fork: bool,
 }
 
+/// The readiness frame, read: `{"ready": true, "pid": <int>}` from a shim that imported the
+/// suite; anything else is a shim that did not warm, reported with the frame it sent instead.
+pub(crate) fn ready_info(frame: serde_json::Value) -> Result<crate::exec::transport::ReadyInfo> {
+    if frame.get("ready").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(EngineError::Exec(format!("shim failed to warm: {frame}")));
+    }
+    let pid = frame
+        .get("pid")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|p| u32::try_from(p).ok());
+    Ok(crate::exec::transport::ReadyInfo { pid })
+}
+
 /// Write a length-prefixed (u32 LE) JSON frame.
 ///
 /// The bincode-vs-msgpack decision (ADR-E002) is deferred; JSON framing is adequate at this scale

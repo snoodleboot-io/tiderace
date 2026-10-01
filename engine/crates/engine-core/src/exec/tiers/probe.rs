@@ -4,10 +4,9 @@
 //! only imports each module in an isolated sub-interpreter and reports whether it loads.
 
 use std::collections::BTreeMap;
-use std::io::BufReader;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
+use crate::exec::process::{ShimLaunch, ShimMode, ShimTarget};
 use crate::exec::{read_frame, write_frame};
 use serde_json::{json, Value};
 
@@ -21,25 +20,20 @@ pub fn probe_modules(
     root: &Path,
     modules: &[String],
 ) -> Result<BTreeMap<String, Option<bool>>, String> {
-    let mut child = Command::new(python)
-        .arg(shim)
-        .arg(root)
-        .arg("--probe")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
+    let target = ShimTarget::new(python, shim, root);
+    let mut probe = ShimLaunch::new(&target, ShimMode::Probe)
         .spawn()
-        .map_err(|e| format!("failed to launch probe: {e}"))?;
-    let mut stdin = child.stdin.take().ok_or("probe stdin unavailable")?;
-    let mut stdout = BufReader::new(child.stdout.take().ok_or("probe stdout unavailable")?);
-
-    // Readiness handshake (mirrors the serve/wellspring protocol).
-    let _ready: Option<Value> = read_frame(&mut stdout).map_err(|e| format!("probe ready: {e}"))?;
+        .map_err(|e| e.to_string())?;
+    probe.ready().map_err(|e| format!("probe ready: {e}"))?;
 
     let mut out = BTreeMap::new();
     for m in modules {
-        write_frame(&mut stdin, &json!({ "module": m }))
-            .map_err(|e| format!("probe write: {e}"))?;
-        let resp: Value = read_frame(&mut stdout)
+        write_frame(
+            probe.stdin().map_err(|e| e.to_string())?,
+            &json!({ "module": m }),
+        )
+        .map_err(|e| format!("probe write: {e}"))?;
+        let resp: Value = read_frame(probe.stdout().map_err(|e| e.to_string())?)
             .map_err(|e| format!("probe read: {e}"))?
             .ok_or("probe closed mid-run")?;
         // `safe` is true / false / null (undeterminable).
@@ -48,7 +42,6 @@ pub fn probe_modules(
             .and_then(|v| if v.is_null() { None } else { v.as_bool() });
         out.insert(m.clone(), safe);
     }
-    drop(stdin); // EOF → the probe process exits
-    let _ = child.wait();
+    // Dropped: stdin closed (EOF → the probe process exits), then reaped.
     Ok(out)
 }

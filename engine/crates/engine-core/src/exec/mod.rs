@@ -11,38 +11,33 @@
 
 mod fork_permit;
 mod fork_plan;
-mod fork_worker;
 mod memory_governor;
-mod module_probe;
+mod process;
 mod safe_set_cache;
 mod selection;
 mod shim_protocol;
-mod subinterp_worker;
-mod subprocess_worker;
+mod tiers;
 mod transport;
 mod watermark;
 mod watermark_stack;
-mod wellspring;
-#[cfg(unix)]
-mod wellspring_pool;
 mod worker;
 mod worker_caps;
 
 pub use fork_permit::ForkPermit;
 pub use fork_plan::ForkPlan;
-pub use fork_worker::ForkWorker;
 pub use memory_governor::MemoryGovernor;
-pub use module_probe::probe_modules;
+pub use process::{ShimLaunch, ShimMode, ShimProcess, ShimTarget};
 pub use safe_set_cache::{SafeModule, SafeSetCache};
 pub use selection::{KeywordExpr, Selection};
 pub use shim_protocol::{read_frame, write_frame, ExecRequest, ExecResponse};
-pub use subinterp_worker::SubInterpWorker;
-pub use subprocess_worker::SubprocessWorker;
+pub use tiers::fork::ForkWorker;
+#[cfg(unix)]
+pub use tiers::pool::{PooledTransport, PooledWorker, WellspringPool};
+pub use tiers::probe::probe_modules;
+pub use tiers::subinterp::SubInterpWorker;
+pub use tiers::subprocess::SubprocessWorker;
 pub use transport::{PipeTransport, ReadyInfo, ShimTransport};
 pub use watermark::{Watermark, WatermarkId};
 pub use watermark_stack::WatermarkStack;
-pub use wellspring::Wellspring;
-#[cfg(unix)]
-pub use wellspring_pool::{PooledTransport, PooledWorker, WellspringPool};
 pub use worker::Worker;
 pub use worker_caps::WorkerCaps;

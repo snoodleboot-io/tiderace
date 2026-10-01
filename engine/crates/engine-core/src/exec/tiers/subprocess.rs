@@ -12,13 +12,13 @@
 //! *correctness* is the deliverable; `pool_size`-way partitioning for throughput is a Phase 6
 //! scheduling concern — adding it is a pure extension).
 
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::ChildStdin;
 use std::time::Duration;
 
 use crate::domain::{TestItem, TestResult};
 use crate::error::{EngineError, Result};
+use crate::exec::process::{ShimLaunch, ShimMode, ShimProcess, ShimTarget};
 use crate::exec::transport::{
     run_batch_lost, BudgetedTransport, LostWorker, ShimTransport, LOST_WORKER_MARGIN_MS,
 };
@@ -58,9 +58,7 @@ impl std::fmt::Debug for SubprocessWorker {
 
 #[derive(Debug, Clone)]
 struct Target {
-    python: String,
-    shim: PathBuf,
-    root: PathBuf,
+    shim: ShimTarget,
     /// A file naming the modules this run executes, for a selective start-up (TID-75).
     modules: Option<PathBuf>,
 }
@@ -80,9 +78,16 @@ impl SubprocessWorker {
     /// [`crate::exec::ForkWorker::launch`]'s arguments). Required before [`Worker::run`].
     pub fn with_target(mut self, python: impl Into<String>, shim: &Path, root: &Path) -> Self {
         self.target = Some(Target {
-            python: python.into(),
-            shim: shim.to_path_buf(),
-            root: root.to_path_buf(),
+            shim: ShimTarget::new(python, shim, root),
+            modules: None,
+        });
+        self
+    }
+
+    /// [`with_target`](Self::with_target) from a [`ShimTarget`].
+    pub fn with_shim_target(mut self, shim: ShimTarget) -> Self {
+        self.target = Some(Target {
+            shim,
             modules: None,
         });
         self
@@ -101,51 +106,21 @@ impl SubprocessWorker {
         WorkerCaps::subprocess(self.pool_size)
     }
 
-    /// Launch the no-fork wellspring (`python <shim> <root> --no-fork`) and complete the handshake.
+    /// Launch the no-fork wellspring (`python <shim> <root> --no-fork --restore`) and complete
+    /// the handshake. Restore is always on: without fork there is no COW copy, so the snapshot
+    /// is this tier's only isolation, and it must not depend on the caller's environment.
     fn launch(target: &Target, deadline_ms: u64) -> Result<NoForkProc> {
-        let mut child = Command::new(&target.python)
-            .arg(&target.shim)
-            .arg(&target.root)
-            .arg("--no-fork")
-            // Snapshot/restore is this worker's ONLY isolation mechanism — without fork there is no
-            // COW copy, so a test's mutations to module globals persist into the next test on that
-            // module. The shim enables restore from `--restore` / `TIDERACE_RESTORE`, and this worker
-            // used to set neither: it inherited whatever the caller happened to export. Under the
-            // daemon that was `TIDERACE_RESTORE=1`, but standalone it was unset, and the no-fork path
-            // silently ran with no isolation at all (an appended module-level list stayed appended).
-            // Set it explicitly — correctness here must not depend on the caller's environment.
-            .arg("--restore")
-            .args(target.modules.iter().flat_map(|m| {
-                [
-                    std::ffi::OsString::from("--modules"),
-                    m.clone().into_os_string(),
-                ]
-            }))
-            // Pin native thread pools (threaded BLAS/OMP is a hazard even without fork).
-            .env("OPENBLAS_NUM_THREADS", "1")
-            .env("OMP_NUM_THREADS", "1")
-            .env("MKL_NUM_THREADS", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .map_err(|e| EngineError::Exec(format!("failed to launch subprocess worker: {e}")))?;
-
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| EngineError::Exec("subprocess worker stdin unavailable".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| EngineError::Exec("subprocess worker stdout unavailable".into()))?;
-
+        let mut process = ShimLaunch::new(&target.shim, ShimMode::NoFork)
+            .modules(target.modules.as_deref())
+            .spawn()?;
+        let (stdin, stdout) = process.take_pipes()?;
         // The engine's own deadline on every reply (TID-98): the shim's in-process timeout ends
         // what CPython can interrupt; a test blocked in a C call is ended here, by the budget —
         // the only per-test deadline Windows has, where the shim cannot arm a timer signal.
         let budget = Duration::from_millis(deadline_ms.saturating_add(LOST_WORKER_MARGIN_MS));
-        let mut transport = BudgetedTransport::new(stdin, BufReader::new(stdout), budget);
+        let mut transport = BudgetedTransport::new(stdin, stdout, budget);
         transport.ready()?;
-        Ok(NoForkProc { child, transport })
+        Ok(NoForkProc { transport, process })
     }
 }
 
@@ -178,23 +153,24 @@ impl Worker for SubprocessWorker {
     }
 
     fn pid(&self) -> Option<u32> {
-        self.proc.as_ref().map(|p| p.child.id())
+        self.proc.as_ref().map(|p| p.process.pid())
     }
 }
 
-/// A live no-fork wellspring process + its framed pipe (mirrors `Wellspring`, minus the fork).
+/// A live no-fork wellspring process + its framed pipe. Fields drop in order: the transport
+/// first (EOF → the shim runs its wider-scope finalizers once and exits), then the process,
+/// which kills it if it was lost — still inside the test that overran — and reaps it.
 struct NoForkProc {
-    child: Child,
     transport: BudgetedTransport<ChildStdin>,
+    process: ShimProcess,
 }
 
 impl Drop for NoForkProc {
     fn drop(&mut self) {
         if self.transport.is_lost() {
-            let _ = self.child.kill(); // still inside the test that overran: it will not exit
+            self.process.mark_lost();
         }
-        self.transport.close_input(); // EOF → shim exits + runs wider-scope finalizers once
-        let _ = self.child.wait();
+        self.transport.close_input();
     }
 }
 

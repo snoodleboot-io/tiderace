@@ -3,13 +3,19 @@ use std::path::Path;
 
 use crate::domain::{NodeId, TestItem, TestResult};
 use crate::error::Result;
-use crate::exec::transport::run_batch;
-use crate::exec::wellspring::Wellspring;
+use crate::exec::process::{ShimLaunch, ShimMode, ShimProcess, ShimTarget};
+use crate::exec::transport::{run_batch, Live, PipeTransport, ShimTransport};
 use crate::exec::worker::Worker;
 
-/// Default executor (Linux/macOS): one warm [`Wellspring`], fork-per-test (ADR-E003).
+/// Default executor (Linux/macOS): one warm wellspring — a Python process that imports the
+/// project once — and a forked, pristine copy-on-write child per test (ADR-E003).
+///
+/// Fields drop in order: the transport first, which closes the shim's stdin (EOF → it runs its
+/// wider-scope finalizers and exits), then the process, which reaps it. The other order would
+/// deadlock: a shim blocked in `read` and an engine blocked in `wait`.
 pub struct ForkWorker {
-    wellspring: Wellspring,
+    transport: Live,
+    process: ShimProcess,
     deadline_ms: u64,
     optimistic_no_fork: bool,
     trusted: HashSet<NodeId>,
@@ -24,13 +30,7 @@ impl ForkWorker {
     /// [`launch_optimistic`](ForkWorker::launch_optimistic) — which is the only way to enable it,
     /// because enabling it on a wellspring launched without restore is not sound.
     pub fn launch(python: &str, shim: &Path, root: &Path) -> Result<Self> {
-        Ok(Self {
-            wellspring: Wellspring::launch(python, shim, root)?,
-            deadline_ms: 5_000,
-            optimistic_no_fork: false,
-            trusted: HashSet::new(),
-            must_fork: HashSet::new(),
-        })
+        Self::launch_selected(python, shim, root, false, None)
     }
 
     /// Launch with snapshot/restore on AND the optimistic in-process ladder enabled.
@@ -52,8 +52,31 @@ impl ForkWorker {
         optimistic: bool,
         modules: Option<&Path>,
     ) -> Result<Self> {
+        Self::launch_target(&ShimTarget::new(python, shim, root), optimistic, modules)
+    }
+
+    /// [`launch_selected`](Self::launch_selected) against a [`ShimTarget`]. `optimistic` launches
+    /// the shim with snapshot/restore *and* enables the in-process ladder — the two go together
+    /// or not at all (see [`launch_optimistic`](Self::launch_optimistic)).
+    pub fn launch_target(
+        target: &ShimTarget,
+        optimistic: bool,
+        modules: Option<&Path>,
+    ) -> Result<Self> {
+        let mut process = ShimLaunch::new(
+            target,
+            ShimMode::Serve {
+                restore: optimistic,
+            },
+        )
+        .modules(modules)
+        .spawn()?;
+        let (stdin, stdout) = process.take_pipes()?;
+        let mut transport = PipeTransport::new(stdin, stdout);
+        transport.ready()?;
         Ok(Self {
-            wellspring: Wellspring::launch_selected(python, shim, root, optimistic, modules)?,
+            transport,
+            process,
             deadline_ms: 5_000,
             optimistic_no_fork: optimistic,
             trusted: HashSet::new(),
@@ -90,9 +113,9 @@ impl ForkWorker {
         self
     }
 
-    /// The underlying Wellspring pid (for diagnostics/tests).
+    /// The wellspring's pid: the parent of every per-test fork.
     pub fn wellspring_pid(&self) -> Option<u32> {
-        self.wellspring.pid()
+        Some(self.process.pid())
     }
 }
 
@@ -101,7 +124,7 @@ impl Worker for ForkWorker {
         let deadline_ms = self.deadline_ms;
         let nf = self.optimistic_no_fork;
         run_batch(
-            self.wellspring.transport_mut(),
+            &mut self.transport,
             items,
             deadline_ms,
             nf,
