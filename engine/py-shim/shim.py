@@ -5598,7 +5598,13 @@ class _in_process_deadline:
         if (not hasattr(signal, "setitimer")
                 or threading.current_thread() is not threading.main_thread()
                 or os.environ.get("TIDERACE_DEADLINE_WATCHDOG") == "1"):
-            return self._arm_watchdog(seconds)
+            try:
+                return self._arm_watchdog(seconds)
+            except Exception as exc:  # noqa: BLE001 — no deadline is better than no test
+                print(f"tiderace: in-process deadline not armed: {exc!r}", file=sys.stderr,
+                      flush=True)
+                self.timer = None
+                return self
 
         def on_alarm(_signum, _frame):
             raise _InProcessTimeout(
