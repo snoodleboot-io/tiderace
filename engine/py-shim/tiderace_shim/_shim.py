@@ -54,28 +54,20 @@ import unittest
 import warnings
 
 from .config import NOTSET as _NOTSET, ProjectConfig, load_project_config, option as _argv_option
+from .protocol import (EXIT_UNREPORTABLE as _EXIT_UNREPORTABLE, Transport, end_child,
+                       exit_text as _exit_text, read_frame as _read_frame,
+                       read_frame_by as _read_frame_by, reap, run_child, spawn,
+                       write_frame as _write_frame)
 from .nodes import (Target, class_method as _class_method, import_module as _import_module,
                     module_key as _module_key, module_name as _module_name, resolve_target,
                     set_run_root)
 from .results import (UNKNOWN_PURITY as _UNKNOWN_PURITY, Outcome, empty_expansion, errored,
                       expansion, purity_from, response, skipped, variant, with_purity)
 
-_STDIN = 0
-_STDOUT = 1
-
 _SCOPE_RANK = {"function": 0, "class": 1, "module": 2, "package": 3, "session": 4}
 
 
-# --------------------------------------------------------------------------- framing
-def _read_exactly(fd: int, n: int) -> bytes | None:
-    buf = b""
-    while len(buf) < n:
-        chunk = os.read(fd, n - len(buf))
-        if not chunk:
-            return None
-        buf += chunk
-    return buf
-
+# --------------------------------------------------------------------------- framing: `protocol.py`
 
 # The modules this run will execute, suite-relative (`tests/x/test_y.py`), or None for all of them
 # (TID-75). Set from `--modules <file>` before anything is imported. `_preimport` and `_discover`
@@ -131,59 +123,6 @@ def _env_flag(name: str) -> bool:
 def _warn(message: str) -> None:
     """A line for the user on stderr, flushed — stdout is the protocol (TID-103)."""
     print(f"tiderace: {message}", file=sys.stderr, flush=True)
-
-
-def _read_frame(fd: int) -> dict | None:
-    header = _read_exactly(fd, 4)
-    if header is None:
-        return None
-    (length,) = struct.unpack("<I", header)
-    payload = _read_exactly(fd, length)
-    if payload is None:
-        return None
-    return json.loads(payload.decode("utf-8"))
-
-
-def _write_frame(fd: int, obj: dict) -> None:
-    payload = json.dumps(obj).encode("utf-8")
-    os.write(fd, struct.pack("<I", len(payload)) + payload)
-
-
-def _read_exactly_by(fd: int, n: int, deadline_at: float) -> tuple:
-    """`n` bytes from `fd` by `deadline_at` (monotonic): `(bytes, False)`, `(None, True)` on timeout,
-    `(None, False)` on EOF."""
-    buf = b""
-    while len(buf) < n:
-        remaining = deadline_at - time.monotonic()
-        if remaining <= 0:
-            return None, True
-        ready, _, _ = select.select([fd], [], [], remaining)
-        if not ready:
-            return None, True
-        chunk = os.read(fd, n - len(buf))
-        if not chunk:
-            return None, False
-        buf += chunk
-    return buf, False
-
-
-def _read_frame_by(fd: int, deadline_at: float) -> tuple:
-    """One frame's payload by `deadline_at`; same triple as `_read_exactly_by`."""
-    header, timed_out = _read_exactly_by(fd, 4, deadline_at)
-    if header is None:
-        return None, timed_out
-    (length,) = struct.unpack("<I", header)
-    return _read_exactly_by(fd, length, deadline_at)
-
-
-def _exit_text(status: int) -> str:
-    """How a reaped process ended, for a diagnostic."""
-    if os.WIFSIGNALED(status):
-        return f"killed by signal {os.WTERMSIG(status)}"
-    code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else None
-    if code == _EXIT_UNREPORTABLE:
-        return "it ran the test but could not serialise its result frame"
-    return f"exited {code}"
 
 
 class _ModuleChild:
@@ -1976,10 +1915,6 @@ _OPAQUE = object()
 # exist there, so the shim must decide what to do instead rather than call `os.fork` and raise.
 _FORK_AVAILABLE = hasattr(os, "fork")
 
-# A fork child that cannot send its result frame at all exits with this code, so the parent can say
-# *that* happened rather than falling through to the generic "no result" (TID-15). Picked above the
-# signal-exit band (128+N) so it can't be confused with a shell-reported death-by-signal.
-_EXIT_UNREPORTABLE = 199
 
 
 def _child_fault_detail(exc: BaseException) -> str:
@@ -3588,8 +3523,8 @@ class Engine:
     def _module_child_spawn(self, module_key: str):
         req_r, req_w = os.pipe()
         resp_r, resp_w = os.pipe()
-        pid = os.fork()
-        if pid == 0:  # ---- CHILD: this module's tests, in-process, until the parent closes the pipe
+
+        def child() -> int:  # ---- CHILD: this module's tests, in-process, until the parent closes the pipe
             os.close(req_w)
             os.close(resp_r)
             self._in_module_child = True
@@ -3598,18 +3533,16 @@ class Engine:
             self._module_child = None
             inherited = len(self.active)  # the parent's fixtures: its to tear down, not ours
             done_before = set(_XUNIT_DONE)  # likewise the parent's xunit hooks
+            def handle(req: dict) -> dict:
+                try:
+                    return self.run(req["node_id"], req["style"], req.get("deadline_ms", 5000),
+                                    force_no_fork=True)
+                except BaseException as exc:  # noqa: BLE001 — report it; never die silently
+                    return errored(req["node_id"], _child_fault_detail(exc)[:4000])
+
             code = 0
             try:
-                while True:
-                    req = _read_frame(req_r)
-                    if req is None:
-                        break
-                    try:
-                        resp = self.run(req["node_id"], req["style"], req.get("deadline_ms", 5000),
-                                        force_no_fork=True)
-                    except BaseException as exc:  # noqa: BLE001 — report it; never die silently
-                        resp = errored(req["node_id"], _child_fault_detail(exc)[:4000])
-                    _write_frame(resp_w, resp)
+                Transport(req_r, resp_w).serve(handle)
             except BaseException:  # noqa: BLE001 — an unsendable frame or a closed parent
                 code = _EXIT_UNREPORTABLE
             finally:
@@ -3622,7 +3555,9 @@ class Engine:
                     _xunit_module_teardown()
                 except BaseException:  # noqa: BLE001 — a teardown fault must not mask the results
                     pass
-                os._exit(code)
+            return code
+
+        pid = spawn(child)
         os.close(req_r)
         os.close(resp_w)
         self._module_child = _ModuleChild(module_key, pid, req_w, resp_r)
@@ -3637,18 +3572,7 @@ class Engine:
             os.close(child.req_w)
         except OSError:
             pass
-        deadline_at = time.monotonic() + 30.0
-        while time.monotonic() < deadline_at:
-            pid, status = os.waitpid(child.pid, os.WNOHANG)
-            if pid:
-                break
-            time.sleep(0.01)
-        else:
-            try:
-                os.kill(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            os.waitpid(child.pid, 0)
+        end_child(child.pid, 30.0)
         try:
             os.close(child.resp_r)
         except OSError:
@@ -3656,20 +3580,13 @@ class Engine:
         self._module_child = None
 
     def _module_child_kill(self) -> int:
-        child = self._module_child
-        if child is None:
-            return 0
-        try:
-            os.kill(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        return self._module_child_reap()
+        return self._module_child_reap(kill=True)
 
-    def _module_child_reap(self) -> int:
+    def _module_child_reap(self, kill: bool = False) -> int:
         child = self._module_child
         if child is None:
             return 0
-        _, status = os.waitpid(child.pid, 0)
+        status = reap(child.pid, kill=kill)
         for fd in (child.req_w, child.resp_r):
             try:
                 os.close(fd)
@@ -3750,10 +3667,8 @@ class Engine:
                 return oc, detail, cov, f"disturbed interpreter state: {drift}"
             return result
 
-        read_fd, write_fd = os.pipe()
-        pid = os.fork()
-        if pid == 0:  # ---- CHILD: pristine COW copy with all wider fixtures already warm ----
-            os.close(read_fd)
+        def body() -> dict:
+            # ---- CHILD: pristine COW copy with all wider fixtures already warm ----
             try:
                 outcome, detail, coverage, purity = self._child_exec(
                     node_id, style, requested, closure, combo, case_kwargs, variant_id=variant_id)
@@ -3762,72 +3677,34 @@ class Engine:
                     payload["coverage"] = coverage
                 # Carry the purity tri-state across the pipe: pure=True/False when measured (guard on),
                 # omitted when unknown (the default forked path measures nothing).
-                with_purity(payload, purity, reason_key="impurity")
+                return with_purity(payload, purity, reason_key="impurity")
             except BaseException as exc:  # noqa: BLE001 — report it; never die silently (TID-15)
                 # `_invoke` guards the test BODY only, so anything raised by fixture setup/teardown,
                 # the coverage probe, or the purity snapshot lands here. Swallowing it exited 0 with an
                 # empty pipe, and the parent could say no more than "no result from child" — a defect
                 # indistinguishable, from the outside, from a test that genuinely failed. Send the
                 # traceback back instead so the failure names its own cause.
-                payload = {"outcome": "error", "detail": _child_fault_detail(exc)[:4000]}
-            try:
-                os.write(write_fd, json.dumps(payload).encode())
-            except BaseException:  # noqa: BLE001 — payload itself is unsendable
-                # Serialising or writing the frame failed (an unserialisable coverage map, a closed
-                # pipe). Exit non-zero so the parent reports `child exited N` against a documented
-                # code rather than the bare generic; a silent 0 would look like a lost result.
-                try:
-                    os.close(write_fd)
-                except BaseException:  # noqa: BLE001
-                    pass
-                os._exit(_EXIT_UNREPORTABLE)
-            os.close(write_fd)
-            os._exit(0)
+                return {"outcome": "error", "detail": _child_fault_detail(exc)[:4000]}
 
-        os.close(write_fd)
-        # The deadline covers the WHOLE exchange, not just the first byte (TID-31). `select` used to
-        # guard only the initial wait; a child that wrote part of its frame and then hung satisfied
-        # it, and the parent blocked in `os.read` forever — taking the worker, and every remaining
-        # test in its batch, with it, silently. A frame larger than the 64 KB pipe buffer (a long
-        # traceback, a rich diff, a wide coverage map) is written across several `write` calls, so
-        # this is reachable rather than theoretical.
-        deadline_at = time.monotonic() + deadline_ms / 1000.0
-        data = b""
-        timed_out = False
-        while True:
-            remaining = deadline_at - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                break
-            ready, _, _ = select.select([read_fd], [], [], remaining)
-            if not ready:
-                timed_out = True
-                break
-            chunk = os.read(read_fd, 65536)
-            if not chunk:
-                break  # EOF: the child closed the pipe, so the frame is whatever we have
-            data += chunk
-        if timed_out:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            os.waitpid(pid, 0)
-            os.close(read_fd)
-            if data:
+        # The deadline covers the WHOLE exchange, not just the first byte (TID-31): a child that
+        # wrote part of its frame and then hung used to satisfy the first-byte wait and block the
+        # parent in `read` forever — taking the worker, and every remaining test in its batch,
+        # with it. A frame larger than the 64 KB pipe buffer (a long traceback, a rich diff, a wide
+        # coverage map) is written across several `write` calls, so this is reachable.
+        got = run_child(body, deadline_ms / 1000.0)
+        if got.timed_out:
+            if got.received:
                 # Distinct from a silent timeout on purpose: a child that produced half a frame is a
                 # different fault from one that produced nothing, and saying which is the whole
                 # point of TID-15.
                 return ("error",
-                        f"timeout after writing {len(data)} bytes of a partial result frame — the "
+                        f"timeout after writing {got.received} bytes of a partial result frame — the "
                         f"child began reporting and then stopped", {}, _UNKNOWN_PURITY)
             return "error", "timeout", {}, _UNKNOWN_PURITY
-        os.close(read_fd)
-        _, status = os.waitpid(pid, 0)
-        if not data:
-            if os.WIFSIGNALED(status):
-                return "error", f"child killed by signal {os.WTERMSIG(status)}", {}, _UNKNOWN_PURITY
-            code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else None
+        if got.reply is None and got.error is None:
+            if got.signaled:
+                return "error", f"child killed by signal {os.WTERMSIG(got.status)}", {}, _UNKNOWN_PURITY
+            code = got.exit_code
             if code == _EXIT_UNREPORTABLE:
                 return ("error",
                         "child ran the test but could not serialise its result frame — the outcome is "
@@ -3842,14 +3719,13 @@ class Engine:
                     "child exited 0 without sending a result — the test process terminated itself "
                     "(os._exit/os.abort) or the interpreter died before the result frame was written.",
                     {}, _UNKNOWN_PURITY)
-        try:
-            res = json.loads(data.decode())
-        except (ValueError, UnicodeDecodeError) as exc:
+        if got.error is not None:
             # A truncated or corrupt frame (child killed mid-write) must stay a reported error — letting
             # it raise here would take the worker down with it and lose the whole batch, not one test.
             return ("error",
-                    f"child sent an unreadable result frame ({exc}); {len(data)} bytes received",
+                    f"child sent an unreadable result frame ({got.error}); {got.received} bytes received",
                     {}, _UNKNOWN_PURITY)
+        res = got.reply
         # Reconstruct the purity tri-state from the pipe (`purity_from`: omitted ⇒ unknown).
         return res["outcome"], res.get("detail", ""), res.get("coverage", {}), purity_from(res)
 
@@ -5064,12 +4940,10 @@ def probe() -> int:
     set_run_root(root)
     _insert_run_root(root)
     paths = list(sys.path)  # the sub-interpreter inherits the same import roots (root + site-packages + …)
-    _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
-    while True:
-        req = _read_frame(_STDIN)
-        if req is None:
-            return 0
-        _write_frame(_STDOUT, _probe_module_safe(req["module"], paths))
+    transport = Transport.stdio(redirect_stdout=False)
+    transport.ready()
+    transport.serve(lambda req: _probe_module_safe(req["module"], paths))
+    return 0
 
 
 # Runs INSIDE each pool sub-interpreter (ADR-E015 Phase 2). Builds its own warm Engine — `restore=True`
@@ -5109,15 +4983,13 @@ def subinterp() -> int:
     from concurrent import interpreters  # 3.14+; the caller probes first, so this is expected present
 
     root = sys.argv[1]
-    global _ROOT, _STDOUT
+    global _ROOT
     _ROOT = root
     set_run_root(root)
-    # As in `serve()` (TID-103): the protocol owns a private duplicate of fd 1, and fd 1 goes to
-    # stderr. Every sub-interpreter's `sys.stdout` is fd 1, so a test that printed put its bytes
-    # into the engine's result stream — read as a frame length, waited on forever; click's suite
-    # left the engine waiting on an idle pool (TID-104).
-    _STDOUT = os.dup(1)
-    os.dup2(2, 1)
+    # As in `serve()` (TID-103): every sub-interpreter's `sys.stdout` is fd 1, so a test that
+    # printed put its bytes into the engine's result stream — read as a frame length, waited on
+    # forever; click's suite left the engine waiting on an idle pool (TID-104).
+    transport = Transport.stdio()
     _insert_run_root(root)
     paths = list(sys.path)
     workers = max(1, int(_argv_option(sys.argv[2:], "--pool-size") or os.cpu_count() or 4))
@@ -5133,36 +5005,36 @@ def subinterp() -> int:
         pool.append(it)
         threads.append(t)
 
-    _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
+    def handle(req: dict) -> dict:
+        batch = req.get("batch", [])
+        for task in batch:
+            in_q.put(task)
+        collected = {}
+        # Each result is waited for at most the deadline plus the margin the engine allows a
+        # silent worker (TID-104). A test blocked in a sub-interpreter cannot be interrupted
+        # — no signal lands there, and a watchdog thread cannot be a daemon — so a result
+        # that does not come is reported for every task still outstanding, naming them, and
+        # this process exits: the engine launches a fresh pool for the next batch.
+        budget = max((t.get("deadline_ms", 5000) for t in batch), default=5000) / 1000 + 10
+        for _ in range(len(batch)):
+            try:
+                r = out_q.get(timeout=budget)
+            except Exception:  # noqa: BLE001 — QueueEmpty on timeout, whatever its spelling
+                pending = [t["node_id"] for t in batch if t["node_id"] not in collected]
+                detail = (f"no result within {budget:g}s — a test in this batch blocked in a "
+                          f"sub-interpreter, where nothing can interrupt it (TID-104); "
+                          f"outstanding: {', '.join(pending)}")
+                for node in pending:
+                    collected[node] = errored(node, detail)
+                transport.send({"results": [collected[t["node_id"]] for t in batch]})
+                os._exit(1)  # the blocked interpreter cannot be joined; the pool is done
+            collected[r["node_id"]] = r
+        return {"results": [collected[t["node_id"]] for t in batch]}
+
+    transport.ready()
     try:
-        while True:
-            req = _read_frame(_STDIN)
-            if req is None:
-                return 0
-            batch = req.get("batch", [])
-            for task in batch:
-                in_q.put(task)
-            collected = {}
-            # Each result is waited for at most the deadline plus the margin the engine allows a
-            # silent worker (TID-104). A test blocked in a sub-interpreter cannot be interrupted
-            # — no signal lands there, and a watchdog thread cannot be a daemon — so a result
-            # that does not come is reported for every task still outstanding, naming them, and
-            # this process exits: the engine launches a fresh pool for the next batch.
-            budget = max((t.get("deadline_ms", 5000) for t in batch), default=5000) / 1000 + 10
-            for _ in range(len(batch)):
-                try:
-                    r = out_q.get(timeout=budget)
-                except Exception:  # noqa: BLE001 — QueueEmpty on timeout, whatever its spelling
-                    pending = [t["node_id"] for t in batch if t["node_id"] not in collected]
-                    detail = (f"no result within {budget:g}s — a test in this batch blocked in a "
-                              f"sub-interpreter, where nothing can interrupt it (TID-104); "
-                              f"outstanding: {', '.join(pending)}")
-                    for node in pending:
-                        collected[node] = errored(node, detail)
-                    _write_frame(_STDOUT, {"results": [collected[t["node_id"]] for t in batch]})
-                    os._exit(1)  # the blocked interpreter cannot be joined; the pool is done
-                collected[r["node_id"]] = r
-            _write_frame(_STDOUT, {"results": [collected[t["node_id"]] for t in batch]})
+        transport.serve(handle)
+        return 0
     finally:
         for _ in pool:
             in_q.put(None)  # stop each worker
@@ -5194,13 +5066,13 @@ def _start_clean_room(engine: "Engine") -> None:
         return
 
     ours, theirs = socket.socketpair()
-    pid = os.fork()
-    if pid == 0:  # ---- helper: pristine, and it stays that way ----
+
+    def helper() -> int:  # ---- pristine, and it stays that way ----
         ours.close()
-        try:
-            _clean_room_serve(theirs, engine)
-        finally:
-            os._exit(0)  # never unwind past the fork point in a child
+        _clean_room_serve(theirs, engine)
+        return 0
+
+    spawn(helper)
     theirs.close()
     _CLEAN_ROOM = ours
 
@@ -5211,63 +5083,24 @@ def _clean_room_serve(sock, engine: "Engine") -> None:
     Running the node here instead would set its wider-scope fixtures up in *this* process, and a
     fixture that starts a thread would dirty the one image the run has left. Forking per request costs
     a fork — on the rare path this exists for — and keeps the guarantee absolute."""
-    fd = sock.fileno()
-    while True:
-        req = _read_frame(fd)
-        if req is None:
-            return
-        read_fd, write_fd = os.pipe()
-        pid = os.fork()
-        if pid == 0:  # ---- grandchild: has the clean image, may dirty itself freely ----
-            os.close(read_fd)
+    def handle(req: dict) -> dict:
+        def body() -> dict:  # ---- grandchild: has the clean image, may dirty itself freely ----
             try:
                 # `_CLEAN_ROOM` is None in here (it is set in the worker only, after this helper was
                 # forked), so a demotion inside this run takes the ordinary local fork and cannot
                 # bounce back to us.
-                resp = engine.run(req["node_id"], req["style"], req.get("deadline_ms", 5000))
-                payload = json.dumps(resp).encode()
+                return engine.run(req["node_id"], req["style"], req.get("deadline_ms", 5000))
             except BaseException as exc:  # noqa: BLE001 — report it; never die silently (TID-15)
-                payload = json.dumps(errored(req["node_id"], _child_fault_detail(exc)[:4000])).encode()
-            try:
-                os.write(write_fd, payload)
-            except BaseException:  # noqa: BLE001
-                pass
-            os.close(write_fd)
-            os._exit(0)
-        os.close(write_fd)
+                return errored(req["node_id"], _child_fault_detail(exc)[:4000])
+
         # Wait no longer than the node's own deadline plus slack: a re-run that hangs here must not
         # hang the worker waiting on it, which is the whole failure this exists to end.
-        budget = req.get("deadline_ms", 5000) / 1000.0 + 5.0
-        chunks, deadline = [], time.monotonic() + budget
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            ready, _, _ = select.select([read_fd], [], [], remaining)
-            if not ready:
-                break
-            chunk = os.read(read_fd, 65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        os.close(read_fd)
-        if not chunks:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
-        try:
-            os.waitpid(pid, 0)
-        except OSError:
-            pass
-        raw = b"".join(chunks)
-        try:
-            resp = json.loads(raw) if raw else None
-        except ValueError:
-            resp = None
-        if resp is None:
-            resp = errored(req["node_id"], "timeout (clean re-run produced no result)")
-        _write_frame(fd, resp)
+        got = run_child(body, req.get("deadline_ms", 5000) / 1000.0 + 5.0)
+        if got.reply is None:
+            return errored(req["node_id"], "timeout (clean re-run produced no result)")
+        return got.reply
+
+    Transport.over(sock).serve(handle)
 
 
 class _InProcessTimeout(BaseException):
@@ -5404,7 +5237,7 @@ def _clean_room_run(node_id: str, style: str, deadline_ms: int) -> dict | None:
     return resp
 
 
-def _serve_pool(size: int, socket_path: str, engine_args: dict) -> int:
+def _serve_pool(transport: Transport, size: int, socket_path: str, engine_args: dict) -> int:
     """Import once in this process, then fork `size` workers that each serve their own connection.
 
     The pool exists because the per-worker *import* was being paid N times (TID-4). Every wellspring
@@ -5421,44 +5254,43 @@ def _serve_pool(size: int, socket_path: str, engine_args: dict) -> int:
     Rust side to do beyond accepting `size` connections.
     """
     if size == 0:
-        return _serve_pool_persistent(engine_args)
+        return _serve_pool_persistent(transport, engine_args)
     children = _fork_pool_workers(size, socket_path, engine_args)
     # Parent: nothing to serve. Hold the imported image alive — the children are COW views of it —
     # and reap them so no worker is orphaned if the run is cut short.
     status = 0
     for pid in children:
-        _, st = os.waitpid(pid, 0)
+        st = reap(pid)
         if os.WIFEXITED(st) and os.WEXITSTATUS(st) != 0:
             status = os.WEXITSTATUS(st)
     return status
 
 
-def _serve_pool_persistent(engine_args: dict) -> int:
+def _serve_pool_persistent(transport: Transport, engine_args: dict) -> int:
     """The warm image (TID-84): import once, then serve the Rust side's requests over stdin/stdout
     for as long as it stays connected — `{"spawn": n, "connect": path}` forks `n` workers that
     connect to `path` and serve one run each; `{"ping": true}` answers `{"pong": true}`; EOF ends
     the process. Every run forks fresh workers from the one imported image, so the second run pays
     no import at all. Finished workers are reaped before each spawn; the rest at exit."""
-    _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
     live: list = []
+
+    def handle(req: dict) -> dict | None:
+        live[:] = [pid for pid in live if os.waitpid(pid, os.WNOHANG)[0] == 0]
+        if req.get("ping"):
+            return {"pong": True, "pid": os.getpid(), "workers": len(live)}
+        n = int(req.get("spawn", 0))
+        if n:
+            live.extend(_fork_pool_workers(n, req["connect"], engine_args, req.get("selection")))
+            return {"spawned": n}
+        return None
+
+    transport.ready()
     try:
-        while True:
-            req = _read_frame(_STDIN)
-            if req is None:
-                break
-            live = [pid for pid in live if os.waitpid(pid, os.WNOHANG)[0] == 0]
-            if req.get("ping"):
-                _write_frame(_STDOUT, {"pong": True, "pid": os.getpid(), "workers": len(live)})
-                continue
-            n = int(req.get("spawn", 0))
-            if n:
-                live.extend(_fork_pool_workers(n, req["connect"], engine_args,
-                                               req.get("selection")))
-                _write_frame(_STDOUT, {"spawned": n})
+        transport.serve(handle)
     finally:
         for pid in live:
             try:
-                os.waitpid(pid, 0)
+                reap(pid)
             except ChildProcessError:
                 pass
     return 0
@@ -5496,52 +5328,32 @@ def _fork_pool_workers(size: int, socket_path: str, engine_args: dict,
 
     children = []
     for _ in range(size):
-        pid = os.fork()
-        if pid == 0:
+        def worker() -> int:
             # Child: take a connection of our own and become an ordinary single worker. Anything the
             # parent is holding is irrelevant to us and closing it keeps the parent's exit clean.
-            global _STDIN, _STDOUT
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.connect(socket_path)
-            _STDIN = _STDOUT = sock.fileno()
+            transport = Transport.over(sock)
             _apply_selection(selection)
             engine = Engine(**engine_args)
             _start_clean_room(engine)  # before a single test runs: the image is pristine now (TID-50)
-            _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
+            transport.ready()
             try:
-                while True:
-                    req = _read_frame(_STDIN)
-                    if req is None:
-                        return 0
-                    _write_frame(
-                        _STDOUT,
-                        engine.run(req["node_id"], req["style"], req.get("deadline_ms", 5000),
-                                   req.get("force_no_fork", False), req.get("trusted_pure", False),
-                                   req.get("must_fork", False)),
-                    )
+                transport.serve(_run_handler(engine))
             finally:
                 engine.teardown_all()
-                os._exit(0)  # never unwind past the fork point in a child
-        children.append(pid)
+            return 0
+
+        children.append(spawn(worker))
     return children
 
 
 def serve() -> int:
     root = sys.argv[1]
-    global _ROOT, _STDOUT
+    global _ROOT
     _ROOT = root
     set_run_root(root)
-    # The protocol owns a private duplicate of fd 1, and fd 1 itself — what `print()`, a C
-    # extension and a subprocess's inherited stdout reach — is pointed at stderr (TID-103). The
-    # frames are length-prefixed, so one stray byte on the stream desynchronises it for good: in
-    # the warm image (TID-84) the parent's stdout is the daemon's control pipe, shared by
-    # inheritance with every forked worker, and the first test that printed put its bytes in
-    # front of the next spawn's acknowledgement — read as a frame length and waited on forever.
-    # click's suite hung the daemon on its second run, deterministically. A one-shot worker's
-    # stdout is the engine's result stream, with the same exposure; its stray output now reaches
-    # the engine's stderr instead.
-    _STDOUT = os.dup(1)
-    os.dup2(2, 1)
+    transport = Transport.stdio()  # fd 1 goes to stderr; the frames have a private fd (TID-103)
     no_fork = "--no-fork" in sys.argv[2:]
     coverage = "--coverage" in sys.argv[2:] or _env_flag("TIDERACE_COVERAGE")
     coverage_lines = ("--coverage-lines" in sys.argv[2:]
@@ -5577,23 +5389,23 @@ def serve() -> int:
     pool = _argv_option(sys.argv[2:], "--pool")
     conn = _argv_option(sys.argv[2:], "--connect")
     if pool and conn:
-        return _serve_pool(int(pool), conn, engine_args)
+        return _serve_pool(transport, int(pool), conn, engine_args)
     engine = Engine(**engine_args)
     _start_clean_room(engine)  # before a single test runs: the image is pristine now (TID-50)
-    _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
+    transport.ready()
     try:
-        while True:
-            req = _read_frame(_STDIN)
-            if req is None:
-                return 0
-            _write_frame(
-                _STDOUT,
-                engine.run(req["node_id"], req["style"], req.get("deadline_ms", 5000),
-                           req.get("force_no_fork", False), req.get("trusted_pure", False),
-                           req.get("must_fork", False)),
-            )
+        transport.serve(_run_handler(engine))
+        return 0
     finally:
         engine.teardown_all()
+
+
+def _run_handler(engine: "Engine"):
+    """The worker's request: one node, run with the engine's knobs — what `serve` and every pool
+    worker answer."""
+    return lambda req: engine.run(req["node_id"], req["style"], req.get("deadline_ms", 5000),
+                                  req.get("force_no_fork", False), req.get("trusted_pure", False),
+                                  req.get("must_fork", False))
 
 
 def main() -> int:

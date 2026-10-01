@@ -8,8 +8,13 @@
 //!
 //! Reproduced here the way it actually happens: the test forks a grandchild, which inherits the
 //! result pipe's write end. The test child writes its frame and exits normally, but the pipe never
-//! reaches EOF because the grandchild is still holding it open. The parent has data and no
-//! terminator — precisely the state the old loop could not escape.
+//! reaches EOF because the grandchild is still holding it open. Under the raw-JSON-until-EOF wire
+//! that was a frame with no terminator, reported as a timeout after a partial frame. Since TID-122
+//! the child speaks one length-prefixed frame, so a complete frame counts the moment it is in —
+//! the grandchild holding the pipe open costs nothing, and the test's real outcome is reported.
+//! What must still hold: the batch completes within the deadline rather than hanging on EOF, the
+//! read is bounded (a child that writes half a frame and stops times out — pinned by the shim's
+//! own `tests/test_protocol.py`), and the worker survives for the next test.
 //!
 //! Fork-only by construction: the bug lives in the fork path's pipe handling. `SubprocessWorker`
 //! speaks the framed stdin/stdout protocol and never reaches this code.
@@ -56,7 +61,7 @@ fn write_corpus(tag: &str) -> PathBuf {
 }
 
 #[test]
-fn a_child_that_stops_mid_exchange_times_out_instead_of_hanging() {
+fn a_complete_frame_counts_even_when_a_grandchild_holds_the_pipe() {
     let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
@@ -65,9 +70,9 @@ fn a_child_that_stops_mid_exchange_times_out_instead_of_hanging() {
     let items = RegexCollector::new().collect(&dir).expect("collection");
     assert_eq!(items.len(), 2, "the hanging test and its successor");
 
-    // A short deadline so the test costs ~2s rather than the 60s default. Before the fix this call
-    // never returned at all, so the harness itself is the assertion: reaching the next line means
-    // the read loop is bounded.
+    // A short deadline so the test costs ~2s at most rather than the 60s default. Before TID-31's
+    // fix this call never returned at all, so the harness itself is the assertion: reaching the
+    // next line means the read loop is bounded.
     let results = ForkWorker::launch(&python, &shim(), &dir)
         .expect("wellspring")
         .with_deadline_ms(2_000)
@@ -82,20 +87,13 @@ fn a_child_that_stops_mid_exchange_times_out_instead_of_hanging() {
                 .ends_with("test_a_leaves_a_grandchild_holding_the_pipe")
         })
         .expect("the hanging test is reported at all");
+    // The frame was complete, so the test's own verdict stands: the grandchild holding the pipe's
+    // write end is not the test's fault, and waiting for an EOF that never comes is what the old
+    // loop did. A frame that is genuinely cut short still times out with "partial result frame".
     assert_eq!(
         hung.outcome,
-        Outcome::Error,
-        "a child that stopped mid-exchange must be reported, not waited on forever"
-    );
-    assert!(
-        hung.detail.contains("timeout"),
-        "the report must say it timed out; got {:?}",
-        hung.detail
-    );
-    // TID-15's principle: a partial frame is a different fault from silence, and the parent says so.
-    assert!(
-        hung.detail.contains("partial result frame"),
-        "a partial frame must be distinguished from a silent timeout; got {:?}",
+        Outcome::Passed,
+        "a complete frame counts even while a grandchild holds the pipe; detail: {}",
         hung.detail
     );
 
