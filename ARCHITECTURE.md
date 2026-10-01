@@ -98,7 +98,7 @@ flowchart TB
 | Daemon | `engine-daemon` → `tiderace-daemon` | warm server: impact-aware `run`, `serve` (RPC), `watch`, parallel pool |
 | Engine | `engine-core` | all collection/graph/schedule/exec/coverage/impact/cache logic |
 | ② | `engine-inproc` → `inproc-probe` | embedded-CPython transport experiment (PyO3) |
-| Substrate | `py-shim/shim.py` | import user code, invoke bodies, isolation, coverage, purity |
+| Substrate | `py-shim/shim.py` (entry) → `py-shim/tiderace_shim/` | import user code, invoke bodies, isolation, coverage, purity |
 | Authoring | `py-tiderace/tiderace` | native type-DI decorators + `migrate` codemod |
 
 ---
@@ -408,7 +408,7 @@ The authoritative rationale lives in `planning/current/pure-rust-test-engine/des
 | Scheduling | `engine-core/src/scheduler/locality_scheduler.rs` |
 | The fork model | `engine-core/src/exec/tiers/fork.rs`, `tiers/pool.rs`, `process/shim_process.rs` |
 | The transport seam | `engine-core/src/exec/transport.rs`, `shim_protocol.rs` |
-| The isolation ladder | `py-shim/shim.py` (`static_impurity`, `_restorable`, `_restore_shared`, `Engine.run`) |
+| The isolation ladder | `py-shim/tiderace_shim/_shim.py` (`static_impurity`, `_restorable`, `_restore_shared`, `Engine.run`) |
 | Impact-skip | `engine-daemon/src/state/plan.rs`, `impacted_run.rs` |
 | The cache | `engine-core/src/cache/` (`cache_key.rs`, `tiered_cache.rs`, `purity.rs`) |
 | Parallel pool | `engine-core/src/runner/run.rs`, `exec/tier.rs`, `exec/tiers/` |

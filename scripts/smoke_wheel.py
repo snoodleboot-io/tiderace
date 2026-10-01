@@ -81,8 +81,9 @@ def main() -> int:
         python = venv_bin(venv) / ("python.exe" if os.name == "nt" else "python")
         run([uv, "pip", "install", "--python", str(python), str(wheel), "numpy", "pytest"], check=True)
 
-        # The authoring package and the staged shim must both be importable from the wheel.
-        run([python, "-c", "import tiderace, tiderace._shim"], check=True)
+        # The authoring package and the staged shim — entry file and package — must all be
+        # importable from the wheel.
+        run([python, "-c", "import tiderace, tiderace._shim, tiderace._shim.tiderace_shim"], check=True)
 
         # Zero-config proof: venv bin on PATH, and the two override vars removed entirely.
         env = dict(os.environ)
@@ -104,6 +105,21 @@ def main() -> int:
         print(result.stdout)
         if EXPECTED not in (result.stdout or ""):
             raise SystemExit(f"error: smoke test did not run the corpus as expected (no {EXPECTED!r} in output)")
+
+        # The CLI locates the same bundled shim (its own `default_shim` call), zero-config too.
+        cli = shutil.which("tiderace", path=str(venv_bin(venv)))
+        if cli is None:
+            raise SystemExit(f"error: tiderace not installed into {venv_bin(venv)}")
+        result = run(
+            [cli, "run", "-q", "."],
+            cwd=str(corpus),
+            env=dict(env, TIDERACE_NO_DAEMON="1"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        print(result.stdout)
+        if "1 failed" not in (result.stdout or ""):
+            raise SystemExit("error: `tiderace run` did not run the corpus zero-config (no '1 failed' in output)")
 
     print("smoke test OK")
     return 0
