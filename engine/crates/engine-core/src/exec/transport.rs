@@ -133,41 +133,7 @@ pub(crate) fn run_batch_lost<T: ShimTransport + ?Sized>(
             Err(e) => return Err(e),
         };
         let duration_ms = start.elapsed().as_millis() as u64;
-        // A parametrized node reports one result per case (TID-25). The cases already ran and forked
-        // individually, so this reports what was executed rather than the worst of it.
-        if resp.expanded || !resp.variants.is_empty() {
-            results.extend(resp.variants.into_iter().map(|v| {
-                let touched = v.coverage.keys().cloned().collect();
-                TestResult::new(
-                    NodeId::new(v.node_id),
-                    Outcome::from_wire(&v.outcome),
-                    v.duration_ms,
-                    v.detail,
-                )
-                .with_touched(touched)
-                .with_pure(v.pure)
-                .with_must_fork(v.must_fork)
-                .with_keywords(v.keywords)
-                // These ids did not come from the static collector — they were produced here, by
-                // expanding a parametrized node or an inherited class (TID-55).
-                .with_expanded(true)
-            }));
-            continue;
-        }
-        let touched = resp.coverage.keys().cloned().collect();
-        results.push(
-            TestResult::new(
-                item.node_id.clone(),
-                Outcome::from_wire(&resp.outcome),
-                duration_ms,
-                resp.detail,
-            )
-            .with_touched(touched)
-            .with_pure(resp.pure)
-            .with_must_fork(resp.must_fork)
-            .with_skip_origin(resp.skip_origin)
-            .with_keywords(resp.keywords),
-        );
+        results.extend(results_for(item, resp, duration_ms));
     }
     Ok((results, None))
 }
@@ -306,6 +272,53 @@ impl<W: Write> ShimTransport for BudgetedTransport<W> {
         self.next_frame(Some(self.budget))?
             .ok_or_else(|| EngineError::Exec("shim closed mid-run".into()))
     }
+}
+
+/// The results one shim response stands for: the node's own, or one per case when the node
+/// expanded (TID-25) — and none at all for an empty expansion, which is how a deselected node and
+/// a class that inherits nothing report themselves. Shared by every transport (TID-104): a tier
+/// that read a response as one outcome counted a deselected node as a pass.
+pub(crate) fn results_for(
+    item: &TestItem,
+    resp: ExecResponse,
+    duration_ms: u64,
+) -> Vec<TestResult> {
+    // A parametrized node reports one result per case (TID-25). The cases already ran and forked
+    // individually, so this reports what was executed rather than the worst of it.
+    if resp.expanded || !resp.variants.is_empty() {
+        return resp
+            .variants
+            .into_iter()
+            .map(|v| {
+                let touched = v.coverage.keys().cloned().collect();
+                TestResult::new(
+                    NodeId::new(v.node_id),
+                    Outcome::from_wire(&v.outcome),
+                    v.duration_ms,
+                    v.detail,
+                )
+                .with_touched(touched)
+                .with_pure(v.pure)
+                .with_must_fork(v.must_fork)
+                .with_keywords(v.keywords)
+                // These ids did not come from the static collector — they were produced here, by
+                // expanding a parametrized node or an inherited class (TID-55).
+                .with_expanded(true)
+            })
+            .collect();
+    }
+    let touched = resp.coverage.keys().cloned().collect();
+    vec![TestResult::new(
+        item.node_id.clone(),
+        Outcome::from_wire(&resp.outcome),
+        duration_ms,
+        resp.detail,
+    )
+    .with_touched(touched)
+    .with_pure(resp.pure)
+    .with_must_fork(resp.must_fork)
+    .with_skip_origin(resp.skip_origin)
+    .with_keywords(resp.keywords)]
 }
 
 /// One frame's payload bytes, `None` at EOF — [`read_frame`] without the parse, for a reader

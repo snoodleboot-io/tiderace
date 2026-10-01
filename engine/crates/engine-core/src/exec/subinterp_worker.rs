@@ -16,12 +16,15 @@ use std::collections::HashMap;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use crate::domain::{Outcome, TestItem, TestResult};
 use crate::error::{EngineError, Result};
-use crate::exec::shim_protocol::{read_frame, write_frame};
+use crate::exec::shim_protocol::{read_frame, write_frame, ExecResponse};
+use crate::exec::transport::{results_for, LOST_WORKER_MARGIN_MS};
 use crate::exec::worker::Worker;
 
 /// Sub-interpreter-pool executor (ADR-E015). `pool_size = None` ⇒ the shim's default (CPU count).
@@ -103,7 +106,7 @@ impl SubInterpWorker {
         Ok(Proc {
             child,
             stdin,
-            stdout,
+            stdout: Some(stdout),
         })
     }
 }
@@ -132,8 +135,45 @@ impl Worker for SubInterpWorker {
         write_frame(proc.stdin(), &json!({ "batch": batch }))
             .map_err(|e| EngineError::Exec(format!("subinterp batch write: {e}")))?;
 
-        // … one batch back.
-        let resp: Value = read_frame(&mut proc.stdout)
+        // … one batch back — within a budget (TID-104). A test that blocks in a sub-interpreter
+        // cannot be interrupted from inside (no signal lands there, and the watchdog thread
+        // cannot be a daemon), so the pool's reply is read on a thread and waited for at most
+        // the batch's share of the deadline plus the lost-worker margin; past that the pool is
+        // killed and the batch reported — the shim's own per-task watchdog answers first when it
+        // can, naming the task that blocked.
+        let pool_size = self.pool_size.unwrap_or_else(default_pool_size).max(1);
+        let rounds = items.len().div_ceil(pool_size) as u64;
+        let budget = Duration::from_millis(
+            self.deadline_ms
+                .saturating_mul(rounds)
+                .saturating_add(LOST_WORKER_MARGIN_MS),
+        );
+        let mut stdout = proc.stdout.take().expect("the pool's stdout is open");
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("tiderace-subinterp-reader".into())
+            .spawn(move || {
+                let frame = read_frame::<_, Value>(&mut stdout);
+                let _ = tx.send((frame, stdout));
+            })
+            .map_err(|e| EngineError::Exec(format!("subinterp reader thread: {e}")))?;
+        let (frame, stdout) = match rx.recv_timeout(budget) {
+            Ok(got) => got,
+            Err(_) => {
+                let _ = proc.child.kill();
+                let fault = format!(
+                    "no result from the sub-interpreter pool within {:.0}s — a test in this \
+                     batch blocked where nothing could interrupt it; the pool was killed (TID-104)",
+                    budget.as_secs_f64()
+                );
+                return Ok(items
+                    .iter()
+                    .map(|it| TestResult::new(it.node_id.clone(), Outcome::Error, 0, fault.clone()))
+                    .collect());
+            }
+        };
+        proc.stdout = Some(stdout);
+        let resp: Value = frame
             .map_err(|e| EngineError::Exec(format!("subinterp results read: {e}")))?
             .ok_or_else(|| EngineError::Exec("subinterp closed mid-batch".into()))?;
         let results = resp
@@ -141,28 +181,35 @@ impl Worker for SubInterpWorker {
             .and_then(Value::as_array)
             .ok_or_else(|| EngineError::Exec("subinterp response missing `results`".into()))?;
 
-        // Index by node id, then rebuild in the caller's order (a missing node ⇒ Error, never dropped).
-        let by_node: HashMap<&str, (&str, &str)> = results
-            .iter()
-            .filter_map(|r| {
-                let node = r.get("node_id")?.as_str()?;
-                let outcome = r.get("outcome").and_then(Value::as_str).unwrap_or("error");
-                let detail = r.get("detail").and_then(Value::as_str).unwrap_or("");
-                Some((node, (outcome, detail)))
-            })
-            .collect();
-
+        // Each result is the shim's whole response for its node — expansion, skips, keywords —
+        // and reads as one does on every other transport (TID-104). Indexed by node id, then
+        // rebuilt in the caller's order; a node with no response is an error, never dropped.
+        let mut by_node: HashMap<String, ExecResponse> = HashMap::new();
+        for r in results {
+            if let Ok(resp) = serde_json::from_value::<ExecResponse>(r.clone()) {
+                by_node.insert(resp.node_id.clone(), resp);
+            }
+        }
         Ok(items
             .iter()
-            .map(|it| {
-                let (outcome, detail) = by_node
-                    .get(it.node_id.as_str())
-                    .copied()
-                    .unwrap_or(("error", "no result returned by subinterp pool"));
-                TestResult::new(it.node_id.clone(), Outcome::from_wire(outcome), 0, detail)
+            .flat_map(|it| match by_node.remove(it.node_id.as_str()) {
+                Some(resp) => results_for(it, resp, 0),
+                None => vec![TestResult::new(
+                    it.node_id.clone(),
+                    Outcome::Error,
+                    0,
+                    "no result returned by subinterp pool",
+                )],
             })
             .collect())
     }
+}
+
+/// The pool size the shim takes when none is given: its own default, the CPU count.
+fn default_pool_size() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
 }
 
 /// A live `--subinterp` process + its pipes (mirrors `NoForkProc`). `stdin` is an `Option` so `Drop`
@@ -170,7 +217,8 @@ impl Worker for SubInterpWorker {
 struct Proc {
     child: Child,
     stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
+    /// Taken by the reader thread for the batch's reply and put back after (TID-104).
+    stdout: Option<BufReader<ChildStdout>>,
 }
 
 impl Proc {
@@ -182,8 +230,10 @@ impl Proc {
 impl Drop for Proc {
     fn drop(&mut self) {
         self.stdin.take(); // close write half → EOF → the shim stops its workers and exits
-        let mut sink = Vec::new();
-        let _ = self.stdout.get_mut().read_to_end(&mut sink); // drain, then reap
+        if let Some(stdout) = self.stdout.as_mut() {
+            let mut sink = Vec::new();
+            let _ = stdout.get_mut().read_to_end(&mut sink); // drain, then reap
+        }
         let _ = self.child.wait();
     }
 }
