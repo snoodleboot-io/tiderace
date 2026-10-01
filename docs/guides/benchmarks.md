@@ -156,9 +156,16 @@ build, Python 3.14.7, the corpora that need no private snapshot, three rounds af
 
 On suites this small every parallel tier pays more in start-up than it earns, on every platform,
 xdist most of all. Windows has no fork, so tiderace's default there is the no-fork subprocess
-worker; the sub-interpreter tier runs both suites but exits 1 on each — tests pass in the
-subprocess tier that fail in a sub-interpreter — and hung for an hour on click's suite
-(TID-104). It is not a tier to select by default. click 8.1.7's own suite does not collect under
+worker; the sub-interpreter tier ran both suites but exited 1 on each — tests pass in the
+subprocess tier that failed in a sub-interpreter — and hung for an hour on click's suite. Both
+were one defect, fixed since (TID-104): the tier read each reply as a single outcome, so a `-k`
+deselection came back a pass and a parametrized node one result; and nothing ended a test that
+blocked there. The tier now reads whole replies, its shim parent waits at most the deadline for
+each and names what is outstanding, the engine kills a pool whose reply is overdue, and modules
+that set process-wide state (the cwd, the environment, signals — shared by every sub-interpreter
+in the process) are routed to the fallback by the probe. click's suite in the tier on Linux is
+pytest's answer, 589 passed and 21 skipped, in about 1.5 s; the next workflow run remeasures
+Windows. It is still not a tier to select by default. click 8.1.7's own suite does not collect under
 pytest on 3.14, so it is not a baseline on these runners. The monorepo suites, where the parallel
 tiers earn their keep, have no Windows measurement: their snapshots are private and the machine
 is Linux.

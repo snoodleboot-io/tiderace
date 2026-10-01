@@ -142,16 +142,23 @@ impl SafeSetCache {
     }
 }
 
-/// Hex content hash of `<root>/rel`; a sentinel for a missing or unreadable file, which therefore
-/// always counts as changed and re-probes.
+/// The probe's rules, as a version folded into every cached hash: a verdict taken under older
+/// rules re-probes, since the module's content alone did not change when the rules did. Bumped
+/// when `_probe_module_safe` learns a new reason to say no (TID-104: process-global state).
+const PROBE_RULES: &str = "2";
+
+/// Hex content hash of `<root>/rel` under the current probe rules; a sentinel for a missing or
+/// unreadable file, which therefore always counts as changed and re-probes.
 fn hash_file(root: &Path, rel: &str) -> String {
     match std::fs::read(root.join(rel)) {
         Ok(bytes) => {
             let digest = ClosureHasher::new().feed(&bytes).finish();
-            let mut s = String::with_capacity(64);
+            let mut s = String::with_capacity(72);
             for b in digest.as_bytes() {
                 s.push_str(&format!("{b:02x}"));
             }
+            s.push('#');
+            s.push_str(PROBE_RULES);
             s
         }
         Err(_) => "missing".to_string(),

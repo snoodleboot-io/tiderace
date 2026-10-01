@@ -5345,6 +5345,16 @@ def _probe_module_safe(module_key: str, paths: list) -> dict:
         from concurrent import interpreters
     except Exception:  # noqa: BLE001 — no sub-interpreter API ⇒ undeterminable, caller falls back to fork
         return {"module": module_key, "safe": None, "reason": "concurrent.interpreters unavailable (CPython < 3.14)"}
+    # Process-global state is shared across sub-interpreters: the working directory, the
+    # environment `putenv` reaches, signal handlers, the umask. A module whose tests move any of
+    # it is unsafe there whatever it imports — click's `monkeypatch.chdir` into a temp directory
+    # that another interpreter's teardown then removed left every other interpreter with no
+    # working directory at all, 306 errors and a hung pool (TID-104). Found by text, since the
+    # import probe cannot see what a test body will do.
+    global_touch = _touches_process_globals(module_key)
+    if global_touch:
+        return {"module": module_key, "safe": False,
+                "reason": f"touches process-global state ({global_touch}), shared across sub-interpreters"}
     interp = interpreters.create()
     try:
         interp.exec("import sys\nsys.path[:0] = %r\nimport %s\n" % (paths, module_name))
@@ -5358,6 +5368,28 @@ def _probe_module_safe(module_key: str, paths: list) -> dict:
             interp.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+_PROCESS_GLOBAL_CALLS = ("chdir(", "isolated_filesystem(", "putenv(", "unsetenv(", "setenv(",
+                         "delenv(", "os.environ[", "signal.signal(", "umask(")
+
+
+def _touches_process_globals(module_key: str) -> str:
+    """The first process-global call named in a test module's source, or in the `conftest.py`
+    beside it, or `""` — the text check behind the sub-interpreter probe (TID-104)."""
+    root = os.path.abspath(_ROOT or ".")
+    candidates = [os.path.join(root, module_key),
+                  os.path.join(root, os.path.dirname(module_key), "conftest.py")]
+    for path in candidates:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for call in _PROCESS_GLOBAL_CALLS:
+            if call in text:
+                return f"{call[:-1] if call.endswith('(') else call} in {os.path.basename(path)}"
+    return ""
 
 
 def probe() -> int:
@@ -5393,8 +5425,11 @@ try:
         try:
             _r = _eng.run(_task["node_id"], _task["style"], _task.get("deadline_ms", 5000),
                           force_no_fork=True)
-            _out_q.put({"node_id": _task["node_id"], "outcome": _r["outcome"],
-                        "detail": _r.get("detail", "")})
+            # The whole response — expansion, variants, skips, keywords — so the engine reads it
+            # as it reads every other transport's (TID-104): an empty expansion is a deselected
+            # node, not a pass, and a parametrized node is its cases.
+            _r.setdefault("node_id", _task["node_id"])
+            _out_q.put(_r)
         except BaseException as _exc:  # noqa: BLE001 — never drop a task's response
             _out_q.put({"node_id": _task["node_id"], "outcome": "error", "detail": repr(_exc)})
 finally:
@@ -5412,8 +5447,14 @@ def subinterp() -> int:
     from concurrent import interpreters  # 3.14+; the caller probes first, so this is expected present
 
     root = sys.argv[1]
-    global _ROOT
+    global _ROOT, _STDOUT
     _ROOT = root
+    # As in `serve()` (TID-103): the protocol owns a private duplicate of fd 1, and fd 1 goes to
+    # stderr. Every sub-interpreter's `sys.stdout` is fd 1, so a test that printed put its bytes
+    # into the engine's result stream — read as a frame length, waited on forever; click's suite
+    # left the engine waiting on an idle pool (TID-104).
+    _STDOUT = os.dup(1)
+    os.dup2(2, 1)
     _insert_run_root(root)
     paths = list(sys.path)
     workers = max(1, int(os.environ.get("TIDERACE_SUBINTERP_WORKERS") or (os.cpu_count() or 4)))
@@ -5439,8 +5480,24 @@ def subinterp() -> int:
             for task in batch:
                 in_q.put(task)
             collected = {}
+            # Each result is waited for at most the deadline plus the margin the engine allows a
+            # silent worker (TID-104). A test blocked in a sub-interpreter cannot be interrupted
+            # — no signal lands there, and a watchdog thread cannot be a daemon — so a result
+            # that does not come is reported for every task still outstanding, naming them, and
+            # this process exits: the engine launches a fresh pool for the next batch.
+            budget = max((t.get("deadline_ms", 5000) for t in batch), default=5000) / 1000 + 10
             for _ in range(len(batch)):
-                r = out_q.get()
+                try:
+                    r = out_q.get(timeout=budget)
+                except Exception:  # noqa: BLE001 — QueueEmpty on timeout, whatever its spelling
+                    pending = [t["node_id"] for t in batch if t["node_id"] not in collected]
+                    detail = (f"no result within {budget:g}s — a test in this batch blocked in a "
+                              f"sub-interpreter, where nothing can interrupt it (TID-104); "
+                              f"outstanding: {', '.join(pending)}")
+                    for node in pending:
+                        collected[node] = {"node_id": node, "outcome": "error", "detail": detail}
+                    _write_frame(_STDOUT, {"results": [collected[t["node_id"]] for t in batch]})
+                    os._exit(1)  # the blocked interpreter cannot be joined; the pool is done
                 collected[r["node_id"]] = r
             _write_frame(_STDOUT, {"results": [collected[t["node_id"]] for t in batch]})
     finally:
@@ -5632,7 +5689,10 @@ class _in_process_deadline:
             _set_async_exc(self.target, _InProcessTimeout)
 
         self.timer = threading.Timer(seconds, fire)
-        self.timer.daemon = True
+        try:
+            self.timer.daemon = True  # the setter itself raises in a sub-interpreter (3.14)
+        except RuntimeError:  # daemon threads are disabled there: a plain thread, cancelled or
+            self.timer.daemon = False  # fired by __exit__, so it never outlives the test
         self.timer.start()
         return self
 
