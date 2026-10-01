@@ -3,8 +3,12 @@
 //! env vars, take the pipes, parse the ready frame and close-then-reap on drop — five copies,
 //! four of them slightly different.
 
+mod budgeted_reader;
 mod launch;
+mod reaper;
 mod shim_process;
 
+pub use budgeted_reader::BudgetedReader;
 pub use launch::{ShimLaunch, ShimMode, ShimTarget};
+pub use reaper::reap_lost;
 pub use shim_process::ShimProcess;
