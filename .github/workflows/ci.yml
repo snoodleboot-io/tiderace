@@ -99,6 +99,12 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/engine/py-tiderace
         run: cargo test --all
 
+      - name: The shim's own unit tests
+        # The shim's foundations (TID-121): the wire shapes in `results.py` are pinned to the
+        # literals the Rust side reads, the target resolver and the config loader are tested on
+        # temp trees. Plain pytest in the fx venv; no engine involved.
+        run: .tiderace-fx-venv/bin/python -m pytest engine/py-shim/tests -q
+
       - name: Type-check the excluded engine-inproc crate
         # `engine-inproc` (the PyO3 ② side-bet) is excluded from the workspace, so `--workspace` never
         # touches it, and it has no tests of its own. It silently bit-rotted: TID-1 added

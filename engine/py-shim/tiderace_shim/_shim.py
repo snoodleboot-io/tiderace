@@ -27,7 +27,9 @@ import asyncio
 import copy
 import difflib
 import enum
+import fnmatch
 import functools
+import hashlib
 import importlib
 import importlib.util
 import inspect
@@ -39,7 +41,9 @@ import os
 import re
 import select
 import signal
+import socket
 import struct
+import subprocess
 import sys
 import textwrap
 import threading
@@ -48,6 +52,13 @@ import traceback
 import typing
 import unittest
 import warnings
+
+from .config import NOTSET as _NOTSET, ProjectConfig, load_project_config, option as _argv_option
+from .nodes import (Target, class_method as _class_method, import_module as _import_module,
+                    module_key as _module_key, module_name as _module_name, resolve_target,
+                    set_run_root)
+from .results import (UNKNOWN_PURITY as _UNKNOWN_PURITY, Outcome, empty_expansion, errored,
+                      expansion, purity_from, response, skipped, variant, with_purity)
 
 _STDIN = 0
 _STDOUT = 1
@@ -122,18 +133,6 @@ def _warn(message: str) -> None:
     print(f"tiderace: {message}", file=sys.stderr, flush=True)
 
 
-def _flag_value(name: str) -> str | None:
-    """The value of `--flag value` or `--flag=value` in argv, or None. Deliberately tiny: the shim
-    takes a handful of flags and pulling in argparse would cost more at startup than it saves."""
-    argv = sys.argv[2:]
-    for i, a in enumerate(argv):
-        if a == name and i + 1 < len(argv):
-            return argv[i + 1]
-        if a.startswith(name + "="):
-            return a.split("=", 1)[1]
-    return None
-
-
 def _read_frame(fd: int) -> dict | None:
     header = _read_exactly(fd, 4)
     if header is None:
@@ -197,11 +196,6 @@ class _ModuleChild:
 
 
 # --------------------------------------------------------------------------- node ids
-def _module_key(node_id: str) -> str:
-    """The module path of a node id: 'tests/m.py::C::t' -> 'tests/m.py'."""
-    return node_id.partition("::")[0]
-
-
 _ROOT = ""  # the run root (argv[1]); set by serve()/probe()/subinterp() before any import
 
 
@@ -280,55 +274,6 @@ def _insert_run_root(root: str) -> None:
             f"{', '.join(shadowed)}, which shadow standard-library modules of the same name; "
             f"imports of those will resolve here, not to the stdlib"
         )
-
-
-def _module_name(module_key: str) -> str:
-    """Importable dotted module name for a module key ('tests/m.py' -> 'tests.m').
-
-    Rooted the way pytest roots it: walk up while the directory is a package
-    (has `__init__.py`), and import relative to the first directory that is not.
-    That directory is also put on `sys.path`, because the dotted name is only
-    resolvable from there.
-
-    Naming relative to the run root instead is wrong whenever a test package is
-    named like a stdlib module. `<root>/types/test_x.py` yields `types.test_x`,
-    and `types` resolves to the stdlib module — "No module named
-    'types.test_x'; 'types' is not a package" — so every test under such a
-    directory errors, but only when the run root sits above it. Running that
-    directory directly renames the module and the errors vanish, which makes the
-    bug look like a batch-size effect rather than a naming one.
-    """
-    base = os.path.abspath(_ROOT) if _ROOT else os.getcwd()
-    directory, name = _module_name_walk(module_key, base)
-    if directory not in sys.path:
-        sys.path.insert(0, directory)
-    return name
-
-
-@functools.lru_cache(maxsize=None)
-def _module_name_walk(module_key: str, base: str) -> tuple[str, str]:
-    """The walk behind `_module_name`, memoised: `(import directory, dotted name)`.
-
-    Every node asks for its module's name four or five times — the fixture check, the requested
-    params, the marks, the class chain — and each walk is a `stat` per directory level. On a
-    5,600-node suite that was 19,000 `stat`s and 61% of the cost of deselecting a node, which is
-    what a `-k` run does to every node it does not select (TID-91). The answer depends only on
-    which `__init__.py` files exist, which does not change within a run."""
-    path = module_key[:-3] if module_key.endswith(".py") else module_key
-    absolute = os.path.join(base, path.replace("/", os.sep))
-    directory, stem = os.path.split(absolute)
-    parts = [stem]
-    while os.path.exists(os.path.join(directory, "__init__.py")):
-        directory, package = os.path.split(directory)
-        parts.insert(0, package)
-    return directory, ".".join(parts)
-
-
-def _class_method(node_id: str) -> tuple[str, str]:
-    """('C', 't') for 'm.py::C::t'."""
-    rest = node_id.partition("::")[2]
-    cls, _, method = rest.partition("::")
-    return cls, method
 
 
 def _test_dir(module_key: str) -> str:
@@ -566,9 +511,7 @@ _CLI_OPTIONS: dict[str, object] = {}
 # value the project's config sets wins over the declared default; `getini` of a name nobody
 # declared is `None`, as before.
 _INI_DECLARED: dict[str, tuple] = {}
-_CONFIG_DIR: str = ""  # where the project's config was read from, for `getini`
-
-_NOTSET = object()
+_PROJECT: ProjectConfig | None = None  # the project's config, loaded once by `_discover` (TID-121)
 
 
 def _ini_value(name: str):
@@ -576,7 +519,7 @@ def _ini_value(name: str):
     else `None`. Typed the way pytest types it — `bool` parses, list types split."""
     declared = _INI_DECLARED.get(name)
     ini_type = declared[0] if declared else None
-    values = _config_values(_CONFIG_DIR, name) if _CONFIG_DIR else []
+    values = _PROJECT.values(name) if _PROJECT is not None else []
     if values:
         if ini_type == "bool":
             text = str(values[0]).strip().lower()
@@ -1117,91 +1060,26 @@ _DECLARED_MARKS: frozenset = frozenset()  # names the project declared via `mark
 _STRICT_MARKS = False  # --strict-markers: using an undeclared mark is an error, as in pytest
 
 
-def _read_addopts(start: str) -> str:
-    """`addopts` from the nearest pytest config at or above `start`, or "" if there is none."""
-    return _read_addopts_at(start)[0]
-
-
-def _read_addopts_at(start: str) -> tuple[str, str]:
-    """`addopts` and the directory of the config it came from (`("", start)` when there is none).
-
-    The directory matters for `--ignore`: pytest resolves those paths against the config's own
-    directory, not against the run root.
-
-    Searched in pytest's own precedence order, and stopping at the first file that *carries* a
-    pytest section rather than the first file that exists — a `pyproject.toml` with no
-    `[tool.pytest.ini_options]` does not mean the project has no pytest config."""
-    directory = os.path.abspath(start)
-    while True:
-        for name in ("pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"):
-            path = os.path.join(directory, name)
-            if not os.path.exists(path):
-                continue
-            try:
-                if name == "pyproject.toml":
-                    import tomllib
-                    with open(path, "rb") as fh:
-                        tool = tomllib.load(fh).get("tool", {}).get("pytest")
-                    found = isinstance(tool, dict)
-                    # `[tool.pytest.ini_options]`, or pytest 9's native `[tool.pytest]` table
-                    section = (tool.get("ini_options") if found else None) or (tool if found else {})
-                else:
-                    import configparser
-                    parser = configparser.ConfigParser()
-                    parser.read(path)
-                    header = "tool:pytest" if name == "setup.cfg" else "pytest"
-                    found = parser.has_section(header)
-                    section = dict(parser[header]) if found else {}
-            except Exception:  # noqa: BLE001 — an unreadable config must not stop the run
-                continue
-            # The section's *presence* is what makes this the config file — and its directory the
-            # rootdir — as for pytest: an empty `[pytest]` in a `pytest.ini` counts (TID-100).
-            if found:
-                addopts = section.get("addopts", "") or ""
-                if isinstance(addopts, (list, tuple)):  # the native TOML table takes a list
-                    addopts = " ".join(str(a) for a in addopts)
-                return str(addopts), directory
-        parent = os.path.dirname(directory)
-        if parent == directory:
-            return "", os.path.abspath(start)
-        directory = parent
-
-
 _IGNORED: tuple = ()  # absolute paths the project's own `addopts` excludes from collection
 
 
-def _ignores_from(addopts: str, config_dir: str) -> tuple:
-    """`--ignore` / `--ignore-glob` paths out of an `addopts` string, resolved to absolute paths.
+def _ignores(project: ProjectConfig) -> tuple:
+    """`--ignore` / `--ignore-glob` paths out of the project's `addopts`, resolved to absolute paths
+    against the config's own directory, as pytest resolves them.
 
     A project that excludes a directory from its default run means it: pirn-core's `--ignore=tests/perf`
     holds benchmarks that need the `pytest-benchmark` plugin, and collecting them anyway reported 23
     failures for tests pytest never runs. Ignored here rather than in the Rust collector because this
     is where the project's own config is already being read."""
-    if not addopts:
-        return ()
-    try:
-        import shlex
-        argv = shlex.split(addopts)
-    except ValueError:
-        return ()
-    out: list = []
-    for i, arg in enumerate(argv):
-        for flag, glob in (("--ignore", False), ("--ignore-glob", True)):
-            value = None
-            if arg.startswith(flag + "="):
-                value = arg[len(flag) + 1:]
-            elif arg == flag and i + 1 < len(argv):
-                value = argv[i + 1]
-            if value:
-                out.append((os.path.abspath(os.path.join(config_dir, value)), glob))
-    return tuple(out)
+    return tuple((os.path.abspath(os.path.join(project.dir, value)), glob)
+                 for flag, glob in (("--ignore", False), ("--ignore-glob", True))
+                 for value in project.opt_values(flag) if value)
 
 
 def _is_ignored(path: str) -> bool:
     """Is `path` (absolute) excluded by the project's own `--ignore` / `--ignore-glob`?"""
     if not _IGNORED:
         return False
-    import fnmatch
     # Absolute on both sides: the run root arrives as `.` as often as not, and a relative path never
     # matches a target resolved against the config's directory.
     path = os.path.abspath(path)
@@ -1212,26 +1090,6 @@ def _is_ignored(path: str) -> bool:
         elif path == target or path.startswith(target + os.sep):
             return True
     return False
-
-
-def _marker_expr_from(addopts: str, flag: str = "-m"):
-    """The `-m EXPR` (or `-k EXPR`) value out of an `addopts` string, in the three spellings pytest
-    accepts: `-m EXPR`, `-m=EXPR`, `-mEXPR`."""
-    if not addopts:
-        return None
-    try:
-        import shlex
-        argv = shlex.split(addopts)
-    except ValueError:  # noqa: BLE001 — unbalanced quotes; treat as no filter rather than guessing
-        return None
-    for i, arg in enumerate(argv):
-        if arg == flag and i + 1 < len(argv):
-            return argv[i + 1]
-        if arg.startswith(flag + "="):
-            return arg[len(flag) + 1:]
-        if arg.startswith(flag) and len(arg) > len(flag):
-            return arg[len(flag):]
-    return None
 
 
 # pytest's identifier class for `-m` / `-k`: a keyword may be a parametrize id, `test_x[1-a]`.
@@ -1362,7 +1220,7 @@ def _keyword_path_names(module_key: str) -> tuple:
     if cached is not None:
         return cached
     root = os.path.abspath(_ROOT or ".")
-    rootdir = os.path.abspath(_CONFIG_DIR) if _CONFIG_DIR else root
+    rootdir = _PROJECT.dir if _PROJECT is not None else root
     module_path = os.path.join(root, module_key)
     try:
         rel = os.path.relpath(module_path, rootdir)
@@ -1510,10 +1368,10 @@ def _discover(root: str) -> Registry:
     reg = Registry()
     # The project's own config, read before the walk: `--ignore` has to prune it, and the `-m` filter
     # below is read from the same place.
-    addopts, config_dir = _read_addopts_at(root)
-    global _IGNORED, _CONFIG_DIR
-    _IGNORED = _ignores_from(addopts, config_dir)
-    _CONFIG_DIR = config_dir
+    project = load_project_config(root)
+    global _IGNORED, _PROJECT
+    _IGNORED = _ignores(project)
+    _PROJECT = project
     native: list[tuple] = []  # (provider obj, location) — resolved in a second pass (see below)
     conftests: list = []  # every conftest module, for the collection hooks (TID-20)
     _CONFTEST_SCOPES.clear()  # rebuilt with them: which directory each one governs (TID-85)
@@ -1567,7 +1425,7 @@ def _discover(root: str) -> Registry:
                 rel = _module_name(location)
                 try:
                     module = importlib.import_module(rel)
-                except (Exception, *_skip_exceptions()):  # noqa: BLE001 — surfaces per-test, not at discovery
+                except (Exception, *_SKIP_EXCEPTIONS):  # noqa: BLE001 — surfaces per-test, not at discovery
                     continue
                 test_modules.append((module, location))
             else:
@@ -1595,9 +1453,9 @@ def _discover(root: str) -> Registry:
     global _MARKER_EXPR, _DECLARED_MARKS, _STRICT_MARKS
     # The command line wins over the project's own `addopts`, as it does in pytest: a config filter is
     # the project's default, and `-m` on the command line is this run's intent (TID-59).
-    expr = _env("TIDERACE_MARKER_EXPR") or _marker_expr_from(addopts)
+    expr = _env("TIDERACE_MARKER_EXPR") or project.opt("-m")
     _MARKER_EXPR = _compile_marker_expr(expr) if expr else None
-    _DECLARED_MARKS, _STRICT_MARKS = _registered_marks(addopts, config_dir)
+    _DECLARED_MARKS, _STRICT_MARKS = _registered_marks(project)
     if _STRICT_MARKS:
         # Ask pytest for the plugins' marks *now*, in the process every worker is forked from: the
         # answer was fetched lazily by the first strict node each worker met, a 0.5s subprocess
@@ -1605,7 +1463,7 @@ def _discover(root: str) -> Registry:
         _plugin_marks()
     # `-k EXPR`, same precedence (TID-63): the command line over the project's own `addopts`.
     global _KEYWORD_EXPR
-    kexpr = _env("TIDERACE_KEYWORD_EXPR") or _marker_expr_from(addopts, "-k")
+    kexpr = _env("TIDERACE_KEYWORD_EXPR") or project.opt("-k")
     _KEYWORD_EXPR = _compile_selection_tree(kexpr, "-k") if kexpr else None
     # `asyncio_mode = "auto"` means pytest-asyncio claims *every* async test, including ones carrying
     # `@pytest.mark.anyio`. In that configuration pytest runs even a `[trio]`-labelled variant on an
@@ -1614,7 +1472,7 @@ def _discover(root: str) -> Registry:
     # per backend, as pytest's ids do, and they all run where pytest runs them (TID-54).
     global _FORCE_ASYNCIO
     _FORCE_ASYNCIO = False
-    if any(str(v).strip().strip('"\'') == "auto" for v in _config_values(config_dir, "asyncio_mode")):
+    if any(str(v).strip().strip('"\'') == "auto" for v in project.values("asyncio_mode")):
         try:
             import pytest_asyncio  # noqa: F401 — only its presence matters
             _FORCE_ASYNCIO = True
@@ -1632,7 +1490,7 @@ def _discover(root: str) -> Registry:
     _register_builtins(reg)
     # Last, so everything above — a conftest at any depth, the builtins, the native anyio_backend —
     # takes precedence over a plugin's fixture of the same name, as in pytest (TID-87).
-    _register_plugin_fixtures(reg, addopts, config_dir, conftests)
+    _register_plugin_fixtures(reg, project, conftests)
     return reg
 
 
@@ -1641,7 +1499,7 @@ def _discover(root: str) -> Registry:
 _PYTEST_OWN_PLUGINS = ("pytester", "_pytest", "pytest")
 
 
-def _plugin_modules(addopts: str, config_dir: str, conftests: list) -> list:
+def _plugin_modules(project: ProjectConfig, conftests: list) -> list:
     """`(plugin name, module name)` for every pytest plugin the project would load (TID-87):
     the `pytest11` entry points of the installed distributions, `-p NAME` in `addopts`, and each
     conftest's `pytest_plugins` — minus `-p no:NAME`, minus pytest's own, and subject to
@@ -1649,8 +1507,8 @@ def _plugin_modules(addopts: str, config_dir: str, conftests: list) -> list:
     `PYTEST_DISABLE_PLUGIN_AUTOLOAD` turns the entry points off, as it does for pytest; the
     explicit spellings still load."""
     allow = _env("TIDERACE_PLUGINS")
-    if allow is None and config_dir:
-        configured = _config_setting(config_dir, "plugins")
+    if allow is None:
+        configured = project.setting("plugins")
         if isinstance(configured, (list, tuple)):
             allow = ",".join(str(v) for v in configured) or "none"  # `plugins = []`: none at all
         elif isinstance(configured, str):
@@ -1660,19 +1518,7 @@ def _plugin_modules(addopts: str, config_dir: str, conftests: list) -> list:
     allowed = {n.strip() for n in allow.split(",") if n.strip()} if allow is not None else None
     explicit: list = []
     disabled: set = set()
-    try:
-        import shlex
-        argv = shlex.split(addopts or "")
-    except ValueError:
-        argv = []
-    for i, arg in enumerate(argv):
-        value = None
-        if arg == "-p" and i + 1 < len(argv):
-            value = argv[i + 1]
-        elif arg.startswith("-p") and len(arg) > 2:
-            value = arg[2:].lstrip("=")
-        if value is None:
-            continue
+    for value in project.opt_values("-p"):
         if value.startswith("no:"):
             disabled.add(value[3:])
         else:
@@ -1710,17 +1556,17 @@ def _plugin_modules(addopts: str, config_dir: str, conftests: list) -> list:
     return found
 
 
-def _register_plugin_fixtures(reg: Registry, addopts: str, config_dir: str, conftests: list) -> None:
+def _register_plugin_fixtures(reg: Registry, project: ProjectConfig, conftests: list) -> None:
     """Import each plugin module and register the fixtures it defines at the root location, after
     everything else (TID-87): a suite's own fixture of the same name — a conftest at any depth, a
     test module's — already outranks it, and a name the shim itself provides (a builtin, the native
     `anyio_backend`) is left alone. Only fixtures are taken; the plugin's hooks are never called,
     except `pytest_addoption`, which is recorded exactly as a conftest's is (TID-14) so its
     options and ini defaults read back through `config`."""
-    for name, module_name in _plugin_modules(addopts, config_dir, conftests):
+    for name, module_name in _plugin_modules(project, conftests):
         try:
             module = importlib.import_module(module_name)
-        except (Exception, *_skip_exceptions()) as exc:  # noqa: BLE001 — one plugin, not the run
+        except (Exception, *_SKIP_EXCEPTIONS) as exc:  # noqa: BLE001 — one plugin, not the run
             _warn(f"pytest plugin {name!r} ({module_name}) not loaded: {exc!r}")
             continue
         _collect_addoption(module)
@@ -1830,32 +1676,29 @@ _DIR_SKIPS: dict[str, str] = {}  # suite-relative dir ("" = everything) -> why i
 _DIR_ERRORS: dict[str, str] = {}
 
 
-def _dir_skip(rel_path: str) -> str | None:
-    """The skip reason covering `rel_path` (a suite-relative file or dir), if a conftest skipped it."""
-    if not _DIR_SKIPS:
+def _dir_mark(marks: dict, rel_path: str) -> str | None:
+    """The mark (a skip reason, a conftest's import failure) covering `rel_path` — a suite-relative
+    file or directory — from the nearest ancestor directory that carries one; `""` covers all."""
+    if not marks:
         return None
-    if "" in _DIR_SKIPS:
-        return _DIR_SKIPS[""]
+    if "" in marks:
+        return marks[""]
     parts = rel_path.split("/")
     for depth in range(len(parts), 0, -1):
-        reason = _DIR_SKIPS.get("/".join(parts[:depth]))
-        if reason is not None:
-            return reason
+        mark = marks.get("/".join(parts[:depth]))
+        if mark is not None:
+            return mark
     return None
+
+
+def _dir_skip(rel_path: str) -> str | None:
+    """The skip reason covering `rel_path`, if a conftest skipped it."""
+    return _dir_mark(_DIR_SKIPS, rel_path)
 
 
 def _dir_error(rel_path: str) -> str | None:
     """The conftest import failure covering `rel_path`, if one of its conftests did not import."""
-    if not _DIR_ERRORS:
-        return None
-    if "" in _DIR_ERRORS:
-        return _DIR_ERRORS[""]
-    parts = rel_path.split("/")
-    for depth in range(len(parts), 0, -1):
-        detail = _DIR_ERRORS.get("/".join(parts[:depth]))
-        if detail is not None:
-            return detail
-    return None
+    return _dir_mark(_DIR_ERRORS, rel_path)
 
 
 def _skip_reason(exc: BaseException) -> str:
@@ -1873,7 +1716,7 @@ def _import_conftest(path: str, rel_dir: str):
         sys.modules[mod_name] = module
         spec.loader.exec_module(module)
         return module
-    except _skip_exceptions() as exc:
+    except _SKIP_EXCEPTIONS as exc:
         # `pytest.importorskip("ray")` at the top of a conftest skips that directory — pytest collects
         # nothing below it (TID-48). `Skipped` is a BaseException, so it used to sail past the handler
         # below and kill the shim during discovery: under the shared-import pool that was the pool
@@ -2126,12 +1969,8 @@ def static_impurity(func) -> str | None:
 
 
 # --------------------------------------------------------------------------- purity guard (→ batching)
-_MISSING = object()
 _OPAQUE = object()
-# Purity tri-state: a reason string (impure), `None` (measured pure), or `_UNKNOWN_PURITY` (not measured
-# — the test forked, ran async, or was trusted-pure so we skipped the snapshot). Only a *measured pure*
-# verdict is recordable for the bare-no-fork fast path (ADR-E014 / TID-1).
-_UNKNOWN_PURITY = object()
+# The purity tri-state (`_UNKNOWN_PURITY`, `None`, a reason) is defined with its wire encoding in `results.py`.
 
 # Windows has no `fork()`. The isolation ladder's bottom rung (fork an opaque module) therefore doesn't
 # exist there, so the shim must decide what to do instead rather than call `os.fork` and raise.
@@ -2621,25 +2460,6 @@ def _restorable(module) -> bool:
     return _OPAQUE not in _snapshot_shared(module).values()
 
 
-def _is_unittest_node(module, node_id: str, style: str) -> bool:
-    """Whether this node's class is really a `unittest.TestCase`, whatever the collector decided.
-
-    The source scan reads base classes as *text*, so `class TestThing(_MyBase)` looks like a pytest
-    class even when `_MyBase` derives from `IsolatedAsyncioTestCase`. Running it as a pytest class
-    calls the method directly and never runs `setUp` / `asyncSetUp`, so every attribute the setup
-    assigned is missing — seven tests on one real corpus, each reporting an `AttributeError` that
-    named the test's own class (TID-51).
-
-    The shim holds the live class and can simply ask."""
-    if style != "class_method":
-        return style == "unittest_method"
-    try:
-        cls = getattr(module, _class_method(node_id)[0], None)
-    except Exception:  # noqa: BLE001 — a node id we cannot parse is not a unittest node
-        return False
-    return isinstance(cls, type) and issubclass(cls, unittest.TestCase)
-
-
 def _drive_async(make_coro, backend=None):
     """Run an async body to completion on the backend the run asked for.
 
@@ -2675,17 +2495,7 @@ def _test_is_async(node_id: str, style: str) -> bool:
     A `unittest` class drives its own coroutines — `IsolatedAsyncioTestCase.run()` builds the loop and
     calls `asyncSetUp` around the body — so those are never async-driven from here, however the
     collector labelled them."""
-    if style == "unittest_method":
-        return False
-    module = importlib.import_module(_module_name(_module_key(node_id)))
-    if _is_unittest_node(module, node_id, style):
-        return False
-    if style == "class_method":
-        cls, method = _class_method(node_id)
-        func = getattr(getattr(module, cls), method, None)
-    else:
-        func = getattr(module, node_id.partition("::")[2], None)
-    return inspect.iscoroutinefunction(func)
+    return resolve_target(node_id, style, lenient=True).is_async
 
 
 async def _invoke_async(node_id: str, style: str, args: dict) -> tuple[str, str]:
@@ -2698,18 +2508,17 @@ async def _invoke_async_body(node_id: str, style: str, args: dict) -> tuple[str,
     """The async sibling of `_invoke`: call the test, `await` it if it's a coroutine, and map the same
     outcomes (incl. lazy RichDiff on `AssertionError`). Runs inside the per-test event loop, so it must
     `await` directly — never `asyncio.run` (which can't nest)."""
-    module = importlib.import_module(_module_name(_module_key(node_id)))
+    node = resolve_target(node_id, style)
+    module = node.module
     try:
         if style == "class_method":
-            cls_name, method = _class_method(node_id)
-            cls = getattr(module, cls_name)
-            _xunit_class_setup(cls)
-            instance = cls()
-            bound = getattr(instance, method)
+            _xunit_class_setup(node.cls)
+            instance = node.cls()
+            bound = getattr(instance, node.name)
             target = bound
             call_args, request = _with_request(bound, args, node_id, instance)
         else:
-            target = getattr(module, node_id.partition("::")[2])
+            target = node.func
             call_args, request = _with_request(target, args, node_id)
         hooks = _xunit_test_hooks(module, style, node_id, target)
         try:
@@ -2906,7 +2715,6 @@ def _file_deps(path: str, root: str) -> tuple[str, ...]:
 def _sys_path_key() -> str:
     """The import roots a resolution ran under, as one short token: a cached dependency list is only
     right for the `sys.path` that produced it."""
-    import hashlib
     return hashlib.sha1("\n".join(p for p in sys.path if p).encode("utf-8", "replace")).hexdigest()[:16]
 
 
@@ -3198,7 +3006,7 @@ class Engine:
         # test's own path here, after the wider fixtures were already live, and a moto mock started
         # in `setup_module` never reached the fixture-built client (TID-79). Before any wider fixture,
         # once per module per process; the later call on the test path is then a no-op.
-        _xunit_module_setup(importlib.import_module(_module_name(_module_key(node_id))))
+        _xunit_module_setup(_import_module(_module_key(node_id)))
         # Set up missing wider fixtures in topo order.
         live = {a.key for a in self.active}
         for d in closure:
@@ -3236,7 +3044,7 @@ class Engine:
                 return
             self._leave_module()
         try:
-            mod = importlib.import_module(_module_name(module_key))
+            mod = _import_module(module_key)
         except Exception:  # noqa: BLE001 — nothing to snapshot; nothing to put back either
             return
         self._guard = {
@@ -3284,20 +3092,19 @@ class Engine:
         # Under a directory whose conftest skipped itself (TID-48): pytest never collects these, so
         # nothing about the node — its class, its marks, its module — may be touched.
         if _is_ignored(os.path.join(_ROOT or ".", module_key)):
-            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
+            return empty_expansion(node_id)
         # A conftest that did not import (TID-72), before the skip: a directory whose setup is broken
         # is broken for every test in it, and that is an error pytest would have stopped on.
         dir_error = _dir_error(module_key)
         if dir_error is not None:
-            return {"node_id": node_id, "outcome": "error", "detail": dir_error}
+            return errored(node_id, dir_error)
         dir_skip = _dir_skip(module_key)
         if dir_skip is not None:
             # `skip_origin` names the module that never imported, so the summary can report skips in
             # both dimensions (TID-55): a conftest's `importorskip` skips every test under it, and
             # "578 skipped" next to pytest's "94 skipped" reads as a defect until you can also say
             # how many *modules* those 578 came from. A per-test skip leaves this empty.
-            return {"node_id": node_id, "outcome": "skipped", "detail": dir_skip,
-                    "skip_origin": module_key}
+            return skipped(node_id, dir_skip, skip_origin=module_key)
         if style in ("inherited_methods", "unresolved_class"):
             return self._run_inherited(node_id, deadline_ms, force_no_fork, trusted_pure,
                                        own_too=style == "unresolved_class",
@@ -3306,7 +3113,7 @@ class Engine:
         # what the regex collector cannot tell from a test; pytest never collects it. Reported as
         # an empty expansion, like a deselected node: absent from the tally (TID-88).
         if self._is_fixture_node(node_id, style):
-            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
+            return empty_expansion(node_id)
         # Deselected by the project's own `-m` filter (TID-32). Reported as an EMPTY expansion
         # rather than a skip: pytest deselects these, so they must not appear in the tally at all —
         # a skip would be a different, visible outcome.
@@ -3317,10 +3124,9 @@ class Engine:
         # replaying the skip from its record (TID-102), reported them either way. The import is
         # the first thing now, as it is for pytest.
         try:
-            importlib.import_module(_module_name(module_key))
-        except _skip_exceptions() as exc:
-            return {"node_id": node_id, "outcome": "skipped", "detail": _skip_reason(exc),
-                    "skip_origin": module_key}
+            _import_module(module_key)
+        except _SKIP_EXCEPTIONS as exc:
+            return skipped(node_id, _skip_reason(exc), skip_origin=module_key)
         except Exception:  # noqa: BLE001 — an unimportable module surfaces per node, below
             pass
         # Always, `-k` or not (TID-102): the names `-k` would match against are reported with the
@@ -3338,37 +3144,34 @@ class Engine:
                 registered = _plugin_marks()
                 unknown = [n for n in unknown if n not in registered] if registered is not None else []
             if unknown:
-                return {"node_id": node_id, "outcome": "error",
-                        "detail": f"{', '.join(unknown)} not found in `markers` configuration option"}
+                return errored(node_id, f"{', '.join(unknown)} not found in `markers` configuration option")
         if _MARKER_EXPR is not None and not _MARKER_EXPR(names):
-            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
+            return empty_expansion(node_id)
         # `-k` (TID-63), decided here when it can be: a No at node level is a No for every case the
         # node could produce, so it is deselected before a fixture is built or a skip mark is read —
         # pytest deselects at collection, and a deselected `@pytest.mark.skip` test is not a skip.
         # An "unknown" is settled per case once the case ids exist, below.
         keyword_verdict = _keyword_verdict(node_id, names, final=False) if _KEYWORD_EXPR is not None else True
         if keyword_verdict is False:
-            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": [],
-                    "keywords": _keyword_names(node_id, names)}
+            return empty_expansion(node_id, keywords=_keyword_names(node_id, names))
         try:
-            requested = self._requested(node_id, style)
-            marks = self._marks(node_id, style)
+            node = resolve_target(node_id, style)
+            requested = self._requested(node)
+            marks = self._marks(node)
             # Inside the same guard as its siblings. It used to sit outside, so a failure expanding this
             # node's parametrize cases escaped `run()` and killed the whole worker — every other test on
             # it was lost and the run reported `shim closed mid-run` (TID-43). Whatever the next unsafe
             # probe turns out to be, it now costs this node an error rather than costing the worker.
-            raw_cases = self._cases(node_id, style)
+            raw_cases = self._cases(node)
         except _GenerateTestsError as exc:
-            return {"node_id": node_id, "outcome": "error", "detail": str(exc)}
-        except _skip_exceptions() as exc:
+            return errored(node_id, str(exc))
+        except _SKIP_EXCEPTIONS as exc:
             # A module-level `pytest.importorskip` / `pytest.skip(allow_module_level=True)`. Not an
             # `Exception`, so without this it escaped `run()` and took the worker with it (TID-48).
             # `skip_origin`: this module is the unit pytest would have reported one skip for (TID-55).
-            return {"node_id": node_id, "outcome": "skipped", "detail": _skip_reason(exc),
-                    "skip_origin": module_key}
+            return skipped(node_id, _skip_reason(exc), skip_origin=module_key)
         except Exception as exc:  # noqa: BLE001 — import/collection failure for this node
-            return {"node_id": node_id, "outcome": "error",
-                    "detail": "".join(traceback.format_exception_only(type(exc), exc))}
+            return errored(node_id, "".join(traceback.format_exception_only(type(exc), exc)))
 
         # Native marks first, then anything a `@pytest.mark.skip` or a collection hook decided
         # (TID-20). Both short-circuit BEFORE any fixture setup — a test skipped for a missing
@@ -3392,7 +3195,7 @@ class Engine:
         # to have discovered the other module's fixture, so the same test passes on a narrow root and
         # errors on the whole package.
         parametrized = {name for case, *_ in raw_cases if isinstance(case, dict) for name in case}
-        indirect = set(self._indirect(node_id, style))
+        indirect = set(self._indirect(node))
         # A parametrized name that is not one of the function's parameters but names a fixture —
         # anyio's `@pytest.mark.parametrize("anyio_backend", ["asyncio"])` on a test that takes no
         # argument — sets that fixture's `request.param`: pytest routes it as an indirect
@@ -3418,13 +3221,13 @@ class Engine:
         case_pos_maps = [(rest[0] if rest else None) for _, _, *rest in raw_cases] or [None]
 
 
-        uses = self._uses(node_id, style)  # @tiderace.uses: set up by type, not injected (B2)
+        uses = self._uses(node)  # @tiderace.uses: set up by type, not injected (B2)
         # `@pytest.mark.usefixtures("a", "b")` — on the function, its class or its module — sets those
         # fixtures up around the test without passing them (TID-86). click's shell-completion tests
         # snapshot and restore a registry through exactly this, and without it the registry entry a
         # test adds is still there for the next.
         uses = list(uses) + [
-            name for mark in _pytest_markers(node_id, style)
+            name for mark in _pytest_markers(node)
             if getattr(mark, "name", "") == "usefixtures"
             for name in getattr(mark, "args", ()) if isinstance(name, str) and name not in uses
         ]
@@ -3437,12 +3240,11 @@ class Engine:
         # Async tests only: the marker parametrises *how a coroutine is run*, so a synchronous test
         # in an anyio-marked module is one test, not one per backend — which is how pytest collects
         # it too.
-        if (_test_is_async(node_id, style) and "anyio" in _mark_names(node_id, style)
+        if (node.is_async and "anyio" in names
                 and self.reg.is_provider("anyio_backend") and "anyio_backend" not in uses
                 and "anyio_backend" not in requested and "anyio_backend" not in parametrized):
             uses = list(uses) + ["anyio_backend"]
-        closure = _closure(self.reg, module_key, fixture_requested, uses,
-                           self._test_classes(node_id, style))
+        closure = _closure(self.reg, module_key, fixture_requested, uses, self._test_classes(node))
         if inferred:
             # Not in the closure after all: pytest reports "function uses no argument"; here the
             # value reaches the test as a keyword it never declared, which fails the same way.
@@ -3508,17 +3310,14 @@ class Engine:
             selected = {i for i, vid in enumerate(variant_ids)
                         if _keyword_verdict(vid, names, final=True)}
             if not selected:
-                return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": [],
-                        "keywords": _keyword_names(node_id, names)}
+                return empty_expansion(node_id, keywords=_keyword_names(node_id, names))
         if skip_reason is not None:  # the skip deferred above, one per selected variant (TID-88)
             if not parametrized_node:
-                return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason,
-                        "keywords": _keyword_names(node_id, names)}
-            return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason,
-                    "keywords": _keyword_names(node_id, names),
-                    "variants": [{"node_id": vid, "outcome": "skipped", "detail": skip_reason,
-                                  "duration_ms": 0, "keywords": _keyword_names(vid, names)}
-                                 for i, vid in enumerate(variant_ids) if i in selected]}
+                return skipped(node_id, skip_reason, keywords=_keyword_names(node_id, names))
+            return skipped(node_id, skip_reason, keywords=_keyword_names(node_id, names),
+                           variants=[variant(vid, Outcome.SKIPPED, skip_reason, 0,
+                                             keywords=_keyword_names(vid, names))
+                                     for i, vid in enumerate(variant_ids) if i in selected])
         # Only now — after `-k` has chosen and a whole-node skip has returned — does the node's
         # *route* get decided (TID-99). It used to sit above the case expansion, so every node
         # `-k` was about to deselect first paid the restorability snapshot (a deepcopy of its
@@ -3539,7 +3338,7 @@ class Engine:
         must_fork = False
         if self.restore and not trusted_pure and (force_no_fork or self.no_fork):
             try:
-                must_fork = not _restorable(importlib.import_module(_module_name(module_key)))
+                must_fork = not _restorable(_import_module(module_key))
             except Exception:  # noqa: BLE001 — can't import/inspect ⇒ be safe, fork
                 must_fork = True
             if must_fork:
@@ -3584,9 +3383,8 @@ class Engine:
                 # and carries on. Letting it escape here killed the whole worker: every *other* test
                 # on it was lost, and the run reported `shim closed mid-run`, naming the transport
                 # rather than the fixture (TID-34). Same lesson as TID-15, one level up.
-                return {"node_id": node_id, "outcome": "error",
-                        "detail": "error setting up fixtures: "
-                                  + "".join(traceback.format_exception_only(type(exc), exc))}
+                return errored(node_id, "error setting up fixtures: "
+                               + "".join(traceback.format_exception_only(type(exc), exc)))
             for case_pos, case_kwargs in enumerate(case_kwargs_list):
                 if variant_index not in selected:
                     variant_index += 1  # deselected by `-k`: absent from the tally, as in pytest
@@ -3612,22 +3410,15 @@ class Engine:
                 disturbed = self._state_disturbed
                 node_must_fork = node_must_fork or disturbed
                 if parametrized_node:
-                    variant = {
-                        "node_id": variant_ids[variant_index],
-                        "outcome": oc,
-                        "detail": detail,
-                        "duration_ms": int((time.perf_counter() - started) * 1000),
-                        "keywords": _keyword_names(variant_ids[variant_index], names),
-                    }
+                    case = variant(variant_ids[variant_index], oc, detail,
+                                   int((time.perf_counter() - started) * 1000),
+                                   keywords=_keyword_names(variant_ids[variant_index], names))
                     if cov:
-                        variant["coverage"] = {p: sorted(l) for p, l in cov.items()}
-                    if purity is None:
-                        variant["pure"] = True
-                    elif purity is not _UNKNOWN_PURITY:
-                        variant["pure"] = False
+                        case["coverage"] = {p: sorted(l) for p, l in cov.items()}
+                    with_purity(case, purity)
                     if disturbed:
-                        variant["must_fork"] = True
-                    variants.append(variant)
+                        case["must_fork"] = True
+                    variants.append(case)
                 variant_index += 1
                 outcomes.append((oc, detail))
                 for path, lines in cov.items():
@@ -3646,9 +3437,8 @@ class Engine:
         # pytest's own `@pytest.mark.xfail` / `skip`, which `_apply_xfail` above does not see: it
         # reads tiderace's native marks. Without this a test the author marked as expected-to-fail
         # was reported as a failure — one of click's two remaining divergences (TID-63).
-        outcome, detail = _fold_pytest_marks(_pytest_markers(node_id, style), outcome, detail)
-        resp = {"node_id": node_id, "outcome": outcome, "detail": detail,
-                "keywords": _keyword_names(node_id, names)}
+        outcome, detail = _fold_pytest_marks(_pytest_markers(node), outcome, detail)
+        resp = response(node_id, outcome, detail=detail, keywords=_keyword_names(node_id, names))
         # Additive and omitted for an unparametrized node, so its frame stays byte-identical.
         if variants:
             resp["variants"] = variants
@@ -3699,18 +3489,18 @@ class Engine:
         module_key = _module_key(node_id)
         cls_name = node_id.partition("::")[2]
         try:
-            module = importlib.import_module(_module_name(module_key))
+            module = _import_module(module_key)
             cls = getattr(module, cls_name)
         except Exception as exc:  # noqa: BLE001 — a class we can't resolve contributes nothing
-            return {"node_id": node_id, "outcome": "error", "expanded": True, "variants": [],
-                    "detail": "".join(traceback.format_exception_only(type(exc), exc))}
+            return expansion(node_id, Outcome.ERROR,
+                             "".join(traceback.format_exception_only(type(exc), exc)), [])
 
         # pytest's rule: a `Test*` class, or any `unittest.TestCase` subclass whatever its name.
         # `PackOverridesBuiltinTests` is the second kind, which is why the name scan missed it.
         if own_too and not (
             cls.__name__.startswith("Test") or issubclass(cls, unittest.TestCase)
         ):
-            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
+            return empty_expansion(node_id)
 
         own = set() if own_too else set(vars(cls))
         inherited = sorted(
@@ -3720,7 +3510,7 @@ class Engine:
         # `expanded` says "these variants are the whole answer", so an empty list means this class
         # contributes nothing — distinct from a node that simply isn't parametrized.
         if not inherited:
-            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
+            return empty_expansion(node_id)
 
         style = "unittest_method" if issubclass(cls, unittest.TestCase) else "class_method"
         variants = []
@@ -3738,30 +3528,25 @@ class Engine:
             # method as a pass that never ran: 101 of them on pirn-agents under `-k nomatch` (TID-74).
             if res.get("expanded"):
                 continue
-            variant = {
-                "node_id": child,
-                "outcome": res["outcome"],
-                "detail": res.get("detail", ""),
-                "duration_ms": int((time.perf_counter() - started) * 1000),
-            }
+            child_result = variant(child, res["outcome"], res.get("detail", ""),
+                                   int((time.perf_counter() - started) * 1000))
             if res.get("coverage"):
-                variant["coverage"] = res["coverage"]
+                child_result["coverage"] = res["coverage"]
             if "pure" in res:
-                variant["pure"] = res["pure"]
+                child_result["pure"] = res["pure"]
             if res.get("must_fork"):
-                variant["must_fork"] = True
+                child_result["must_fork"] = True
             if res.get("keywords"):
-                variant["keywords"] = res["keywords"]
-            variants.append(variant)
+                child_result["keywords"] = res["keywords"]
+            variants.append(child_result)
         # Every child deselected ⇒ the class contributes nothing, exactly as an inherited-nothing
         # class does above. `_aggregate` of an empty list is `max()` of nothing, and that exception
         # escaping `run()` took the whole worker down — "shim closed mid-run" for a `-k` that matched
         # no inherited method (TID-74, the shape TID-43 was about).
         if not variants:
-            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
-        worst = _aggregate([(v["outcome"], v.get("detail", "")) for v in variants])
-        return {"node_id": node_id, "outcome": worst[0], "detail": worst[1],
-                "expanded": True, "variants": variants}
+            return empty_expansion(node_id)
+        worst_outcome, worst_detail = _aggregate([(v["outcome"], v.get("detail", "")) for v in variants])
+        return expansion(node_id, worst_outcome, worst_detail, variants)
 
     # ------------------------------------------------------------------ module child (TID-80)
     def _module_child_run(self, node_id: str, style: str, deadline_ms: int) -> dict:
@@ -3783,24 +3568,22 @@ class Engine:
             _write_frame(child.req_w, {"node_id": node_id, "style": style, "deadline_ms": deadline_ms})
         except OSError:
             status = self._module_child_reap()
-            return {"node_id": node_id, "outcome": "error",
-                    "detail": "the module's child process was gone before this test could be sent to "
-                              f"it ({_exit_text(status)})"}
+            return errored(node_id, "the module's child process was gone before this test could be "
+                           f"sent to it ({_exit_text(status)})")
         data, timed_out = _read_frame_by(child.resp_r, time.monotonic() + deadline_ms / 1000.0)
         if timed_out:
             self._module_child_kill()
-            return {"node_id": node_id, "outcome": "error", "detail": "timeout"}
+            return errored(node_id, "timeout")
         if data is None:  # EOF without a frame: the child died on this test
             status = self._module_child_reap()
-            return {"node_id": node_id, "outcome": "error",
-                    "detail": f"the module's child process died running this test ({_exit_text(status)}); "
-                              "the module's remaining tests run in a fresh one"}
+            return errored(node_id, f"the module's child process died running this test "
+                           f"({_exit_text(status)}); the module's remaining tests run in a fresh one")
         try:
             return json.loads(data.decode())
         except (ValueError, UnicodeDecodeError) as exc:
             self._module_child_kill()
-            return {"node_id": node_id, "outcome": "error",
-                    "detail": f"child sent an unreadable result frame ({exc}); {len(data)} bytes received"}
+            return errored(node_id, f"child sent an unreadable result frame ({exc}); "
+                           f"{len(data)} bytes received")
 
     def _module_child_spawn(self, module_key: str):
         req_r, req_w = os.pipe()
@@ -3825,8 +3608,7 @@ class Engine:
                         resp = self.run(req["node_id"], req["style"], req.get("deadline_ms", 5000),
                                         force_no_fork=True)
                     except BaseException as exc:  # noqa: BLE001 — report it; never die silently
-                        resp = {"node_id": req["node_id"], "outcome": "error",
-                                "detail": _child_fault_detail(exc)[:4000]}
+                        resp = errored(req["node_id"], _child_fault_detail(exc)[:4000])
                     _write_frame(resp_w, resp)
             except BaseException:  # noqa: BLE001 — an unsendable frame or a closed parent
                 code = _EXIT_UNREPORTABLE
@@ -3980,11 +3762,7 @@ class Engine:
                     payload["coverage"] = coverage
                 # Carry the purity tri-state across the pipe: pure=True/False when measured (guard on),
                 # omitted when unknown (the default forked path measures nothing).
-                if purity is None:
-                    payload["pure"] = True
-                elif purity is not _UNKNOWN_PURITY:
-                    payload["pure"] = False
-                    payload["impurity"] = purity
+                with_purity(payload, purity, reason_key="impurity")
             except BaseException as exc:  # noqa: BLE001 — report it; never die silently (TID-15)
                 # `_invoke` guards the test BODY only, so anything raised by fixture setup/teardown,
                 # the coverage probe, or the purity snapshot lands here. Swallowing it exited 0 with an
@@ -4072,15 +3850,8 @@ class Engine:
             return ("error",
                     f"child sent an unreadable result frame ({exc}); {len(data)} bytes received",
                     {}, _UNKNOWN_PURITY)
-        # Reconstruct the purity tri-state from the pipe: pure omitted ⇒ unknown; True ⇒ measured pure;
-        # False ⇒ impure (with reason).
-        if "pure" not in res:
-            purity = _UNKNOWN_PURITY
-        elif res["pure"]:
-            purity = None
-        else:
-            purity = res.get("impurity") or "impure"
-        return res["outcome"], res.get("detail", ""), res.get("coverage", {}), purity
+        # Reconstruct the purity tri-state from the pipe (`purity_from`: omitted ⇒ unknown).
+        return res["outcome"], res.get("detail", ""), res.get("coverage", {}), purity_from(res)
 
     def _child_exec(self, node_id, style, requested, closure, combo, case_kwargs=None, variant_id=None,
                     in_process=False, trusted_pure=False) -> tuple:
@@ -4123,7 +3894,7 @@ class Engine:
         # `setUpModule` / `setup_module` before any fixture or test body: a suite uses it to put
         # something in place for the whole file — stubbing an optional SDK in `sys.modules`, say —
         # and without it every test in that file fails on the thing it was meant to provide (TID-60).
-        _xunit_module_setup(importlib.import_module(_module_name(module_key)))
+        _xunit_module_setup(_import_module(module_key))
         try:
             for d in closure:
                 if d.rank != 0:
@@ -4145,7 +3916,7 @@ class Engine:
             need_snap = (self.purity_guard or (self.restore and in_process)) and not trusted_pure
             if self.restore and in_process:
                 self._enter_module(module_key)
-            mod = importlib.import_module(_module_name(module_key)) if need_snap else None
+            mod = _import_module(module_key) if need_snap else None
             before = _snapshot_shared(mod) if mod is not None else None
             env_before = dict(os.environ) if mod is not None else None
             # Tracked independently of the per-module snapshot: `sys.modules` is interpreter-global,
@@ -4240,128 +4011,88 @@ class Engine:
         if style == "unittest_method":
             return False
         try:
-            module = importlib.import_module(_module_name(_module_key(node_id)))
-            if style == "class_method":
-                cls, method = _class_method(node_id)
-                obj = getattr(getattr(module, cls), method)
-            else:
-                obj = getattr(module, node_id.partition("::")[2])
-        except (Exception, *_skip_exceptions()):  # noqa: BLE001 — a module that skips itself at
+            obj = resolve_target(node_id, style).func
+        except (Exception, *_SKIP_EXCEPTIONS):  # noqa: BLE001 — a module that skips itself at
             return False  # import raises a BaseException here; the run below reports it (TID-48)
         return _is_fixture(obj)
 
-    def _requested(self, node_id: str, style: str) -> dict:
+    def _requested(self, node: Target) -> dict:
         """The resources a test requests, as `param_name -> provider_name` bindings. Native params
         resolve by **type** (ADR-E012); untyped params fall back to name (the pytest path), so a
         pytest-authored test with `(db, cache)` args binds identically to before."""
-        module = importlib.import_module(_module_name(_module_key(node_id)))
-        if style == "unittest_method":
+        if node.style == "unittest_method":
             return {}  # unittest methods drive their own setUp/tearDown; no DI in Phase 3
-        if style == "class_method":
-            cls, method = _class_method(node_id)
-            func = getattr(getattr(module, cls), method)
-        else:
-            func = getattr(module, node_id.partition("::")[2])
-        return self.reg.bind_params(func)
+        return self.reg.bind_params(node.func)
 
-    def _marks(self, node_id: str, style: str) -> list:
+    def _marks(self, node: Target) -> list:
         """The native marks (`__tiderace_marks__`) on a test, read by attribute — the tiderace-owned
         analogue of pytest's marker read. unittest methods carry none."""
-        if style == "unittest_method":
+        if node.style == "unittest_method":
             return []
-        module = importlib.import_module(_module_name(_module_key(node_id)))
-        if style == "class_method":
-            cls, method = _class_method(node_id)
-            func = getattr(getattr(module, cls), method)
-        else:
-            func = getattr(module, node_id.partition("::")[2])
-        return list(getattr(func, "__tiderace_marks__", ()))
+        return list(getattr(node.func, "__tiderace_marks__", ()))
 
-    def _test_classes(self, node_id: str, style: str) -> tuple:
+    def _test_classes(self, node: Target) -> tuple:
         """The names in the test class's MRO, narrowest first — empty for a plain function.
 
         Fixtures defined inside a test class are visible to that class and its subclasses only, so the
         closure needs to know which class the node belongs to (TID-47)."""
-        if "::" not in node_id.partition("::")[2]:
+        if node.cls is None:
             return ()
-        try:
-            module = importlib.import_module(_module_name(_module_key(node_id)))
-            cls = getattr(module, _class_method(node_id)[0], None)
-        except Exception:  # noqa: BLE001 — resolution problems surface per test, not here
-            return ()
-        mro = _safe_getattr(cls, "__mro__", None) or ()
+        mro = _safe_getattr(node.cls, "__mro__", None) or ()
         return tuple(c.__name__ for c in mro)
 
-    def _indirect(self, node_id: str, style: str) -> set:
+    def _indirect(self, node: Target) -> set:
         """Argnames this node's `parametrize` marks route through a fixture (`indirect=`)."""
-        if style == "unittest_method":
+        if node.style == "unittest_method":
             return set()
-        module = importlib.import_module(_module_name(_module_key(node_id)))
-        if style == "class_method":
-            cls, method = _class_method(node_id)
-            owner = getattr(module, cls)
-            func = getattr(owner, method)
-            return _indirect_names(func, owner, module,
-                                   hook_marks=self._hook_marks(node_id, style, func, module, owner))
-        func = getattr(module, node_id.partition("::")[2])
-        return _indirect_names(func, module,
-                               hook_marks=self._hook_marks(node_id, style, func, module, None))
+        hook_marks = self._hook_marks(node)
+        if node.style == "class_method":
+            return _indirect_names(node.func, node.cls, node.module, hook_marks=hook_marks)
+        return _indirect_names(node.func, node.module, hook_marks=hook_marks)
 
-    def _uses(self, node_id: str, style: str) -> list:
+    def _uses(self, node: Target) -> list:
         """Provider names a test depends on via `@tiderace.uses(Type, ...)` — resolved by type, set up
         in the closure but never passed as args (the native `usefixtures`). unittest carries none."""
-        if style == "unittest_method":
+        if node.style == "unittest_method":
             return []
-        module = importlib.import_module(_module_name(_module_key(node_id)))
-        if style == "class_method":
-            cls, method = _class_method(node_id)
-            func = getattr(getattr(module, cls), method)
-        else:
-            func = getattr(module, node_id.partition("::")[2])
         names = []
-        for t in getattr(func, "__tiderace_uses__", ()):
+        for t in getattr(node.func, "__tiderace_uses__", ()):
             provs = self.reg.by_type.get(t, [])
             if len(provs) == 1:  # unambiguous; ambiguity is the author's to disambiguate
                 names.append(provs[0])
         return names
 
-    def _cases(self, node_id: str, style: str) -> list:
+    def _cases(self, node: Target) -> list:
         """The variants of a test: native `@tiderace.cases`, else `@pytest.mark.parametrize`.
 
         unittest has neither — pytest cannot parametrize a `TestCase` method
         either, so the early return matches the oracle.
         """
-        if style == "unittest_method":
+        if node.style == "unittest_method":
             return []
-        module = importlib.import_module(_module_name(_module_key(node_id)))
-        if style == "class_method":
-            cls, method = _class_method(node_id)
-            func = getattr(getattr(module, cls), method)
-        else:
-            func = getattr(module, node_id.partition("::")[2])
-        native = list(getattr(func, "__tiderace_cases__", ()))
+        native = list(getattr(node.func, "__tiderace_cases__", ()))
         if native:
             return [(c, None, None) for c in native]  # native cases carry no author-supplied id
         # The class and the module too: pytest applies their marks to every test they hold (TID-53).
-        owner = getattr(module, _class_method(node_id)[0], None) if style == "class_method" else None
-        hook_marks = self._hook_marks(node_id, style, func, module, owner)
-        return _parametrize_cases(func, *(o for o in (owner, module) if o is not None),
-                                  hook_marks=hook_marks)
+        owner = node.cls if node.style == "class_method" else None
+        return _parametrize_cases(node.func, *(o for o in (owner, node.module) if o is not None),
+                                  hook_marks=self._hook_marks(node))
 
-    def _hook_marks(self, node_id: str, style: str, func, module, owner) -> list:
+    def _hook_marks(self, node: Target) -> list:
         """The parametrize axes this node's `pytest_generate_tests` hooks declare (TID-85). Nothing
         to run ⇒ nothing computed: a suite without the hook pays a dictionary lookup."""
+        node_id, module, func = node.node_id, node.module, node.func
+        owner = node.cls if node.style == "class_method" else None
         if node_id in _HOOK_MARKS:
             return _HOOK_MARKS[node_id]
         if _safe_getattr(module, "pytest_generate_tests", None) is None and not any(
                 _safe_getattr(m, "pytest_generate_tests", None) is not None for _, m in _CONFTEST_SCOPES):
             return []
-        requested = self._requested(node_id, style)  # param → provider (or the bare name)
+        requested = self._requested(node)  # param → provider (or the bare name)
         names = list(requested)
         try:
             providers = {p: t for p, t in requested.items() if self.reg.is_provider(t)}
-            closure = _closure(self.reg, _module_key(node_id), providers, [],
-                               self._test_classes(node_id, style))
+            closure = _closure(self.reg, node.module_key, providers, [], self._test_classes(node))
             names = list(dict.fromkeys(names + [d.name for d in closure]))
         except Exception:  # noqa: BLE001 — an unresolvable request is the test's problem, later
             pass
@@ -4546,7 +4277,7 @@ def _parametrize_cases(func, *outer, hook_marks=None) -> list[dict]:
             explicit = None
             # Safe probes: `entry` is an arbitrary parametrize value, and a lazy proxy passed as one raises
             # on attribute access exactly as it does as a module global (TID-43).
-            if _safe_hasattr(entry, "values") and _safe_hasattr(entry, "marks"):
+            if _is_param_set(entry):
                 raw = tuple(entry.values)
                 explicit = _safe_getattr(entry, "id", None)
             elif len(names) == 1:
@@ -4594,21 +4325,9 @@ def _explicit_id(ids_kw, values: tuple, position: int):
         return None
 
 
-def _pytest_markers(node_id: str, style: str) -> list:
+def _pytest_markers(node: Target) -> list:
     """The `@pytest.mark.*` objects on a test, from its module, class and function."""
-    try:
-        module = importlib.import_module(_module_name(_module_key(node_id)))
-    except Exception:  # noqa: BLE001 — an unimportable module surfaces per node, not here
-        return []
-    owners = [module]
-    if style in ("class_method", "unittest_method"):
-        cls_name, method = _class_method(node_id)
-        cls = getattr(module, cls_name, None)
-        owners.append(cls)
-        owners.append(getattr(cls, method, None) if cls is not None else None)
-    else:
-        owners.append(getattr(module, node_id.partition("::")[2], None))
-    return list(_own_markers(*owners))
+    return list(_own_markers(*node.owners))
 
 
 def _mark_names(node_id: str, style: str) -> set:
@@ -4619,17 +4338,9 @@ def _mark_names(node_id: str, style: str) -> set:
     module, the class and the function; native tags are read from the function's
     `__tiderace_marks__` (TID-59)."""
     try:
-        module = importlib.import_module(_module_name(_module_key(node_id)))
-    except (Exception, *_skip_exceptions()):  # noqa: BLE001 — an unimportable module, or one that
+        owners = resolve_target(node_id, style, lenient=True).owners
+    except (Exception, *_SKIP_EXCEPTIONS):  # noqa: BLE001 — an unimportable module, or one that
         return set()  # skips at import (a BaseException), surfaces per node, not here (TID-102)
-    owners = [module]
-    if style in ("class_method", "unittest_method"):
-        cls_name, method = _class_method(node_id)
-        cls = getattr(module, cls_name, None)
-        owners.append(cls)
-        owners.append(getattr(cls, method, None) if cls is not None else None)
-    else:
-        owners.append(getattr(module, node_id.partition("::")[2], None))
     names = {getattr(m, "name", "") for m in _own_markers(*owners)}
     for owner in owners:
         for m in _safe_getattr(owner, "__tiderace_marks__", None) or ():
@@ -4665,8 +4376,6 @@ def _plugin_marks() -> frozenset | None:
     if _PLUGIN_MARKS_ASKED:
         return _PLUGIN_MARKS  # asked once per process — a "could not find out" included (TID-91)
     _PLUGIN_MARKS_ASKED = True
-    import re
-    import subprocess
     try:
         out = subprocess.run(
             [sys.executable, "-m", "pytest", "--markers"],
@@ -4681,20 +4390,20 @@ def _plugin_marks() -> frozenset | None:
     return _PLUGIN_MARKS
 
 
-def _registered_marks(addopts: str, config_dir: str) -> tuple:
+def _registered_marks(project: ProjectConfig) -> tuple:
     """`(declared names, strict)` — which marks the project declared, and whether it wants them checked.
 
     pytest projects declare marks as `markers = ["slow: ...", ...]` in their config and opt into
     validation with `--strict-markers`; a tiderace-native project says the same thing under
     `[tool.tiderace]`. Both are read, because a suite mid-migration has both kinds of test in it."""
     names: set = set()
-    strict = "--strict-markers" in addopts or "--strict" in addopts.split()
-    for raw in _config_values(config_dir, "markers"):
+    strict = project.flag("--strict-markers") or project.flag("--strict")
+    for raw in project.values("markers"):
         # pytest's spelling is "name: description" or a bare name; only the name selects.
         name = str(raw).split(":", 1)[0].strip()
         if name:
             names.add(name.partition("(")[0].strip())  # `name(args)` in a few suites
-    if _config_values(config_dir, "strict_markers"):
+    if project.values("strict_markers"):
         strict = True
     # The native declaration surface (TID-67): `tiderace.mark.register("slow", ...)` in a conftest.
     # Every conftest has been imported by the time this runs, so whatever they registered is here.
@@ -4710,62 +4419,6 @@ def _registered_marks(addopts: str, config_dir: str) -> tuple:
     if _env_flag("TIDERACE_STRICT_MARKERS"):
         strict = True
     return frozenset(names), strict
-
-
-def _config_setting(config_dir: str, key: str):
-    """`key` as the project's config spells it — the raw value of the first section that sets it —
-    or `_NOTSET`. What `_config_values` flattens; this is for a setting whose *emptiness* means
-    something (`plugins = []`)."""
-    for section in _config_sections(config_dir):
-        value = section.get(key)
-        if value is not None:
-            return value
-    return _NOTSET
-
-
-def _config_values(config_dir: str, key: str) -> list:
-    """`key` from `[tool.pytest.ini_options]` and `[tool.tiderace]` in the project's pyproject.toml,
-    plus the ini-style configs, as a flat list."""
-    out: list = []
-    for section in _config_sections(config_dir):
-        value = section.get(key)
-        if value is None:
-            continue
-        if isinstance(value, str):
-            out.extend(v for v in value.splitlines() if v.strip())
-        elif isinstance(value, (list, tuple)):
-            out.extend(value)
-        else:
-            out.append(value)
-    return out
-
-
-def _config_sections(config_dir: str):
-    """Every config section a setting may live in, in the order pytest reads the files."""
-    for name in ("pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"):
-        path = os.path.join(config_dir, name)
-        if not os.path.exists(path):
-            continue
-        try:
-            if name == "pyproject.toml":
-                import tomllib
-                with open(path, "rb") as fh:
-                    tool = tomllib.load(fh).get("tool", {})
-                pytest_tool = tool.get("pytest") if isinstance(tool.get("pytest"), dict) else {}
-                # `[tool.pytest.ini_options]`, then pytest 9's native `[tool.pytest]` table — the
-                # same keys, typed (TID-100) — then `[tool.tiderace]`.
-                sections = [pytest_tool.get("ini_options") or {},
-                            {k: v for k, v in pytest_tool.items() if k != "ini_options"},
-                            tool.get("tiderace", {})]
-            else:
-                import configparser
-                parser = configparser.ConfigParser()
-                parser.read(path)
-                header = "tool:pytest" if name == "setup.cfg" else "pytest"
-                sections = [dict(parser[header]) if parser.has_section(header) else {}]
-        except Exception:  # noqa: BLE001 — an unreadable config must not stop the run
-            continue
-        yield from sections
 
 
 def _skip_decision(marks: list):
@@ -4798,16 +4451,15 @@ def _invoke(node_id: str, style: str, args: dict) -> tuple[str, str]:
 
 
 def _invoke_body(node_id: str, style: str, args: dict) -> tuple[str, str]:
-    module = importlib.import_module(_module_name(_module_key(node_id)))
+    node = resolve_target(node_id, style, lenient=style == "unittest_method")
+    module = node.module
     try:
-        if style == "unittest_method" or _is_unittest_node(module, node_id, style):
+        if node.is_unittest:
             return _invoke_unittest(module, node_id)
         if style == "class_method":
-            cls_name, method = _class_method(node_id)
-            cls = getattr(module, cls_name)
-            _xunit_class_setup(cls)  # pytest's `setup_class`, once per class per process (TID-60)
-            instance = cls()
-            bound = getattr(instance, method)
+            _xunit_class_setup(node.cls)  # pytest's `setup_class`, once per class per process (TID-60)
+            instance = node.cls()
+            bound = getattr(instance, node.name)
             call_args, request = _with_request(bound, args, node_id, instance)
             setup, teardown = _xunit_test_hooks(module, style, node_id, bound)
             try:
@@ -4822,7 +4474,7 @@ def _invoke_body(node_id: str, style: str, args: dict) -> tuple[str, str]:
                         pass
                 _test_finalizers(request)
             return "passed", ""
-        func = getattr(module, node_id.partition("::")[2])
+        func = node.func
         call_args, request = _with_request(func, args, node_id)
         setup, teardown = _xunit_test_hooks(module, style, node_id, func)
         try:
@@ -5322,10 +4974,8 @@ def _pytest_major() -> int:
 
 
 def _aggregate(outcomes: list[tuple[str, str]]) -> tuple[str, str]:
-    """Collapse parametrization variants into one node outcome (worst wins)."""
-    order = {"error": 3, "failed": 2, "skipped": 1, "passed": 0}
-    worst = max(outcomes, key=lambda o: order.get(o[0], 0))
-    return worst
+    """Collapse parametrization variants into one node outcome (worst wins — `Outcome.worst`)."""
+    return Outcome.worst(outcomes)
 
 
 # --------------------------------------------------------------------------- serve loop
@@ -5341,8 +4991,8 @@ def _preimport(root: str) -> None:
                 try:
                     # Named as `_discover` and execution name it (TID-37); a module-level
                     # `importorskip` is a skip, not a reason to take the pool parent down (TID-48).
-                    importlib.import_module(_module_name(rel))
-                except (Exception, *_skip_exceptions()):  # noqa: BLE001
+                    _import_module(rel)
+                except (Exception, *_SKIP_EXCEPTIONS):  # noqa: BLE001
                     pass
 
 
@@ -5411,6 +5061,7 @@ def probe() -> int:
     root = sys.argv[1]
     global _ROOT
     _ROOT = root
+    set_run_root(root)
     _insert_run_root(root)
     paths = list(sys.path)  # the sub-interpreter inherits the same import roots (root + site-packages + …)
     _write_frame(_STDOUT, {"ready": True, "pid": os.getpid()})
@@ -5443,7 +5094,7 @@ try:
             _r.setdefault("node_id", _task["node_id"])
             _out_q.put(_r)
         except BaseException as _exc:  # noqa: BLE001 — never drop a task's response
-            _out_q.put({"node_id": _task["node_id"], "outcome": "error", "detail": repr(_exc)})
+            _out_q.put(_shim.errored(_task["node_id"], repr(_exc)))
 finally:
     _eng.teardown_all()
 """
@@ -5454,13 +5105,13 @@ def subinterp() -> int:
     sub-interpreters, parallel via per-interpreter GILs (PEP 684). Batch protocol: read one
     `{"batch": [{node_id, style, deadline_ms}, …]}` frame, reply one `{"results": [{node_id, outcome,
     detail}, …]}` frame (input order). The caller only routes sub-interpreter-safe modules here."""
-    import threading
 
     from concurrent import interpreters  # 3.14+; the caller probes first, so this is expected present
 
     root = sys.argv[1]
     global _ROOT, _STDOUT
     _ROOT = root
+    set_run_root(root)
     # As in `serve()` (TID-103): the protocol owns a private duplicate of fd 1, and fd 1 goes to
     # stderr. Every sub-interpreter's `sys.stdout` is fd 1, so a test that printed put its bytes
     # into the engine's result stream — read as a frame length, waited on forever; click's suite
@@ -5469,7 +5120,7 @@ def subinterp() -> int:
     os.dup2(2, 1)
     _insert_run_root(root)
     paths = list(sys.path)
-    workers = max(1, int(_flag_value("--pool-size") or os.cpu_count() or 4))
+    workers = max(1, int(_argv_option(sys.argv[2:], "--pool-size") or os.cpu_count() or 4))
 
     in_q = interpreters.create_queue()
     out_q = interpreters.create_queue()
@@ -5507,7 +5158,7 @@ def subinterp() -> int:
                               f"sub-interpreter, where nothing can interrupt it (TID-104); "
                               f"outstanding: {', '.join(pending)}")
                     for node in pending:
-                        collected[node] = {"node_id": node, "outcome": "error", "detail": detail}
+                        collected[node] = errored(node, detail)
                     _write_frame(_STDOUT, {"results": [collected[t["node_id"]] for t in batch]})
                     os._exit(1)  # the blocked interpreter cannot be joined; the pool is done
                 collected[r["node_id"]] = r
@@ -5541,7 +5192,6 @@ def _start_clean_room(engine: "Engine") -> None:
     global _CLEAN_ROOM
     if not _FORK_AVAILABLE:
         return
-    import socket
 
     ours, theirs = socket.socketpair()
     pid = os.fork()
@@ -5577,8 +5227,7 @@ def _clean_room_serve(sock, engine: "Engine") -> None:
                 resp = engine.run(req["node_id"], req["style"], req.get("deadline_ms", 5000))
                 payload = json.dumps(resp).encode()
             except BaseException as exc:  # noqa: BLE001 — report it; never die silently (TID-15)
-                payload = json.dumps({"node_id": req["node_id"], "outcome": "error",
-                                      "detail": _child_fault_detail(exc)[:4000]}).encode()
+                payload = json.dumps(errored(req["node_id"], _child_fault_detail(exc)[:4000])).encode()
             try:
                 os.write(write_fd, payload)
             except BaseException:  # noqa: BLE001
@@ -5617,8 +5266,7 @@ def _clean_room_serve(sock, engine: "Engine") -> None:
         except ValueError:
             resp = None
         if resp is None:
-            resp = {"node_id": req["node_id"], "outcome": "error",
-                    "detail": "timeout (clean re-run produced no result)"}
+            resp = errored(req["node_id"], "timeout (clean re-run produced no result)")
         _write_frame(fd, resp)
 
 
@@ -5845,7 +5493,6 @@ def _fork_pool_workers(size: int, socket_path: str, engine_args: dict,
     """Fork `size` workers off this (imported) process, each connecting to `socket_path` and
     serving the ordinary single-worker loop until its connection closes. Returns their pids.
     `selection` is this run's `-k` / `-m` / `--strict-markers`, applied in each child (TID-90)."""
-    import socket
 
     children = []
     for _ in range(size):
@@ -5883,6 +5530,7 @@ def serve() -> int:
     root = sys.argv[1]
     global _ROOT, _STDOUT
     _ROOT = root
+    set_run_root(root)
     # The protocol owns a private duplicate of fd 1, and fd 1 itself — what `print()`, a C
     # extension and a subprocess's inherited stdout reach — is pointed at stderr (TID-103). The
     # frames are length-prefixed, so one stray byte on the stream desynchronises it for good: in
@@ -5905,7 +5553,7 @@ def serve() -> int:
     # Ancestor conftests before `_preimport` (TID-19): a root conftest exists to set things up that
     # must already be true when test modules import — env defaults, warning filters, `sys.path`. pytest
     # loads conftests first for the same reason. `_discover` reads the memoised result back.
-    modules_file = _flag_value("--modules")
+    modules_file = _argv_option(sys.argv[2:], "--modules")
     if modules_file:
         _select_modules(modules_file)  # before anything is imported (TID-75)
     # `TIDERACE_TIMING=1` prints how long each start-up phase took, to stderr. The start-up is a
@@ -5926,8 +5574,8 @@ def serve() -> int:
     # Pool mode (TID-4): fork the workers from this one imported image instead of importing per
     # worker. Every worker below is created *after* the fork, so its fixture state is its own and
     # the semantics match N separate wellsprings exactly.
-    pool = _flag_value("--pool")
-    conn = _flag_value("--connect")
+    pool = _argv_option(sys.argv[2:], "--pool")
+    conn = _argv_option(sys.argv[2:], "--connect")
     if pool and conn:
         return _serve_pool(int(pool), conn, engine_args)
     engine = Engine(**engine_args)
