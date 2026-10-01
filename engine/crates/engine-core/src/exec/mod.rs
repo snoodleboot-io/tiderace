@@ -19,7 +19,8 @@ mod results;
 mod safe_set_cache;
 mod selection;
 mod shim_protocol;
-mod tiers;
+mod tier;
+pub(crate) mod tiers;
 mod transport;
 mod watermark;
 mod watermark_stack;
@@ -39,6 +40,7 @@ pub use results::NotRun;
 pub use safe_set_cache::{SafeModule, SafeSetCache};
 pub use selection::{KeywordExpr, Selection};
 pub use shim_protocol::{read_frame, write_frame, ExecRequest, ExecResponse};
+pub use tier::{LaneSeed, TierFactory, WarmImage, WorkerStrategy};
 pub use tiers::fork::ForkWorker;
 #[cfg(unix)]
 pub use tiers::pool::{PooledTransport, PooledWorker, WellspringPool};

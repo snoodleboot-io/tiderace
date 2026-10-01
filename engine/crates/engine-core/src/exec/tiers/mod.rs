@@ -9,6 +9,8 @@
 
 pub mod fork;
 #[cfg(unix)]
+pub mod fork_tier;
+#[cfg(unix)]
 pub mod pool;
 pub mod probe;
 pub mod subinterp;

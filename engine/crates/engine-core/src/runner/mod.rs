@@ -14,24 +14,26 @@
 //! One type per file (ADR-E005).
 
 mod hashing;
+mod lane;
 mod memory;
-mod parallel_runner;
 mod phase_timer;
+mod run;
 mod run_notes;
 mod run_plan;
+mod schedule;
 mod scheduler_kind;
 mod verdicts;
-mod worker_strategy;
 
+pub use crate::exec::WorkerStrategy;
 pub use hashing::{digest, hash_bytes, hash_file, hash_file_or_missing, MISSING};
 pub use memory::{
     available_memory_bytes, memory_limit_mb_from_env, process_rss_bytes, workers_by_memory,
     MemorySizing,
 };
-pub use parallel_runner::{run_parallel, run_parallel_with_notes};
-#[cfg(unix)]
-pub use parallel_runner::{run_parallel_with_pool, run_parallel_with_pool_notes};
 pub use phase_timer::PhaseTimer;
+pub use run::{run_parallel, run_parallel_with_notes};
+#[cfg(unix)]
+pub use run::{run_parallel_with_pool, run_parallel_with_pool_notes};
 pub use run_notes::{RunNotes, RunOutcome};
 pub use run_plan::{
     default_workers, ForkOptions, Learned, RunPlan, Sharding, WorkerCount, DEFAULT_DEADLINE_MS,
@@ -41,4 +43,3 @@ pub use verdicts::{
     changed_files, record_durations, PersistedState, RecordedOutcome, TestRecord, VerdictStore,
     STATE_FILE,
 };
-pub use worker_strategy::WorkerStrategy;
