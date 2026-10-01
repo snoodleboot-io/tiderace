@@ -260,7 +260,7 @@ impl ShimTransport for ScriptedShim {
 
     fn exchange(&mut self, req: &ExecRequest<'_>) -> Result<ExecResponse> {
         if matches!(self.close_after, Some(n) if self.calls >= n) {
-            return Err(EngineError::Exec("shim closed mid-run".into()));
+            return Err(EngineError::PeerClosed { what: "shim" });
         }
         self.calls += 1;
         self.seen.push(req.node_id.to_string());

@@ -4,10 +4,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::domain::{NodeId, TestItem, TestResult};
+use crate::error::{EngineError, Result};
 #[cfg(unix)]
 use crate::exec::{ForkWorker, PooledWorker, WellspringPool};
 use crate::exec::{SafeSetCache, ShimTarget, SubInterpWorker, SubprocessWorker, Worker};
-use crate::runner::{RunPlan, WorkerStrategy};
+use crate::runner::{RunNotes, RunOutcome, RunPlan, WorkerStrategy};
 use crate::scheduler::{ScheduleInput, ScheduledTest};
 
 /// Run `items` across a pool of workers in parallel, using the tier and scheduler named by `plan`
@@ -26,26 +27,47 @@ pub fn run_parallel(
     root: &Path,
     items: Vec<TestItem>,
     plan: &RunPlan,
-) -> Result<Vec<TestResult>, String> {
+) -> Result<Vec<TestResult>> {
+    run_parallel_with_notes(python, shim, root, items, plan).map(|o| o.results)
+}
+
+/// [`run_parallel`], with the notes the run collected on the way — the memory sizing it
+/// applied, a cache it could not save — for the caller to print or keep (TID-115).
+pub fn run_parallel_with_notes(
+    python: &str,
+    shim: &Path,
+    root: &Path,
+    items: Vec<TestItem>,
+    plan: &RunPlan,
+) -> Result<RunOutcome> {
     if items.is_empty() {
-        return Ok(Vec::new());
+        return Ok(RunOutcome::default());
     }
     if !plan.strategy.is_available() {
-        return Err(format!(
+        return Err(EngineError::Unavailable(format!(
             "the {} tier is not available on this platform",
             plan.strategy
-        ));
+        )));
     }
-    if plan.strategy.is_hybrid() {
-        return run_subinterp_hybrid(&ShimTarget::new(python, shim, root), items, plan);
-    }
-    run_batched(
-        &ShimTarget::new(python, shim, root),
-        items,
-        plan,
-        plan.strategy,
-        None,
-    )
+    let mut notes = RunNotes::default();
+    let results = if plan.strategy.is_hybrid() {
+        run_subinterp_hybrid(
+            &ShimTarget::new(python, shim, root),
+            items,
+            plan,
+            &mut notes,
+        )?
+    } else {
+        run_batched(
+            &ShimTarget::new(python, shim, root),
+            items,
+            plan,
+            plan.strategy,
+            None,
+            &mut notes,
+        )?
+    };
+    Ok(RunOutcome { results, notes })
 }
 
 /// Schedule `items` into work units and drain them through a pool of `workers` threads (TID-52).
@@ -70,14 +92,30 @@ pub fn run_parallel_with_pool(
     items: Vec<TestItem>,
     plan: &RunPlan,
     pool: &mut WellspringPool,
-) -> Result<Vec<TestResult>, String> {
-    run_batched(
+) -> Result<Vec<TestResult>> {
+    run_parallel_with_pool_notes(python, shim, root, items, plan, pool).map(|o| o.results)
+}
+
+/// [`run_parallel_with_pool`], with the run's notes (TID-115).
+#[cfg(unix)]
+pub fn run_parallel_with_pool_notes(
+    python: &str,
+    shim: &Path,
+    root: &Path,
+    items: Vec<TestItem>,
+    plan: &RunPlan,
+    pool: &mut WellspringPool,
+) -> Result<RunOutcome> {
+    let mut notes = RunNotes::default();
+    let results = run_batched(
         &ShimTarget::new(python, shim, root),
         items,
         plan,
         WorkerStrategy::Fork,
         Some(pool),
-    )
+        &mut notes,
+    )?;
+    Ok(RunOutcome { results, notes })
 }
 
 fn run_batched(
@@ -87,9 +125,10 @@ fn run_batched(
     strategy: WorkerStrategy,
     #[cfg(unix)] warm: Option<&mut WellspringPool>,
     #[cfg(not(unix))] warm: Option<()>,
-) -> Result<Vec<TestResult>, String> {
+    notes: &mut RunNotes,
+) -> Result<Vec<TestResult>> {
     #[cfg(not(unix))]
-    let _ = warm;
+    let _ = (warm, &notes); // the pool, and the notes its sizing writes, are Unix-only
     if items.is_empty() {
         return Ok(Vec::new());
     }
@@ -160,16 +199,13 @@ fn run_batched(
             // execution with no snapshot — unreachable rather than merely unused.
             // Persistent rather than sized at launch (TID-106): the image is up, and its resident
             // size known, before the run decides how many workers to fork off it.
-            Some(
-                WellspringPool::launch_persistent_selected(
-                    &target.python,
-                    &target.shim,
-                    &target.root,
-                    true,
-                    Some(&modules_file.path),
-                )
-                .map_err(|e| e.to_string())?,
-            )
+            Some(WellspringPool::launch_persistent_selected(
+                &target.python,
+                &target.shim,
+                &target.root,
+                true,
+                Some(&modules_file.path),
+            )?)
         } else {
             None
         };
@@ -192,10 +228,10 @@ fn run_batched(
             plan.memory_limit_mb.map(|mb| mb << 20),
         );
         if let Some(note) = &sizing.note {
-            eprintln!("tiderace: {note}");
+            notes.push(note.clone());
         }
         threads = sizing.workers;
-        p.spawn_workers(threads).map_err(|e| e.to_string())?;
+        p.spawn_workers(threads)?;
     }
 
     let exec = BatchExec {
@@ -230,7 +266,7 @@ fn run_batched(
         #[cfg(not(unix))]
         let pooled: Option<()> = None;
 
-        handles.push(thread::spawn(move || -> Result<Vec<TestResult>, String> {
+        handles.push(thread::spawn(move || -> Result<Vec<TestResult>> {
             // One worker per thread, built once and reused across every unit it takes. Building it
             // per unit would trade the idle time this removes for a process launch per module.
             let mut worker: Box<dyn Worker> = {
@@ -268,9 +304,7 @@ fn run_batched(
                 };
                 let unit_index = unit_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let started_ms = run_started.elapsed().as_millis() as u64;
-                let results = worker
-                    .run(&unit)
-                    .map_err(|e| format!("execution failed: {e}"))?;
+                let results = worker.run(&unit)?;
                 let ended_ms = run_started.elapsed().as_millis() as u64;
                 mine.extend(
                     results
@@ -297,7 +331,8 @@ fn run_batched(
                 first_err.get_or_insert(e);
             }
             Err(_) => {
-                first_err.get_or_insert_with(|| "worker thread panicked".to_string());
+                first_err
+                    .get_or_insert_with(|| EngineError::Exec("worker thread panicked".to_string()));
             }
         }
     }
@@ -330,7 +365,8 @@ fn run_subinterp_hybrid(
     target: &ShimTarget,
     items: Vec<TestItem>,
     plan: &RunPlan,
-) -> Result<Vec<TestResult>, String> {
+    notes: &mut RunNotes,
+) -> Result<Vec<TestResult>> {
     let mut modules: Vec<String> = items.iter().map(|i| i.node_id.file().to_string()).collect();
     modules.sort();
     modules.dedup();
@@ -340,9 +376,14 @@ fn run_subinterp_hybrid(
     // every invocation, which on a small module count is most of this tier's cost — and it hurt
     // most on Windows, the one platform the tier exists for and the one with no daemon to lean on.
     let mut cache = SafeSetCache::load(&target.root);
-    let safe = cache.resolve(&target.python, &target.shim, &target.root, &modules)?;
-    // Best-effort: an unwritable tree must still run, just without the speedup next time.
-    let _ = cache.save(&target.root);
+    let safe = cache
+        .resolve(&target.python, &target.shim, &target.root, &modules)
+        .map_err(EngineError::Exec)?;
+    // Best-effort: an unwritable tree must still run, just without the speedup next time — but
+    // say so, or the re-probe on every run looks like the tier being slow.
+    if let Err(e) = cache.save(&target.root) {
+        notes.push(format!("sub-interpreter safe-set cache not saved: {e}"));
+    }
 
     let (safe_items, rest): (Vec<TestItem>, Vec<TestItem>) = items
         .into_iter()
@@ -353,11 +394,7 @@ fn run_subinterp_hybrid(
         let mut worker = SubInterpWorker::new(plan.deadline_ms)
             .with_shim_target(target.clone())
             .with_pool_size(plan.effective_workers(safe_items.len()));
-        all.extend(
-            worker
-                .run(&safe_items)
-                .map_err(|e| format!("subinterp pool: {e}"))?,
-        );
+        all.extend(worker.run(&safe_items)?);
     }
     if !rest.is_empty() {
         all.extend(run_batched(
@@ -366,6 +403,7 @@ fn run_subinterp_hybrid(
             plan,
             plan.strategy.fallback(),
             None,
+            notes,
         )?);
     }
     Ok(all)
@@ -392,7 +430,7 @@ fn new_worker(
     modules: &Path,
     trusted: HashSet<NodeId>,
     must_fork: HashSet<NodeId>,
-) -> Result<Box<dyn Worker>, String> {
+) -> Result<Box<dyn Worker>> {
     let BatchExec {
         strategy,
         deadline_ms,
@@ -404,13 +442,15 @@ fn new_worker(
             {
                 // The ladder and restore are launched together or not at all — see
                 // `ForkWorker::launch_optimistic`.
-                let launched = ForkWorker::launch_target(target, optimistic_no_fork, Some(modules));
                 Ok(Box::new(
-                    launched
-                        .map_err(|e| format!("failed to launch wellspring: {e}"))?
-                        .with_deadline_ms(deadline_ms)
-                        .with_trusted_pure(trusted)
-                        .with_must_fork(must_fork),
+                    ForkWorker::launch_target(
+                        target,
+                        optimistic_no_fork,
+                        Some(modules),
+                        deadline_ms,
+                    )?
+                    .with_trusted_pure(trusted)
+                    .with_must_fork(must_fork),
                 ))
             }
             #[cfg(not(unix))]
@@ -418,7 +458,9 @@ fn new_worker(
                 // The optimistic ladder and the trusted-pure set are fork-only knobs; name them here
                 // so this arm consumes them on platforms where the fork branch is compiled out.
                 let _ = (optimistic_no_fork, trusted, must_fork, modules);
-                Err("fork is unavailable on this platform".to_string())
+                Err(EngineError::Unavailable(
+                    "fork is unavailable on this platform".to_string(),
+                ))
             }
         }
         // The no-fork path always snapshots/restores (its only isolation without COW); the fork-only
@@ -433,9 +475,9 @@ fn new_worker(
             ))
         }
         // Routed before batching; reaching here would mean a nested pool.
-        WorkerStrategy::SubInterp => {
-            Err("the subinterp tier is routed before batching, not per batch".to_string())
-        }
+        WorkerStrategy::SubInterp => Err(EngineError::Unavailable(
+            "the subinterp tier is routed before batching, not per batch".to_string(),
+        )),
     }
 }
 
@@ -487,7 +529,7 @@ struct ModulesFile {
 }
 
 impl ModulesFile {
-    fn write(items: &[TestItem]) -> Result<Self, String> {
+    fn write(items: &[TestItem]) -> Result<Self> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let mut modules: Vec<String> = items.iter().map(|i| i.node_id.file().to_string()).collect();
@@ -498,8 +540,7 @@ impl ModulesFile {
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::write(&path, modules.join("\n") + "\n")
-            .map_err(|e| format!("could not write the module selection: {e}"))?;
+        std::fs::write(&path, modules.join("\n") + "\n")?;
         Ok(Self { path })
     }
 }
@@ -591,7 +632,7 @@ mod tests {
         )
         .expect_err("fork must be refused where it does not exist");
         assert!(
-            err.contains("fork"),
+            err.to_string().contains("fork"),
             "message must name the tier; got {err:?}"
         );
     }

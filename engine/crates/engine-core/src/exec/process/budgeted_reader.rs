@@ -58,12 +58,7 @@ impl BudgetedReader {
             Ok(Err(e)) => Err(EngineError::Io(e)),
             Err(Some(budget)) => {
                 self.lost = true;
-                Err(EngineError::Exec(format!(
-                    "no answer from the worker within {:.1}s — its test overran the deadline \
-                     and the in-process timeout could not interrupt it; the worker is killed \
-                     and reported lost (TID-98)",
-                    budget.as_secs_f64()
-                )))
+                Err(EngineError::WorkerLost { budget })
             }
         }
     }
@@ -74,9 +69,7 @@ impl BudgetedReader {
         wait: Option<Duration>,
     ) -> Result<Option<T>> {
         match self.next_frame(wait)? {
-            Some(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|e| EngineError::Exec(e.to_string())),
+            Some(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
             None => Ok(None),
         }
     }

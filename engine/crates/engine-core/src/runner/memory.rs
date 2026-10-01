@@ -31,6 +31,15 @@ pub struct MemorySizing {
     pub note: Option<String>,
 }
 
+/// `TIDERACE_MEMORY_LIMIT_MB` as a limit in megabytes, for the binaries to put on the plan
+/// (TID-106): unset, empty, non-numeric or zero means no limit.
+pub fn memory_limit_mb_from_env() -> Option<u64> {
+    std::env::var("TIDERACE_MEMORY_LIMIT_MB")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|mb| *mb > 0)
+}
+
 /// Memory not yet in use, in bytes — `MemAvailable` on Linux. `None` where unknown.
 pub fn available_memory_bytes() -> Option<u64> {
     meminfo_field(Path::new("/proc/meminfo"), "MemAvailable:")

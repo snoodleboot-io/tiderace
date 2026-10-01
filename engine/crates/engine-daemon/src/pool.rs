@@ -4,9 +4,7 @@ use std::path::Path;
 use engine_core::domain::{NodeId, TestItem, TestResult};
 #[cfg(unix)]
 use engine_core::exec::WellspringPool;
-#[cfg(unix)]
-use engine_core::runner::run_parallel_with_pool;
-use engine_core::runner::{run_parallel as core_run_parallel, RunPlan, WorkerStrategy};
+use engine_core::runner::{RunPlan, WorkerStrategy};
 
 /// Run `items` across a **pool of `workers` in parallel** (design 06 / ADR-E010).
 ///
@@ -40,16 +38,33 @@ pub fn run_parallel(
         trusted_pure: trusted.clone(),
         must_fork: must_fork.clone(),
         durations: durations.clone(), // TID-62: last run's per-node cost, the scheduler's weights
+        // The daemon honours the memory limit from the environment (TID-106); the plan itself
+        // reads nothing from it.
+        memory_limit_mb: engine_core::runner::memory_limit_mb_from_env(),
         ..RunPlan::default()
     };
     #[cfg(unix)]
     if let Some(pool) = warm {
         // The daemon's warm image (TID-84): this run's workers are forked off it, no import.
-        return run_parallel_with_pool(python, shim, root, items, &plan, pool);
+        return engine_core::runner::run_parallel_with_pool_notes(
+            python, shim, root, items, &plan, pool,
+        )
+        .map(print_notes)
+        .map_err(|e| e.to_string());
     }
     #[cfg(not(unix))]
     let _ = warm;
-    core_run_parallel(python, shim, root, items, &plan)
+    engine_core::runner::run_parallel_with_notes(python, shim, root, items, &plan)
+        .map(print_notes)
+        .map_err(|e| e.to_string())
+}
+
+/// The daemon's run notes go to its log, which is stderr.
+fn print_notes(outcome: engine_core::runner::RunOutcome) -> Vec<TestResult> {
+    for line in &outcome.notes.lines {
+        eprintln!("tiderace: {line}");
+    }
+    outcome.results
 }
 
 /// A sensible default worker count: the machine's parallelism, falling back to 4.

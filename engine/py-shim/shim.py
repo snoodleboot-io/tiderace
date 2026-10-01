@@ -80,14 +80,14 @@ class _PhaseTimer:
     """Start-up phase timings to stderr under `TIDERACE_TIMING=1`; silent otherwise."""
 
     def __init__(self) -> None:
-        self.on = os.environ.get("TIDERACE_TIMING") == "1"
+        self.on = _env_flag("TIDERACE_TIMING")
         self.last = time.perf_counter()
 
     def mark(self, label: str) -> None:
         if not self.on:
             return
         now = time.perf_counter()
-        print(f"tiderace: start-up: {label}: {now - self.last:.2f}s", file=sys.stderr, flush=True)
+        _warn(f"start-up: {label}: {now - self.last:.2f}s")
         self.last = now
 
 
@@ -95,9 +95,8 @@ def _select_modules(path: str) -> None:
     global _SELECTED_MODULES
     with open(path, encoding="utf-8") as fh:
         _SELECTED_MODULES = {line.strip() for line in fh if line.strip()}
-    if os.environ.get("TIDERACE_TIMING") == "1":
-        print(f"tiderace: start-up: {len(_SELECTED_MODULES)} modules selected",
-              file=sys.stderr, flush=True)
+    if _env_flag("TIDERACE_TIMING"):
+        _warn(f"start-up: {len(_SELECTED_MODULES)} modules selected")
 
 
 def _module_selected(rel: str) -> bool:
@@ -107,6 +106,21 @@ def _module_selected(rel: str) -> bool:
     on, and pruning the directories without selected modules cost 50 tests their isolation on
     pirn-agents before this was understood."""
     return _SELECTED_MODULES is None or rel in _SELECTED_MODULES
+
+
+def _env(name: str, default: str | None = None) -> str | None:
+    """A `TIDERACE_*` setting from the environment — the one place the shim reads it (TID-115)."""
+    return os.environ.get(name, default)
+
+
+def _env_flag(name: str) -> bool:
+    """A `TIDERACE_*` switch: set to `1`."""
+    return os.environ.get(name) == "1"
+
+
+def _warn(message: str) -> None:
+    """A line for the user on stderr, flushed — stdout is the protocol (TID-103)."""
+    print(f"tiderace: {message}", file=sys.stderr, flush=True)
 
 
 def _flag_value(name: str) -> str | None:
@@ -262,11 +276,10 @@ def _insert_run_root(root: str) -> None:
     names = {e[:-3] if e.endswith(".py") else e for e in entries}
     shadowed = sorted(names & sys.stdlib_module_names)
     if shadowed:
-        print(
-            f"tiderace: {basedir} is on sys.path and contains "
+        _warn(
+            f"{basedir} is on sys.path and contains "
             f"{', '.join(shadowed)}, which shadow standard-library modules of the same name; "
-            f"imports of those will resolve here, not to the stdlib",
-            file=sys.stderr, flush=True,
+            f"imports of those will resolve here, not to the stdlib"
         )
 
 
@@ -621,8 +634,8 @@ def _collect_addoption(module) -> None:
     try:
         hook(_OptionRecorder(_CLI_OPTIONS))
     except Exception as exc:  # noqa: BLE001 — a hook we can't model must not abort discovery
-        print(f"tiderace: pytest_addoption in {getattr(module, '__file__', '?')} "
-              f"could not be recorded: {exc!r}", file=sys.stderr, flush=True)
+        _warn(f"pytest_addoption in {getattr(module, '__file__', '?')} "
+              f"could not be recorded: {exc!r}")
 
 
 class _Config:
@@ -806,9 +819,8 @@ def _run_collection_hooks(conftests: list, test_modules: list) -> None:
 
 
 def _warn_hook_failed(module, exc: BaseException) -> None:
-    print(f"tiderace: pytest_collection_modifyitems in "
-          f"{getattr(module, '__file__', '?')} failed: {exc!r} — its skips will not be applied",
-          file=sys.stderr, flush=True)
+    _warn(f"pytest_collection_modifyitems in "
+          f"{getattr(module, '__file__', '?')} failed: {exc!r} — its skips will not be applied")
 
 
 class _TestRequest:
@@ -1330,7 +1342,7 @@ def _compile_selection_tree(expr: str, flag: str):
     try:
         return _parse_selection_expr(expr)
     except ValueError as exc:
-        print(f"tiderace: ignoring {flag} {expr!r}: {exc}", file=sys.stderr, flush=True)
+        _warn(f"ignoring {flag} {expr!r}: {exc}")
         return None
 
 
@@ -1584,7 +1596,7 @@ def _discover(root: str) -> Registry:
     global _MARKER_EXPR, _DECLARED_MARKS, _STRICT_MARKS
     # The command line wins over the project's own `addopts`, as it does in pytest: a config filter is
     # the project's default, and `-m` on the command line is this run's intent (TID-59).
-    expr = os.environ.get("TIDERACE_MARKER_EXPR") or _marker_expr_from(addopts)
+    expr = _env("TIDERACE_MARKER_EXPR") or _marker_expr_from(addopts)
     _MARKER_EXPR = _compile_marker_expr(expr) if expr else None
     _DECLARED_MARKS, _STRICT_MARKS = _registered_marks(addopts, config_dir)
     if _STRICT_MARKS:
@@ -1594,7 +1606,7 @@ def _discover(root: str) -> Registry:
         _plugin_marks()
     # `-k EXPR`, same precedence (TID-63): the command line over the project's own `addopts`.
     global _KEYWORD_EXPR
-    kexpr = os.environ.get("TIDERACE_KEYWORD_EXPR") or _marker_expr_from(addopts, "-k")
+    kexpr = _env("TIDERACE_KEYWORD_EXPR") or _marker_expr_from(addopts, "-k")
     _KEYWORD_EXPR = _compile_selection_tree(kexpr, "-k") if kexpr else None
     # `asyncio_mode = "auto"` means pytest-asyncio claims *every* async test, including ones carrying
     # `@pytest.mark.anyio`. In that configuration pytest runs even a `[trio]`-labelled variant on an
@@ -1637,7 +1649,7 @@ def _plugin_modules(addopts: str, config_dir: str, conftests: list) -> list:
     `TIDERACE_PLUGINS` (`none`, or a comma-separated allow-list) or `[tool.tiderace] plugins`.
     `PYTEST_DISABLE_PLUGIN_AUTOLOAD` turns the entry points off, as it does for pytest; the
     explicit spellings still load."""
-    allow = os.environ.get("TIDERACE_PLUGINS")
+    allow = _env("TIDERACE_PLUGINS")
     if allow is None and config_dir:
         configured = _config_setting(config_dir, "plugins")
         if isinstance(configured, (list, tuple)):
@@ -1710,8 +1722,7 @@ def _register_plugin_fixtures(reg: Registry, addopts: str, config_dir: str, conf
         try:
             module = importlib.import_module(module_name)
         except (Exception, *_skip_exceptions()) as exc:  # noqa: BLE001 — one plugin, not the run
-            print(f"tiderace: pytest plugin {name!r} ({module_name}) not loaded: {exc!r}",
-                  file=sys.stderr, flush=True)
+            _warn(f"pytest plugin {name!r} ({module_name}) not loaded: {exc!r}")
             continue
         _collect_addoption(module)
         for attr, obj in list(vars(module).items()):
@@ -1758,9 +1769,9 @@ def _register_builtins(reg: Registry) -> None:
     try:
         import tiderace.builtins as builtins_pkg
     except Exception as exc:  # noqa: BLE001 — tiderace not importable ⇒ no builtins
-        print(f"tiderace: builtin providers unavailable ({exc!r}) — monkeypatch/tmp_path/capsys/"
+        _warn(f"builtin providers unavailable ({exc!r}) — monkeypatch/tmp_path/capsys/"
               f"capfd/caplog will not resolve. Install `tiderace` into this interpreter, or put "
-              f"engine/py-tiderace on PYTHONPATH.", file=sys.stderr, flush=True)
+              f"engine/py-tiderace on PYTHONPATH.")
         return
     for obj in builtins_pkg.providers():
         reg.add(_native_fixture_def(obj, "", {}))
@@ -1873,7 +1884,7 @@ def _import_conftest(path: str, rel_dir: str):
         # the cause (TID-72). pytest stops at collection with the conftest's error and runs nothing;
         # the per-test equivalent is every test under that conftest erroring with that traceback,
         # which `run()` reports the way it reports a conftest-level skip (TID-48).
-        print(f"tiderace: could not import {path}: {exc!r}", file=sys.stderr, flush=True)
+        _warn(f"could not import {path}: {exc!r}")
         _DIR_ERRORS["" if rel_dir.startswith("..") else rel_dir] = (
             f"conftest {path} failed to import:\n"
             + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
@@ -2978,9 +2989,9 @@ def _save_file_deps_cache() -> None:
         os.replace(tmp, os.path.join(d, f"w-{os.getpid()}.json"))
     except OSError:
         pass
-    if os.environ.get("TIDERACE_TIMING"):
-        print(f"tiderace: closure cache: {_FILE_DEPS_STATS['hits']} files from cache, "
-              f"{_FILE_DEPS_STATS['parsed']} parsed", file=sys.stderr, flush=True)
+    if _env("TIDERACE_TIMING"):
+        _warn(f"closure cache: {_FILE_DEPS_STATS['hits']} files from cache, "
+              f"{_FILE_DEPS_STATS['parsed']} parsed")
 
 
 def _import_closure(module_key: str, root: str) -> frozenset:
@@ -3655,8 +3666,7 @@ class Engine:
         # and the must-fork verdict is what changes the next run.
         if (node_must_fork and _CLEAN_ROOM is not None and not self.no_fork
                 and not force_no_fork_only and not self._timed_out):
-            print(f"tiderace: re-running {node_id} from a clean image — it disturbed interpreter state",
-                  file=sys.stderr, flush=True)
+            _warn(f"re-running {node_id} from a clean image — it disturbed interpreter state")
             clean = _clean_room_run(node_id, style, deadline_ms)
             if clean is not None:
                 clean["must_fork"] = True
@@ -3946,8 +3956,7 @@ class Engine:
                 # dirtied — if what it leaked was a thread, straight into a deadlock (TID-50).
                 return result
             if drift is not None and _FORK_AVAILABLE and not must_fork and not self.no_fork:
-                print(f"tiderace: re-running {node_id} in a fork — it {drift}",
-                      file=sys.stderr, flush=True)
+                _warn(f"re-running {node_id} in a fork — it {drift}")
                 oc, detail, cov, _ = self._fork_run(
                     node_id, style, requested, closure, combo, deadline_ms, case_kwargs,
                     force_no_fork=False, trusted_pure=False, must_fork=True, variant_id=variant_id)
@@ -4695,7 +4704,7 @@ def _registered_marks(addopts: str, config_dir: str) -> tuple:
         pass
     # `--strict-markers` on the command line (TID-67), for the same reason `-m` and `-k` travel
     # this way: a project with no config file at all has nowhere else to say it.
-    if os.environ.get("TIDERACE_STRICT_MARKERS") == "1":
+    if _env_flag("TIDERACE_STRICT_MARKERS"):
         strict = True
     return frozenset(names), strict
 
@@ -5654,12 +5663,11 @@ class _in_process_deadline:
         # the way to exercise the Windows path on Linux.
         if (not hasattr(signal, "setitimer")
                 or threading.current_thread() is not threading.main_thread()
-                or os.environ.get("TIDERACE_DEADLINE_WATCHDOG") == "1"):
+                or _env_flag("TIDERACE_DEADLINE_WATCHDOG")):
             try:
                 return self._arm_watchdog(seconds)
             except Exception as exc:  # noqa: BLE001 — no deadline is better than no test
-                print(f"tiderace: in-process deadline not armed: {exc!r}", file=sys.stderr,
-                      flush=True)
+                _warn(f"in-process deadline not armed: {exc!r}")
                 self.timer = None
                 return self
 
@@ -5884,11 +5892,11 @@ def serve() -> int:
     _STDOUT = os.dup(1)
     os.dup2(2, 1)
     no_fork = "--no-fork" in sys.argv[2:]
-    coverage = "--coverage" in sys.argv[2:] or os.environ.get("TIDERACE_COVERAGE") == "1"
+    coverage = "--coverage" in sys.argv[2:] or _env_flag("TIDERACE_COVERAGE")
     coverage_lines = ("--coverage-lines" in sys.argv[2:]
-                      or os.environ.get("TIDERACE_COVERAGE_LINES") == "1")
-    purity = "--purity" in sys.argv[2:] or os.environ.get("TIDERACE_PURITY") == "1"
-    restore = "--restore" in sys.argv[2:] or os.environ.get("TIDERACE_RESTORE") == "1"
+                      or _env_flag("TIDERACE_COVERAGE_LINES"))
+    purity = "--purity" in sys.argv[2:] or _env_flag("TIDERACE_PURITY")
+    restore = "--restore" in sys.argv[2:] or _env_flag("TIDERACE_RESTORE")
     _insert_run_root(root)
     _load_file_deps_cache(root)  # earlier runs' import closures, before anything computes one (TID-82)
     # Ancestor conftests before `_preimport` (TID-19): a root conftest exists to set things up that
@@ -5908,8 +5916,7 @@ def serve() -> int:
     reg = _discover(root)
     _phase.mark("discover (conftests, fixtures, hooks, marks)")
     if _phase.on and _SKIPPED_AT_DISCOVERY:
-        print(f"tiderace: start-up: {_SKIPPED_AT_DISCOVERY} test modules not imported (unselected)",
-              file=sys.stderr, flush=True)
+        _warn(f"start-up: {_SKIPPED_AT_DISCOVERY} test modules not imported (unselected)")
     engine_args = dict(reg=reg, no_fork=no_fork, root=root, coverage=coverage,
                        coverage_lines=coverage_lines,
                        purity_guard=purity, restore=restore)

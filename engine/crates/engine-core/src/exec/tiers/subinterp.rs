@@ -81,8 +81,8 @@ impl SubInterpWorker {
 
 impl Worker for SubInterpWorker {
     fn run(&mut self, items: &[TestItem]) -> Result<Vec<TestResult>> {
-        let target = self.target.clone().ok_or_else(|| {
-            EngineError::Exec("SubInterpWorker has no target; call with_target".into())
+        let target = self.target.clone().ok_or(EngineError::NoTarget {
+            worker: "SubInterpWorker",
         })?;
         let mut proc = SubInterpWorker::launch(&target, self.pool_size)?;
 
@@ -157,7 +157,7 @@ impl ShimTransport for SubInterpTransport {
         let frame: Value = self
             .frames
             .next(None)?
-            .ok_or_else(|| EngineError::Exec("subinterp sent no ready frame".into()))?;
+            .ok_or(EngineError::NoReadyFrame { what: "subinterp" })?;
         ready_info(frame)
     }
 
@@ -165,7 +165,7 @@ impl ShimTransport for SubInterpTransport {
         self.exchange_batch(std::slice::from_ref(req))?
             .pop()
             .ok_or_else(|| {
-                EngineError::Exec("subinterp answered a batch of one with nothing".into())
+                EngineError::Protocol("subinterp answered a batch of one with nothing".into())
             })
     }
 
@@ -173,17 +173,16 @@ impl ShimTransport for SubInterpTransport {
         let stdin = self
             .stdin
             .as_mut()
-            .ok_or_else(|| EngineError::Exec("subinterp already shut down".into()))?;
-        write_frame(stdin, &json!({ "batch": reqs }))
-            .map_err(|e| EngineError::Exec(format!("subinterp batch write: {e}")))?;
+            .ok_or(EngineError::AlreadyShutDown { what: "subinterp" })?;
+        write_frame(stdin, &json!({ "batch": reqs }))?;
         let resp: Value = self
             .frames
             .next(Some(self.budget))?
-            .ok_or_else(|| EngineError::Exec("subinterp closed mid-batch".into()))?;
+            .ok_or(EngineError::PeerClosed { what: "subinterp" })?;
         let results = resp
             .get("results")
             .and_then(Value::as_array)
-            .ok_or_else(|| EngineError::Exec("subinterp response missing `results`".into()))?;
+            .ok_or_else(|| EngineError::Protocol("subinterp response missing `results`".into()))?;
         Ok(results
             .iter()
             .filter_map(|r| serde_json::from_value::<ExecResponse>(r.clone()).ok())
@@ -193,9 +192,7 @@ impl ShimTransport for SubInterpTransport {
 
 /// The pool size the shim takes when none is given: its own default, the CPU count.
 fn default_pool_size() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
+    crate::exec::limits::default_parallelism()
 }
 
 /// A live `--subinterp` process + its transport. Fields drop in order: the transport first
