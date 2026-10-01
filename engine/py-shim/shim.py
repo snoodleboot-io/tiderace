@@ -5457,7 +5457,7 @@ def subinterp() -> int:
     os.dup2(2, 1)
     _insert_run_root(root)
     paths = list(sys.path)
-    workers = max(1, int(os.environ.get("TIDERACE_SUBINTERP_WORKERS") or (os.cpu_count() or 4)))
+    workers = max(1, int(_flag_value("--pool-size") or os.cpu_count() or 4))
 
     in_q = interpreters.create_queue()
     out_q = interpreters.create_queue()

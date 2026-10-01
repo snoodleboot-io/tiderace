@@ -13,9 +13,9 @@
 //! out across the pool and streams the results back. Result-identical to `ForkWorker` on the safe subset.
 
 use std::collections::HashMap;
-use std::io::{BufReader, Read};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::io::BufReader;
+use std::path::Path;
+use std::process::{ChildStdin, ChildStdout};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -23,6 +23,7 @@ use serde_json::{json, Value};
 
 use crate::domain::{Outcome, TestItem, TestResult};
 use crate::error::{EngineError, Result};
+use crate::exec::process::{ShimLaunch, ShimMode, ShimProcess, ShimTarget};
 use crate::exec::shim_protocol::{read_frame, write_frame, ExecResponse};
 use crate::exec::transport::{results_for, LOST_WORKER_MARGIN_MS};
 use crate::exec::worker::Worker;
@@ -32,14 +33,7 @@ use crate::exec::worker::Worker;
 pub struct SubInterpWorker {
     deadline_ms: u64,
     pool_size: Option<usize>,
-    target: Option<Target>,
-}
-
-#[derive(Debug, Clone)]
-struct Target {
-    python: String,
-    shim: PathBuf,
-    root: PathBuf,
+    target: Option<ShimTarget>,
 }
 
 impl SubInterpWorker {
@@ -54,11 +48,13 @@ impl SubInterpWorker {
 
     /// Point at an interpreter + shim + corpus root (the no-COW analogue of `ForkWorker::launch`'s args).
     pub fn with_target(mut self, python: impl Into<String>, shim: &Path, root: &Path) -> Self {
-        self.target = Some(Target {
-            python: python.into(),
-            shim: shim.to_path_buf(),
-            root: root.to_path_buf(),
-        });
+        self.target = Some(ShimTarget::new(python, shim, root));
+        self
+    }
+
+    /// [`with_target`](Self::with_target) from a [`ShimTarget`].
+    pub fn with_shim_target(mut self, target: ShimTarget) -> Self {
+        self.target = Some(target);
         self
     }
 
@@ -68,44 +64,16 @@ impl SubInterpWorker {
         self
     }
 
-    /// Launch `python <shim> <root> --subinterp` and complete the readiness handshake.
-    fn launch(target: &Target, pool_size: Option<usize>) -> Result<Proc> {
-        let mut cmd = Command::new(&target.python);
-        cmd.arg(&target.shim)
-            .arg(&target.root)
-            .arg("--subinterp")
-            // Pin native thread pools — parallel workers must not oversubscribe BLAS/OMP.
-            .env("OPENBLAS_NUM_THREADS", "1")
-            .env("OMP_NUM_THREADS", "1")
-            .env("MKL_NUM_THREADS", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped());
-        if let Some(n) = pool_size {
-            cmd.env("TIDERACE_SUBINTERP_WORKERS", n.to_string());
-        }
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| EngineError::Exec(format!("failed to launch subinterp worker: {e}")))?;
-        let stdin = Some(
-            child
-                .stdin
-                .take()
-                .ok_or_else(|| EngineError::Exec("subinterp stdin unavailable".into()))?,
-        );
-        let mut stdout = BufReader::new(
-            child
-                .stdout
-                .take()
-                .ok_or_else(|| EngineError::Exec("subinterp stdout unavailable".into()))?,
-        );
-        let ready: Option<Value> = read_frame(&mut stdout)
-            .map_err(|e| EngineError::Exec(format!("subinterp ready: {e}")))?;
-        if ready.and_then(|v| v.get("ready").and_then(Value::as_bool)) != Some(true) {
-            return Err(EngineError::Exec("subinterp failed to warm".into()));
-        }
+    /// Launch `python <shim> <root> --subinterp [--pool-size N]` and complete the readiness
+    /// handshake.
+    fn launch(target: &ShimTarget, pool_size: Option<usize>) -> Result<Proc> {
+        let mut process =
+            ShimLaunch::new(target, ShimMode::SubInterp { pool: pool_size }).spawn()?;
+        process.ready()?;
+        let (stdin, stdout) = process.take_pipes()?;
         Ok(Proc {
-            child,
-            stdin,
+            process,
+            stdin: Some(stdin),
             stdout: Some(stdout),
         })
     }
@@ -160,7 +128,7 @@ impl Worker for SubInterpWorker {
         let (frame, stdout) = match rx.recv_timeout(budget) {
             Ok(got) => got,
             Err(_) => {
-                let _ = proc.child.kill();
+                proc.process.kill();
                 let fault = format!(
                     "no result from the sub-interpreter pool within {:.0}s — a test in this \
                      batch blocked where nothing could interrupt it; the pool was killed (TID-104)",
@@ -212,13 +180,15 @@ fn default_pool_size() -> usize {
         .unwrap_or(4)
 }
 
-/// A live `--subinterp` process + its pipes (mirrors `NoForkProc`). `stdin` is an `Option` so `Drop`
-/// can close the write half (→ shim EOF → workers stopped → exit) before reaping.
+/// A live `--subinterp` process + its pipes. The pipes are held here rather than in the process
+/// because the batch's reply is read on a thread, which takes `stdout` and hands it back
+/// (TID-104). Fields drop in order: the write half first (EOF → the shim stops its workers and
+/// exits), the read half, then the process, which reaps it.
 struct Proc {
-    child: Child,
     stdin: Option<ChildStdin>,
     /// Taken by the reader thread for the batch's reply and put back after (TID-104).
     stdout: Option<BufReader<ChildStdout>>,
+    process: ShimProcess,
 }
 
 impl Proc {
@@ -232,8 +202,7 @@ impl Drop for Proc {
         self.stdin.take(); // close write half → EOF → the shim stops its workers and exits
         if let Some(stdout) = self.stdout.as_mut() {
             let mut sink = Vec::new();
-            let _ = stdout.get_mut().read_to_end(&mut sink); // drain, then reap
+            let _ = std::io::Read::read_to_end(stdout.get_mut(), &mut sink); // drain, then reap
         }
-        let _ = self.child.wait();
     }
 }

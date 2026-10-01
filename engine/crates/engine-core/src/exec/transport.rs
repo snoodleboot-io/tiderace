@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use crate::domain::{NodeId, Outcome, TestItem, TestResult};
 use crate::error::{EngineError, Result};
-use crate::exec::shim_protocol::{read_frame, write_frame, ExecRequest, ExecResponse};
+use crate::exec::shim_protocol::{read_frame, ready_info, write_frame, ExecRequest, ExecResponse};
 
 /// What a shim reports in its readiness handshake (the first frame it sends).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,14 +253,9 @@ impl<W: Write> ShimTransport for BudgetedTransport<W> {
         let frame: Value = self
             .next_frame(None)?
             .ok_or_else(|| EngineError::Exec("shim sent no ready frame".into()))?;
-        if frame.get("ready").and_then(Value::as_bool) != Some(true) {
-            return Err(EngineError::Exec(format!("shim failed to warm: {frame}")));
-        }
-        self.peer_pid = frame
-            .get("pid")
-            .and_then(Value::as_u64)
-            .and_then(|p| u32::try_from(p).ok());
-        Ok(ReadyInfo { pid: self.peer_pid })
+        let info = ready_info(frame)?;
+        self.peer_pid = info.pid;
+        Ok(info)
     }
 
     fn exchange(&mut self, req: &ExecRequest<'_>) -> Result<ExecResponse> {
@@ -359,14 +354,9 @@ impl<W: Write, R: Read> ShimTransport for PipeTransport<W, R> {
     fn ready(&mut self) -> Result<ReadyInfo> {
         let frame: Value = read_frame(&mut self.stdout)?
             .ok_or_else(|| EngineError::Exec("shim sent no ready frame".into()))?;
-        if frame.get("ready").and_then(Value::as_bool) != Some(true) {
-            return Err(EngineError::Exec(format!("shim failed to warm: {frame}")));
-        }
-        self.peer_pid = frame
-            .get("pid")
-            .and_then(Value::as_u64)
-            .and_then(|p| u32::try_from(p).ok());
-        Ok(ReadyInfo { pid: self.peer_pid })
+        let info = ready_info(frame)?;
+        self.peer_pid = info.pid;
+        Ok(info)
     }
 
     fn exchange(&mut self, req: &ExecRequest<'_>) -> Result<ExecResponse> {

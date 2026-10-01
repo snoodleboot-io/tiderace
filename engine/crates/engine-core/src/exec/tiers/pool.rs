@@ -22,13 +22,13 @@
 use std::io::BufReader;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use std::collections::HashSet;
 
 use crate::domain::{NodeId, TestItem, TestResult};
 use crate::error::{EngineError, Result};
+use crate::exec::process::{ShimLaunch, ShimMode, ShimProcess, ShimTarget};
 use crate::exec::transport::{PipeTransport, ShimTransport};
 use crate::exec::{Selection, Worker};
 
@@ -47,7 +47,7 @@ pub type PooledTransport = PipeTransport<UnixStream, BufReader<UnixStream>>;
 
 /// The parent process plus its accepted worker connections.
 pub struct WellspringPool {
-    parent: Child,
+    parent: ShimProcess,
     socket_path: PathBuf,
     /// The selection the next [`spawn_workers`](Self::spawn_workers) hands its workers (TID-90).
     selection: Option<Selection>,
@@ -96,33 +96,20 @@ impl WellspringPool {
         let listener = UnixListener::bind(&socket_path)
             .map_err(|e| EngineError::Exec(format!("failed to bind worker socket: {e}")))?;
 
-        let mut cmd = Command::new(python);
-        cmd.arg(shim)
-            .arg(root)
-            .arg("--pool")
-            .arg(size.to_string())
-            .arg("--connect")
-            .arg(&socket_path);
-        if restore {
-            cmd.arg("--restore");
-        }
-        if let Some(file) = modules {
-            cmd.arg("--modules").arg(file);
-        }
-        let parent = cmd
-            // Pin native thread pools — threaded BLAS/OMP + fork() is a known hazard, and this
-            // process forks twice over (workers, then a child per test).
-            .env("OPENBLAS_NUM_THREADS", "1")
-            .env("OMP_NUM_THREADS", "1")
-            .env("MKL_NUM_THREADS", "1")
-            // The protocol runs over the sockets, so stdout is free to carry diagnostics through to
-            // the terminal the way stderr already does.
-            .stdin(Stdio::null())
-            .spawn()
-            .map_err(|e| {
-                let _ = std::fs::remove_file(&socket_path);
-                EngineError::Exec(format!("failed to launch wellspring pool: {e}"))
-            })?;
+        let target = ShimTarget::new(python, shim, root);
+        let parent = ShimLaunch::new(
+            &target,
+            ShimMode::Pool {
+                size,
+                connect: socket_path.clone(),
+                restore,
+            },
+        )
+        .modules(modules)
+        .spawn()
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&socket_path);
+        })?;
 
         let mut pool = Self {
             parent,
@@ -190,7 +177,7 @@ impl WellspringPool {
                 }
             }
 
-            if let Ok(Some(status)) = self.parent.try_wait() {
+            if let Some(status) = self.parent.exited() {
                 return Err(EngineError::Exec(format!(
                     "the wellspring pool exited ({status}) before worker {} of {size} connected. The \
                      Python traceback above says why. If this suite only fails under the shared-import \
@@ -238,41 +225,13 @@ impl WellspringPool {
         restore: bool,
         modules: Option<&Path>,
     ) -> Result<Self> {
-        let mut cmd = Command::new(python);
-        cmd.arg(shim)
-            .arg(root)
-            .arg("--pool")
-            .arg("0")
-            .arg("--connect")
-            .arg("-"); // the socket comes with each spawn request
-        if restore {
-            cmd.arg("--restore");
-        }
-        if let Some(file) = modules {
-            cmd.arg("--modules").arg(file);
-        }
-        let mut parent = cmd
-            .env("OPENBLAS_NUM_THREADS", "1")
-            .env("OMP_NUM_THREADS", "1")
-            .env("MKL_NUM_THREADS", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .map_err(|e| EngineError::Exec(format!("failed to launch warm pool parent: {e}")))?;
-        let stdin = parent.stdin.take().expect("piped");
-        let mut stdout = BufReader::new(parent.stdout.take().expect("piped"));
+        let target = ShimTarget::new(python, shim, root);
+        let mut parent = ShimLaunch::new(&target, ShimMode::PersistentPool { restore })
+            .modules(modules)
+            .spawn()?;
         // The import happens before the readiness frame, so reading it is waiting for the image.
-        let ready: Option<serde_json::Value> =
-            crate::exec::read_frame(&mut stdout).map_err(|e| {
-                EngineError::Exec(format!("warm pool parent did not report ready: {e}"))
-            })?;
-        if ready.is_none() {
-            let _ = parent.wait();
-            return Err(EngineError::Exec(
-                "the warm pool parent exited before it was ready — the Python traceback above says why"
-                    .into(),
-            ));
-        }
+        parent.ready()?;
+        let (stdin, stdout) = parent.take_pipes()?;
         Ok(Self {
             parent,
             socket_path: Self::socket_path(),
@@ -345,7 +304,7 @@ impl WellspringPool {
 
     /// Whether the parent process is still alive.
     pub fn is_alive(&mut self) -> bool {
-        matches!(self.parent.try_wait(), Ok(None))
+        self.parent.exited().is_none()
     }
 
     pub fn take_worker(&mut self) -> Option<PooledTransport> {
@@ -359,7 +318,7 @@ impl WellspringPool {
 
     /// The imported parent's pid, for diagnostics.
     pub fn pid(&self) -> u32 {
-        self.parent.id()
+        self.parent.pid()
     }
 
     fn socket_path() -> PathBuf {
@@ -380,8 +339,8 @@ impl Drop for WellspringPool {
         // would deadlock — the same shutdown ordering `Wellspring` already depends on.
         self.workers.clear();
         self.control = None; // EOF on a persistent parent's stdin: it reaps its workers and exits
-        let _ = self.parent.wait();
         let _ = std::fs::remove_file(&self.socket_path);
+        // `parent` drops last, which reaps it.
     }
 }
 

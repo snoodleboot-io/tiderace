@@ -6,7 +6,7 @@ use std::thread;
 use crate::domain::{NodeId, TestItem, TestResult};
 #[cfg(unix)]
 use crate::exec::{ForkWorker, PooledWorker, WellspringPool};
-use crate::exec::{SafeSetCache, SubInterpWorker, SubprocessWorker, Worker};
+use crate::exec::{SafeSetCache, ShimTarget, SubInterpWorker, SubprocessWorker, Worker};
 use crate::runner::{RunPlan, WorkerStrategy};
 use crate::scheduler::{ScheduleInput, ScheduledTest};
 
@@ -37,9 +37,15 @@ pub fn run_parallel(
         ));
     }
     if plan.strategy.is_hybrid() {
-        return run_subinterp_hybrid(python, shim, root, items, plan);
+        return run_subinterp_hybrid(&ShimTarget::new(python, shim, root), items, plan);
     }
-    run_batched(python, shim, root, items, plan, plan.strategy, None)
+    run_batched(
+        &ShimTarget::new(python, shim, root),
+        items,
+        plan,
+        plan.strategy,
+        None,
+    )
 }
 
 /// Schedule `items` into work units and drain them through a pool of `workers` threads (TID-52).
@@ -66,9 +72,7 @@ pub fn run_parallel_with_pool(
     pool: &mut WellspringPool,
 ) -> Result<Vec<TestResult>, String> {
     run_batched(
-        python,
-        shim,
-        root,
+        &ShimTarget::new(python, shim, root),
         items,
         plan,
         WorkerStrategy::Fork,
@@ -77,9 +81,7 @@ pub fn run_parallel_with_pool(
 }
 
 fn run_batched(
-    python: &str,
-    shim: &Path,
-    root: &Path,
+    target: &ShimTarget,
     items: Vec<TestItem>,
     plan: &RunPlan,
     strategy: WorkerStrategy,
@@ -160,9 +162,9 @@ fn run_batched(
             // size known, before the run decides how many workers to fork off it.
             Some(
                 WellspringPool::launch_persistent_selected(
-                    python,
-                    shim,
-                    root,
+                    &target.python,
+                    &target.shim,
+                    &target.root,
                     true,
                     Some(&modules_file.path),
                 )
@@ -216,7 +218,7 @@ fn run_batched(
     let unit_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut handles = Vec::new();
     for worker_index in 0..threads {
-        let (py, sh, rt) = (python.to_string(), shim.to_path_buf(), root.to_path_buf());
+        let target = target.clone();
         let (queue, trusted, must_fork) = (queue.clone(), trusted.clone(), must_fork.clone());
         let unit_counter = unit_counter.clone();
         let modules_path = modules_path.clone();
@@ -241,13 +243,13 @@ fn run_batched(
                                 .with_trusted_pure(trusted)
                                 .with_must_fork(must_fork),
                         ),
-                        None => new_worker(exec, &py, &sh, &rt, &modules_path, trusted, must_fork)?,
+                        None => new_worker(exec, &target, &modules_path, trusted, must_fork)?,
                     }
                 }
                 #[cfg(not(unix))]
                 {
                     let _ = pooled;
-                    new_worker(exec, &py, &sh, &rt, &modules_path, trusted, must_fork)?
+                    new_worker(exec, &target, &modules_path, trusted, must_fork)?
                 }
             };
             let mut mine = Vec::new();
@@ -325,9 +327,7 @@ fn run_batched(
 /// A probe that cannot classify a module (CPython < 3.14, no probe API) returns `None`, and `None`
 /// routes to the fallback — always sound, never wrong, just not accelerated.
 fn run_subinterp_hybrid(
-    python: &str,
-    shim: &Path,
-    root: &Path,
+    target: &ShimTarget,
     items: Vec<TestItem>,
     plan: &RunPlan,
 ) -> Result<Vec<TestResult>, String> {
@@ -339,10 +339,10 @@ fn run_subinterp_hybrid(
     // only new or changed modules pay (TID-35). Without this the CLI re-probed the whole corpus on
     // every invocation, which on a small module count is most of this tier's cost — and it hurt
     // most on Windows, the one platform the tier exists for and the one with no daemon to lean on.
-    let mut cache = SafeSetCache::load(root);
-    let safe = cache.resolve(python, shim, root, &modules)?;
+    let mut cache = SafeSetCache::load(&target.root);
+    let safe = cache.resolve(&target.python, &target.shim, &target.root, &modules)?;
     // Best-effort: an unwritable tree must still run, just without the speedup next time.
-    let _ = cache.save(root);
+    let _ = cache.save(&target.root);
 
     let (safe_items, rest): (Vec<TestItem>, Vec<TestItem>) = items
         .into_iter()
@@ -351,7 +351,7 @@ fn run_subinterp_hybrid(
     let mut all = Vec::new();
     if !safe_items.is_empty() {
         let mut worker = SubInterpWorker::new(plan.deadline_ms)
-            .with_target(python, shim, root)
+            .with_shim_target(target.clone())
             .with_pool_size(plan.effective_workers(safe_items.len()));
         all.extend(
             worker
@@ -361,9 +361,7 @@ fn run_subinterp_hybrid(
     }
     if !rest.is_empty() {
         all.extend(run_batched(
-            python,
-            shim,
-            root,
+            target,
             rest,
             plan,
             plan.strategy.fallback(),
@@ -390,9 +388,7 @@ struct BatchExec {
 /// time the queue removes.
 fn new_worker(
     exec: BatchExec,
-    py: &str,
-    sh: &Path,
-    rt: &Path,
+    target: &ShimTarget,
     modules: &Path,
     trusted: HashSet<NodeId>,
     must_fork: HashSet<NodeId>,
@@ -408,8 +404,7 @@ fn new_worker(
             {
                 // The ladder and restore are launched together or not at all — see
                 // `ForkWorker::launch_optimistic`.
-                let launched =
-                    ForkWorker::launch_selected(py, sh, rt, optimistic_no_fork, Some(modules));
+                let launched = ForkWorker::launch_target(target, optimistic_no_fork, Some(modules));
                 Ok(Box::new(
                     launched
                         .map_err(|e| format!("failed to launch wellspring: {e}"))?
@@ -433,7 +428,7 @@ fn new_worker(
             let _ = (must_fork, trusted);
             Ok(Box::new(
                 SubprocessWorker::new(deadline_ms, 1)
-                    .with_target(py, sh, rt)
+                    .with_shim_target(target.clone())
                     .with_modules(modules),
             ))
         }
