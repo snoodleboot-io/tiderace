@@ -26,7 +26,9 @@
 //! `test_g` below pins the honest boundary rather than papering over it.
 
 use engine_core::collection::{Collector, RegexCollector};
-use engine_core::domain::{NodeId, Outcome, TestResult};
+#[cfg(unix)]
+use engine_core::domain::NodeId;
+use engine_core::domain::{Outcome, TestResult};
 use engine_core::exec::{SubprocessWorker, Worker};
 use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
