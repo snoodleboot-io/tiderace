@@ -27,7 +27,7 @@ flowchart TB
 2. **Dep graph.** Footprints fold into a `DepGraph` (`engine-core/src/coverage/dep_graph.rs`): test
    node id ↔ the source files it touched.
 3. **Persist.** The graph plus the content hash of every touched file are written to
-   [`.tiderace-state.json`](database.md) (`engine-daemon/src/persist.rs`).
+   [`.tiderace-state.json`](database.md) (`engine-daemon/src/state/plan.rs`).
 4. **Content-hash diff.** On the next run, tiderace re-hashes the files and diffs against the stored
    hashes (`changed_files()`) — content-based, so touching a file without editing it triggers nothing.
 5. **Plan.** `plan()` partitions the candidate tests into `to_run` and `cached`; only `to_run`

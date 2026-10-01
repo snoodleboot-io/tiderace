@@ -35,13 +35,25 @@ All collection, graph, schedule, exec, coverage, impact, and cache logic. Module
 - **`cache`** — the content-addressed result cache (ADR-E004): `CacheKey`/`CacheKeyBuilder`, the
   `Cache` trait, `TieredCache` (local + optional remote), `LocalCache`, `NullCache`, `CachedOutcome`,
   and `purity` (`Purity::is_cacheable` — the soundness gate that excludes impure outcomes).
-- **`exec`** — execution: `Wellspring` (`wellspring.rs`) imports the project once and forks per test;
-  `ForkWorker`, `SubprocessWorker` (the no-fork path), `SubInterpWorker` (`subinterp_worker.rs` — the
-  parallel sub-interpreter pool, ADR-E015), the `Worker` trait and `WorkerCaps`; `WatermarkStack`
-  (`watermark_stack.rs`) tracks fixture setup/teardown across scopes so finalizers fire in order;
-  the `ShimTransport` seam (`transport.rs` — `PipeTransport`, `ReadyInfo`) and the wire types
-  (`shim_protocol.rs` — `ExecRequest`/`ExecResponse`, `read_frame`/`write_frame`); plus
-  `fork_permit`, `fork_plan`, and `memory_governor` for fork admission/back-pressure.
+- **`exec`** — execution. `process/` launches and reaps the shim (`ShimLaunch`/`ShimProcess`,
+  `launch.rs` + `shim_process.rs`; the reply-budgeted reader `budgeted_reader.rs`; `reaper.rs`).
+  `tiers/` are the isolation tiers behind one `Worker` trait: `fork.rs` (`ForkWorker`: one warm
+  wellspring, fork-per-test), `pool.rs` (`WellspringPool`: the forked workers and the warm image's
+  parent), `fork_tier.rs`, `subprocess.rs` (the no-fork path), `subinterp.rs` (the parallel
+  sub-interpreter pool, ADR-E015) and `probe.rs` (its safety probe). `tier.rs` names them
+  (`WorkerStrategy`) and builds one for a run (`TierFactory`, `WarmImage`); `knobs.rs` is what a
+  worker runs with (`RunKnobs`), `limits.rs` the one place deadlines live, `selection.rs` the
+  `-k` / `-m` selection and how it travels through the environment. The `ShimTransport` seam
+  (`transport.rs` — `PipeTransport`) and the typed wire (`shim_protocol.rs` — `ExecRequest` /
+  `ExecResponse`, `read_frame`/`write_frame`); `WatermarkStack` (`watermark_stack.rs`) tracks
+  fixture setup/teardown across scopes; plus `fork_permit`, `fork_plan`, `memory_governor` and
+  `safe_set_cache`.
+- **`runner`** — a run from "what to execute" to "how it was executed", shared by the CLI and the
+  daemon: `run_plan.rs` (`RunPlan`, the configuration; `Learned`, what earlier runs recorded),
+  `run.rs` (`run_parallel` and the warm-image variant: the tier claims what it runs itself, the
+  scheduler partitions the rest, one lane per thread drains the queue — `schedule.rs`,
+  `lane.rs`), `verdicts.rs` (`PersistedState`, `VerdictStore`: the `.tiderace-state.json`
+  record), `memory.rs` (workers by memory), `run_notes.rs`, `phase_timer.rs`.
 - **`domain`** — the shared vocabulary: `NodeId`, `Scope`/`ScopePath`, `Outcome`, `TestItem`,
   `TestResult`, `TestStyle`, `RunReport`.
 - **`hooks`** — `HookHost` + `HookEvent`/`Hook`/`Priority`: an in-engine event/plugin seam.
@@ -53,27 +65,38 @@ All collection, graph, schedule, exec, coverage, impact, and cache logic. Module
 Keeps CPython warm and adds impact-aware, parallel, file-watching execution. The `tiderace-daemon`
 binary (`main.rs`). Module files (`engine-daemon/src/`):
 
-- **`engine_handler.rs`** — orchestrates a run: collect → graph → schedule → execute; chooses no-fork
-  + restore by default (`optimistic_no_fork()` unless `TIDERACE_FORCE_FORK=1`) and drives impact-aware
-  re-runs (`run_impacted`). Under `TIDERACE_SUBINTERP=1` it also partitions modules by sub-interpreter
-  safety (`safe_set`, cached in `PersistedState`) and routes the safe subset to the `SubInterpWorker`.
-- **`probe.rs`** — `probe` mode: classifies each module `safe` / `unsafe` / `unknown` for the
-  sub-interpreter tier (imports it in an isolated sub-interpreter), feeding the routing above.
-- **`pool.rs`** — the parallel pool, fed `WorkerBatch`es from the `LocalityScheduler`. Each batch runs
-  on the platform's backend: a warm `ForkWorker` per core on Unix, a no-fork `SubprocessWorker` per
-  batch on Windows (no `fork()` there).
-- **`persist.rs`** — `.tiderace-state.json` (`PersistedState`, `changed_files()`, `plan()`); the active
-  impact-skip layer (see [state & cache](database.md)).
+- **`engine_handler.rs`** — the `EngineHandler`: its `DaemonConfig` (`config.rs`, the one reader of
+  `TIDERACE_CACHE_DIR` / `FORCE_FORK` / `SUBINTERP` / `SOCKET`), the sequential `Run` over one warm
+  `ForkWorker`, `run_items_parallel` (builds a `RunPlan` and calls the core runner), and the RPC
+  dispatch. Errors are `DaemonError` (`error.rs`), converted once at the wire.
+- **`full_run.rs` / `impacted_run.rs`** — the two runs: the purity-aware, `-k`-prefiltered full run
+  that persists verdicts and footprints, and the impact-aware re-run that executes only what
+  changed and serves the rest from the record or the result cache (`result_cache.rs`).
+- **`warm_image.rs`** — the warm image a full run forks its workers from, kept between runs and
+  dropped when the tree's stamp moves (`tree_stamp.rs`); the one Unix-only file. `collection.rs`
+  caches the collection under the same stamp.
+- **`state/`** — `.tiderace-state.json`: `plan.rs` (`PersistedState`, `changed_files()`,
+  `plan()`; see [state & cache](database.md)), `fold.rs` (how a run's results fold into it,
+  `RunScope`), `keyword_prefilter.rs` (`-k` decided by the daemon where the record can vouch),
+  `safe_modules.rs` (the sub-interpreter safe set, probed once and persisted).
 - **`watch.rs` / `fs_watcher.rs` / `invalidator.rs`** — `watch` mode: debounced filesystem events feed
   the invalidator, which uses the dep graph to re-run only impacted tests on each save.
-- **`rpc_server.rs` / `socket.rs` / `session.rs` / `rpc_method.rs`** — `serve` mode: a per-project Unix
-  socket answering RPC (`Discover`, `Run`, `Health`, `Recycle`, `Shutdown`) over a persistent warm
-  session.
+- **`rpc/`** — `method.rs` (`RpcRequest` / `RpcResponse`), `server.rs` (framing, `RpcHandler`),
+  `socket.rs` (the per-project Unix socket and its path), `client.rs` (`DaemonClient`, what
+  `tiderace run` and `tiderace daemon …` talk through); `session.rs` the warm session.
+
+The parallel pool itself lives in `engine-core` (`runner/run.rs` over `exec/tiers/`); the daemon's
+contribution is the warm image those workers fork from. `probe` mode calls
+`engine_core::exec::probe_modules`.
 
 ## `engine-cli` — the one-shot CLI
 
-The `tiderace` binary (`main.rs`): one-shot `collect` and `run`. Reads `TIDERACE_SHIM` (path to
-`py-shim/shim.py`, required) and `TIDERACE_PYTHON` (default `python3`).
+The `tiderace` binary: `main.rs` turns argv into a `Command` (`args.rs` — usage, `Options`, the
+`Route` between the daemon serving the root and this process), `run.rs` executes `collect` and `run`
+(the target, the plan that actually runs, what `run` writes back), `report.rs` prints the per-test
+lines, the tally and the JSON report, and `daemon_cmd.rs` is `daemon start|status|stop` over
+`DaemonClient`. Reads `TIDERACE_SHIM` (path to `py-shim/shim.py`, required), `TIDERACE_PYTHON`
+(default `python3`) and `TIDERACE_NO_DAEMON`.
 
 ## `engine-inproc` — the in-process backend (②, experimental)
 

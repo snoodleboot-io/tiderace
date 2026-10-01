@@ -14,7 +14,7 @@ The suite walker and the collector skip the directory.
 
 ## `.tiderace-state.json` — the warm impact state
 
-The active impact-skip layer (`engine-daemon/src/persist.rs`) writes a single JSON file at
+The active impact-skip layer (`engine-daemon/src/state/plan.rs`) writes a single JSON file at
 `<root>/.tiderace-state.json`. It is the native analogue of the old engine's `.tiderace.db`, but it is
 just two maps:
 
