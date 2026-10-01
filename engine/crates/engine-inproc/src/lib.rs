@@ -170,6 +170,9 @@ impl ShimTransport for InProcessTransport {
                 // Nothing here skips a whole module: this transport is handed one node at a time
                 // and the shim only sets `skip_origin` on an import-time skip (TID-55).
                 skip_origin: String::new(),
+                // Nor does it report keywords: the daemon's `-k` prefilter (TID-102) reads the
+                // records the pool transports produce, not this one's.
+                keywords: Vec::new(),
                 // This transport speaks the one-request-one-result protocol and does not expand
                 // parametrization or resolve inherited methods, so a node reports itself
                 // (TID-25/TID-26). `expanded: false` keeps the empty `variants` meaning "not

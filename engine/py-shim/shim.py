@@ -1353,10 +1353,13 @@ def _keyword_path_names(module_key: str) -> tuple:
     root = os.path.abspath(_ROOT or ".")
     rootdir = os.path.abspath(_CONFIG_DIR) if _CONFIG_DIR else root
     module_path = os.path.join(root, module_key)
-    rel = os.path.relpath(module_path, rootdir)
-    if rel.startswith(os.pardir):  # the ini sits beside, not above: the run root is the rootdir
-        rootdir, rel = root, os.path.relpath(module_path, root)
-    parts = [p for p in rel.split(os.sep) if p and p != os.curdir and p != os.pardir]
+    try:
+        rel = os.path.relpath(module_path, rootdir)
+        if rel.startswith(os.pardir):  # the ini sits beside, not above: the run root is the rootdir
+            rootdir, rel = root, os.path.relpath(module_path, root)
+    except ValueError:  # Windows: the config and the run root on different drives — no common
+        rootdir, rel = root, module_key  # ancestor; the run root is the rootdir then
+    parts = [p for p in rel.replace("\\", "/").split("/") if p and p != os.curdir and p != os.pardir]
     if _pytest_major() >= 8:
         names = tuple(parts)
     elif len(parts) > 1 and os.path.exists(os.path.join(os.path.dirname(module_path), "__init__.py")):
@@ -3293,6 +3296,19 @@ class Engine:
         # Deselected by the project's own `-m` filter (TID-32). Reported as an EMPTY expansion
         # rather than a skip: pytest deselects these, so they must not appear in the tally at all —
         # a skip would be a different, visible outcome.
+        # A module that skips at import is skipped under any `-k` or `-m`: pytest's collection
+        # skips it before either is consulted. The verdicts below used to come first, so a `-k`
+        # that was a definite No at node level (`-k "not unit"` over `tests/unit/`) deselected
+        # these where `-k nomatch` — undecided until the import — reported them; the daemon,
+        # replaying the skip from its record (TID-102), reported them either way. The import is
+        # the first thing now, as it is for pytest.
+        try:
+            importlib.import_module(_module_name(module_key))
+        except _skip_exceptions() as exc:
+            return {"node_id": node_id, "outcome": "skipped", "detail": _skip_reason(exc),
+                    "skip_origin": module_key}
+        except Exception:  # noqa: BLE001 — an unimportable module surfaces per node, below
+            pass
         # Always, `-k` or not (TID-102): the names `-k` would match against are reported with the
         # result, so the daemon can take the verdict itself next time for a node nothing touched.
         names = _mark_names(node_id, style)

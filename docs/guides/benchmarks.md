@@ -173,12 +173,17 @@ three runs where three numbers are shown, otherwise one.
 | daemon, warm, unfiltered | **23.0 / 23.5 / 23.0 s** | **28.4 / 28.5 / 28.2 s** |
 | daemon, `-k <one test>` | **0.64 / 0.62 / 0.63 s** | **0.42 / 0.43 / 0.40 s** |
 | daemon, `-k` matching nothing | 0.63 / 0.60 / 0.59 s | 0.39 / 0.39 / 0.39 s |
+| daemon, `-k <one test>`, after TID-102 | **0.33 / 0.33 / 0.31 s** | **0.26 / 0.29 / 0.33 s** |
+| daemon, `-k` matching nothing, after TID-102 | 0.31 / 0.32 / 0.30 s | 0.21 / 0.24 / 0.22 s |
 | daemon, after a source edit (re-import) | 26.5 s | 32.1 s |
 | daemon, warm again | 22.7 s | 28.6 s |
 
 What the image buys is the start-up — the interpreter and the suite's import graph, ~3.5 s here —
 so a full run through the daemon is 12% faster and a run of one test by name is **6× to 9×**
-faster than without it. An edit under the tree drops the image and the next run pays the import
+faster than without it. TID-102 (1 October) then halved the `-k` round trip again: the daemon
+decides `-k` itself for every node whose recorded keywords and dependencies are unchanged, and
+replays a module-import skip from its record instead of sending the node to a worker to import
+and skip it again; one test by name is **12× to 15×** faster than without the daemon. An edit under the tree drops the image and the next run pays the import
 once; the impact-aware `tiderace-daemon run` above, which imports only what it will execute, is
 still the cheaper inner loop after a source edit.
 
