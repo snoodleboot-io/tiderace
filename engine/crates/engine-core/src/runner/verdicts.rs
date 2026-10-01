@@ -61,7 +61,7 @@ pub struct PersistedState {
 }
 
 /// One test's persisted result + dependency footprint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestRecord {
     pub outcome: String,
     pub detail: String,
@@ -75,6 +75,17 @@ pub struct TestRecord {
     /// Sticky until the test's own file changes. `#[serde(default)]` ⇒ old state files load as false.
     #[serde(default)]
     pub must_fork: bool,
+    /// What `-k` matches this node against, as the shim last reported it (TID-102): its path
+    /// names, `::` segments and mark names. With every dep unchanged, the daemon takes the `-k`
+    /// verdict from these instead of sending the node to a worker to be deselected there. Empty
+    /// for a record the shim never judged (a module-import skip) and for old state files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    /// The module whose import skipped this test (TID-55), kept so the daemon can replay the skip
+    /// for an unchanged module instead of sending the node to a worker to import it again
+    /// (TID-102). Empty for everything but a module-import skip.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub skip_origin: String,
 }
 
 impl PersistedState {

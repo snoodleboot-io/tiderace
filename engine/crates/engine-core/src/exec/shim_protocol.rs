@@ -120,6 +120,12 @@ pub struct ExecResponse {
     /// both — `578 skipped (12 modules skipped at import)`. Empty for a per-test skip.
     #[serde(default)]
     pub skip_origin: String,
+    /// What `-k` matched this node against — path names, `::` segments, mark names — as the
+    /// shim computed them (TID-102). Recorded by the daemon so it can take the verdict itself
+    /// for a node whose dependencies are unchanged. Empty when the shim never reached the
+    /// verdict (a module-import skip, a directory error).
+    #[serde(default)]
+    pub keywords: Vec<String>,
     /// `variants` is the complete answer for this request, even when empty (TID-26).
     ///
     /// Needed because an empty list is otherwise ambiguous: an unparametrized node also sends none.
@@ -143,6 +149,9 @@ pub struct VariantResult {
     pub coverage: std::collections::BTreeMap<String, Vec<u32>>,
     #[serde(default)]
     pub pure: Option<bool>,
+    /// See [`ExecResponse::keywords`] — this case's own, with its id as the last segment.
+    #[serde(default)]
+    pub keywords: Vec<String>,
     /// See [`ExecResponse::must_fork`] — recorded per case, since only some cases may trip.
     #[serde(default)]
     pub must_fork: bool,

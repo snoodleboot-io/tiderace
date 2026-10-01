@@ -42,6 +42,11 @@ pub struct TestResult {
     /// where those extra ids come from.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub expanded: bool,
+    /// What `-k` matched this node against, as the shim computed it (TID-102): the names its
+    /// path gives it, its `::` segments and its mark names. Empty when the shim never took the
+    /// verdict. Persisted by the daemon, which decides `-k` from it for an unchanged node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
     /// Where and when the parallel runner ran this test (TID-78): the worker thread, the schedule
     /// unit it belonged to, and that unit's start and end in milliseconds from the run's start. A
     /// run draws as one lane per worker from these; absent on paths that do not go through the
@@ -69,6 +74,7 @@ impl TestResult {
             must_fork: false,
             skip_origin: String::new(),
             expanded: false,
+            keywords: Vec::new(),
             worker: None,
             unit: None,
             unit_started_ms: None,
@@ -112,6 +118,12 @@ impl TestResult {
     /// Name the module whose import skipped this test (builder style).
     pub fn with_skip_origin(mut self, skip_origin: impl Into<String>) -> Self {
         self.skip_origin = skip_origin.into();
+        self
+    }
+
+    /// Attach the names `-k` matched this node against (builder style, TID-102).
+    pub fn with_keywords(mut self, keywords: Vec<String>) -> Self {
+        self.keywords = keywords;
         self
     }
 

@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use engine_core::cache::{Cache, CacheKey, CacheKeyBuilder, CachedOutcome, DirCache};
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestItem, TestResult};
-use engine_core::exec::{ForkWorker, SubInterpWorker, Worker};
+use engine_core::exec::{ForkWorker, KeywordExpr, SubInterpWorker, Worker};
 use engine_core::runner::DEFAULT_DEADLINE_MS;
 
 use crate::persist::{changed_files, plan, PersistedState, TestRecord, STATE_FILE};
@@ -269,8 +269,9 @@ impl EngineHandler {
         let items: Vec<TestItem> = if requested.is_empty() {
             all
         } else {
+            let wanted: HashSet<&str> = requested.iter().map(String::as_str).collect();
             all.into_iter()
-                .filter(|it| requested.iter().any(|r| r == it.node_id.as_str()))
+                .filter(|it| wanted.contains(it.node_id.as_str()))
                 .collect()
         };
         #[cfg(unix)]
@@ -380,6 +381,28 @@ impl EngineHandler {
         let collected = self.collect()?;
         let all_candidates: Vec<String> = collected.iter().map(|i| i.node_id.to_string()).collect();
         phase.mark("collect candidates");
+        // `-k` decided here for every candidate the state can vouch for (TID-102): the workers
+        // judged 5,482 nodes one by one to run one, ~250 ms of a 350 ms round trip. What survives
+        // — matching, or not decidable — still travels with the run's `-k`, and the workers'
+        // verdict is the one that counts for what they receive. Not under `--strict-markers`:
+        // the shim's unknown-mark error precedes its `-k` verdict, as pytest's does.
+        let prefiltered: Option<(Vec<String>, Vec<TestResult>)> = self
+            .selection
+            .as_ref()
+            .filter(|s| !s.strict_markers)
+            .and_then(|s| s.keyword.as_deref())
+            .and_then(KeywordExpr::parse)
+            .map(|expr| {
+                let (keep, replayed) =
+                    keyword_prefilter(&state, &changed, &current, &all_candidates, &expr);
+                phase.mark(&format!(
+                    "keyword prefilter: {} of {} candidates decided by the daemon, {} skips replayed",
+                    all_candidates.len() - keep.len(),
+                    all_candidates.len(),
+                    replayed.len()
+                ));
+                (keep, replayed)
+            });
         let fresh = if subinterp_enabled() {
             let items = collected;
             let modules: Vec<String> = {
@@ -417,7 +440,29 @@ impl EngineHandler {
             }
             fresh
         } else {
-            self.run_items_parallel(&[], &trusted, &must_fork, &durations, true, Some(collected))?
+            match prefiltered {
+                // Every candidate decided against: nothing to run, and no image to launch for it.
+                Some((keep, replayed)) if keep.is_empty() => replayed,
+                Some((keep, mut replayed)) => {
+                    replayed.extend(self.run_items_parallel(
+                        &keep,
+                        &trusted,
+                        &must_fork,
+                        &durations,
+                        true,
+                        Some(collected),
+                    )?);
+                    replayed
+                }
+                None => self.run_items_parallel(
+                    &[],
+                    &trusted,
+                    &must_fork,
+                    &durations,
+                    true,
+                    Some(collected),
+                )?,
+            }
         };
         phase.mark("run");
         // A filtered run (TID-90) learns nothing about deselection: every unselected node
@@ -460,7 +505,11 @@ impl EngineHandler {
         results: &[TestResult],
         learn_deselection: bool,
     ) -> bool {
-        let mut changed = !results.is_empty();
+        // Durations are refreshed in memory on every run but do not count as a change on their
+        // own (TID-102): a `-k` run that re-ran one test and replayed its skips would otherwise
+        // rewrite the whole state — 11 MB on pirn-core, 55 ms of a 300 ms round trip — for a
+        // millisecond of jitter. A duration survives to disk with the next real change.
+        let mut changed = false;
         state.record_durations(results); // TID-62: the next run's scheduler weights
                                          // A candidate that ran and produced nothing is one the project's own `addopts` deselects
                                          // or ignores: the shim answers it with an empty expansion, so it never had a record, so
@@ -505,48 +554,64 @@ impl EngineHandler {
                     deps,
                     pure: None,
                     must_fork: false,
+                    keywords: Vec::new(),
+                    skip_origin: String::new(),
                 },
             );
         }
         for r in results {
             let prior = state.tests.get(r.node_id.as_str());
-            state.tests.insert(
-                r.node_id.to_string(),
-                TestRecord {
-                    outcome: outcome_token(r.outcome).to_string(),
-                    detail: r.detail.clone(),
-                    // An empty footprint means capture was off, not that the test depends on
-                    // nothing — every test touches at least its own file. Overwriting a real
-                    // footprint with "no data" would silently disarm the staleness guards that
-                    // read it.
-                    deps: if r.touched_files.is_empty() {
-                        prior.map(|p| p.deps.clone()).unwrap_or_default()
-                    } else {
-                        r.touched_files.clone()
-                    },
-                    // Sticky for the same reason `must_fork` is, and missing it made the bare
-                    // no-fork tier erase the verdict that grants it. `pure: None` means *this run
-                    // did not measure* — because the test was forked, was async, or was trusted
-                    // pure and therefore skipped the snapshot. In none of those did we learn the
-                    // test became impure, so overwriting a recorded verdict with "unknown" throws
-                    // away a fact for no reason.
-                    //
-                    // The effect was a perfect oscillation: run 1 measures pure, run 2 trusts it
-                    // and goes bare (measuring nothing), run 3 finds no verdict and pays the full
-                    // snapshot again. The tier could never apply twice in a row, so half its value
-                    // was discarded. Measured on a snapshot-heavy corpus: 1.31s / 0.45s / 1.61s /
-                    // 0.45s across four identical runs.
-                    //
-                    // Staleness is still handled where it belongs — `trusted` requires the
-                    // recorded deps to be unchanged, and TID-40 made those footprints sound. A
-                    // measured verdict (`Some`) always wins over the prior one.
-                    pure: r.pure.or_else(|| prior.and_then(|p| p.pure)),
-                    // Sticky: a forked re-run cannot observe the drift that earned the flag, so
-                    // clearing it on a clean forked result would make the node oscillate between
-                    // tiers forever. It clears when the test's own source changes.
-                    must_fork: r.must_fork || prior.is_some_and(|p| p.must_fork),
+            let record = TestRecord {
+                outcome: outcome_token(r.outcome).to_string(),
+                detail: r.detail.clone(),
+                // An empty footprint means capture was off, not that the test depends on
+                // nothing — every test touches at least its own file. Overwriting a real
+                // footprint with "no data" would silently disarm the staleness guards that
+                // read it.
+                deps: if !r.touched_files.is_empty() {
+                    r.touched_files.clone()
+                } else if let Some(p) = prior.filter(|p| !p.deps.is_empty()) {
+                    p.deps.clone()
+                } else if r.skip_origin.is_empty() {
+                    Vec::new()
+                } else {
+                    // A module-import skip touches nothing but its module: that is what the
+                    // replay of the skip hangs off (TID-102).
+                    vec![r.skip_origin.clone()]
                 },
-            );
+                // Sticky for the same reason `must_fork` is, and missing it made the bare
+                // no-fork tier erase the verdict that grants it. `pure: None` means *this run
+                // did not measure* — because the test was forked, was async, or was trusted
+                // pure and therefore skipped the snapshot. In none of those did we learn the
+                // test became impure, so overwriting a recorded verdict with "unknown" throws
+                // away a fact for no reason.
+                //
+                // The effect was a perfect oscillation: run 1 measures pure, run 2 trusts it
+                // and goes bare (measuring nothing), run 3 finds no verdict and pays the full
+                // snapshot again. The tier could never apply twice in a row, so half its value
+                // was discarded. Measured on a snapshot-heavy corpus: 1.31s / 0.45s / 1.61s /
+                // 0.45s across four identical runs.
+                //
+                // Staleness is still handled where it belongs — `trusted` requires the
+                // recorded deps to be unchanged, and TID-40 made those footprints sound. A
+                // measured verdict (`Some`) always wins over the prior one.
+                pure: r.pure.or_else(|| prior.and_then(|p| p.pure)),
+                // Sticky: a forked re-run cannot observe the drift that earned the flag, so
+                // clearing it on a clean forked result would make the node oscillate between
+                // tiers forever. It clears when the test's own source changes.
+                must_fork: r.must_fork || prior.is_some_and(|p| p.must_fork),
+                // Sticky like `pure`: a run that did not reach the verdict reports none (TID-102).
+                keywords: if r.keywords.is_empty() {
+                    prior.map(|p| p.keywords.clone()).unwrap_or_default()
+                } else {
+                    r.keywords.clone()
+                },
+                skip_origin: r.skip_origin.clone(),
+            };
+            if prior != Some(&record) {
+                changed = true;
+                state.tests.insert(r.node_id.to_string(), record);
+            }
         }
         // The dependency hashes move to "as of now" only after an unfiltered run (TID-94): a
         // filtered run re-ran only what it selected, and re-baselining then would mark an edited
@@ -639,6 +704,8 @@ impl EngineHandler {
                         // A cache hit re-serves a previously *pure* result; it says nothing new
                         // about state disturbance, so preserve whatever was recorded.
                         must_fork: was_disturber,
+                        keywords: Vec::new(),
+                        skip_origin: String::new(),
                     },
                 );
             }
@@ -705,6 +772,11 @@ impl EngineHandler {
     /// Set `state.files` to the current hash of every file any recorded test depends on.
     fn rebaseline_hashes(&self, state: &mut PersistedState) {
         let mut files = BTreeMap::new();
+        // The config files too (TID-102): the rootdir a node's path names hang off is where the
+        // ini was found, so a config edit must show as a change to the keyword records.
+        for rel in self.config_deps() {
+            files.insert(rel.clone(), self.hash_file(&rel));
+        }
         for rec in state.tests.values() {
             for dep in &rec.deps {
                 files
@@ -807,6 +879,99 @@ const DESELECTED: &str = "deselected";
 
 /// Whether `id` is `cand` itself or one of its runtime expansions — a parametrize case
 /// (`cand[…]`) or an inherited method (`cand::…`) — and not a sibling sharing a prefix.
+/// The candidates a `-k` run still sends to the workers (TID-102): every one the daemon cannot
+/// vouch for, plus every one whose recorded keywords match `expr` — and, beside them, the
+/// module-import skips the daemon replays from their records.
+///
+/// A candidate's records are its own and its expansions' — `cand[case]`, `cand::method` for an
+/// inherited-methods class — grouped from the state in one pass. The daemon vouches for a
+/// candidate when it has at least one record, every record carries the keywords the shim
+/// matched against, every record has a recorded dependency footprint, and no dependency has
+/// changed since (`current` knows its hash; `changed` does not list it) — the same test that
+/// trusts a purity verdict. Anything less, and the workers judge it as before: a new test, a
+/// module-import skip the shim never judged, a node whose file was edited, a footprint that
+/// coverage never captured. The vouched-for candidates with no matching record are the ones
+/// that stay behind.
+///
+/// A module that skipped at import is reported skipped under any `-k` — pytest's collection
+/// skips it before `-k` is consulted, and so does the shim — so its records, which carry no
+/// keywords, are replayed when the module itself is unchanged, rather than sent to a worker to
+/// be imported and skipped again: 522 of pirn-core's 5,482 nodes, a third of the round trip.
+fn keyword_prefilter(
+    state: &PersistedState,
+    changed: &BTreeSet<String>,
+    current: &BTreeMap<String, String>,
+    candidates: &[String],
+    expr: &KeywordExpr,
+) -> (Vec<String>, Vec<TestResult>) {
+    let wanted: HashSet<&str> = candidates.iter().map(String::as_str).collect();
+    // Which candidate a record answers for: itself, its parametrized parent, or its class.
+    let owner = |id: &str| -> Option<String> {
+        if wanted.contains(id) {
+            return Some(id.to_string());
+        }
+        let segment_at = id.rfind("::").map_or(0, |i| i + 2);
+        let bare = match id[segment_at..].find('[') {
+            Some(b) => &id[..segment_at + b],
+            None => id,
+        };
+        if wanted.contains(bare) {
+            return Some(bare.to_string());
+        }
+        let class = bare.rfind("::").map(|i| &bare[..i])?;
+        wanted.contains(class).then(|| class.to_string())
+    };
+    let mut records: HashMap<String, Vec<(&str, &TestRecord)>> = HashMap::new();
+    for (id, rec) in &state.tests {
+        if let Some(cand) = owner(id) {
+            records.entry(cand).or_default().push((id, rec));
+        }
+    }
+    let unchanged = |r: &TestRecord| {
+        !r.deps.is_empty()
+            && r.deps
+                .iter()
+                .all(|d| current.contains_key(d) && !changed.contains(d))
+    };
+    let judged = |recs: &[(&str, &TestRecord)]| {
+        !recs.is_empty()
+            && recs
+                .iter()
+                .all(|(_, r)| !r.keywords.is_empty() && unchanged(r))
+    };
+    let module_skip = |recs: &[(&str, &TestRecord)]| {
+        !recs.is_empty()
+            && recs
+                .iter()
+                .all(|(_, r)| !r.skip_origin.is_empty() && r.outcome == "skipped" && unchanged(r))
+    };
+    let mut keep = Vec::new();
+    let mut replayed = Vec::new();
+    for cand in candidates {
+        match records.get(cand.as_str()) {
+            Some(recs) if judged(recs) => {
+                if recs.iter().any(|(_, r)| expr.matches(&r.keywords)) {
+                    keep.push(cand.clone());
+                }
+            }
+            Some(recs) if module_skip(recs) => {
+                replayed.extend(recs.iter().map(|(id, r)| {
+                    TestResult::new(
+                        engine_core::domain::NodeId::new(*id),
+                        Outcome::Skipped,
+                        0,
+                        r.detail.clone(),
+                    )
+                    .with_skip_origin(r.skip_origin.clone())
+                    .with_expanded(*id != cand.as_str())
+                }));
+            }
+            _ => keep.push(cand.clone()),
+        }
+    }
+    (keep, replayed)
+}
+
 fn expands(cand: &str, id: &str) -> bool {
     id == cand
         || (id.starts_with(cand)
@@ -1032,6 +1197,116 @@ fn recorded_durations(state: &PersistedState) -> HashMap<String, u64> {
 
 #[cfg(test)]
 mod tests {
+    /// TID-102: the daemon keeps every candidate it cannot vouch for and every one whose recorded
+    /// keywords match, and leaves behind only what it can vouch against.
+    #[test]
+    fn the_keyword_prefilter_keeps_the_unvouched_and_the_matching() {
+        use super::keyword_prefilter;
+        use crate::persist::{PersistedState, TestRecord};
+        use engine_core::exec::KeywordExpr;
+        use std::collections::{BTreeMap, BTreeSet};
+        let rec = |kw: &[&str], deps: &[&str]| TestRecord {
+            outcome: "passed".into(),
+            detail: String::new(),
+            deps: deps.iter().map(|d| (*d).to_string()).collect(),
+            pure: None,
+            must_fork: false,
+            keywords: kw.iter().map(|k| (*k).to_string()).collect(),
+            skip_origin: String::new(),
+        };
+        let mut state = PersistedState::default();
+        let t = |id: &str, r: TestRecord| (id.to_string(), r);
+        state.tests.extend([
+            t("t.py::plain", rec(&["t.py", "plain"], &["t.py"])),
+            t("t.py::par[1-a]", rec(&["t.py", "par[1-a]"], &["t.py"])),
+            t("t.py::par[2-b]", rec(&["t.py", "par[2-b]"], &["t.py"])),
+            t(
+                "t.py::K::inherited",
+                rec(&["t.py", "K", "inherited", "slow"], &["t.py", "base.py"]),
+            ),
+            t("s.py::unjudged", rec(&[], &["s.py"])), // a module-import skip: no keywords
+            t("u.py::edited", rec(&["u.py", "edited"], &["u.py"])), // its dep changed
+            t(
+                "v.py::unknown_dep",
+                rec(&["v.py", "unknown_dep"], &["never_hashed.py"]),
+            ),
+            // A module that skipped at import: no keywords, replayed while the module is unchanged.
+            t(
+                "w.py::never",
+                TestRecord {
+                    outcome: "skipped".into(),
+                    detail: "could not import 'nope'".into(),
+                    deps: vec!["w.py".into()],
+                    pure: None,
+                    must_fork: false,
+                    keywords: Vec::new(),
+                    skip_origin: "w.py".into(),
+                },
+            ),
+        ]);
+        let current: BTreeMap<String, String> = ["t.py", "base.py", "s.py", "u.py", "w.py"]
+            .into_iter()
+            .map(|f| (f.to_string(), "h".to_string()))
+            .collect();
+        let changed: BTreeSet<String> = ["u.py".to_string()].into_iter().collect();
+        let candidates: Vec<String> = [
+            "t.py::plain",
+            "t.py::par",
+            "t.py::K",
+            "s.py::unjudged",
+            "u.py::edited",
+            "v.py::unknown_dep",
+            "new.py::fresh",
+            "w.py::never",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let decide = |expr: &str| {
+            keyword_prefilter(
+                &state,
+                &changed,
+                &current,
+                &candidates,
+                &KeywordExpr::parse(expr).unwrap(),
+            )
+        };
+        let keep = |expr: &str| decide(expr).0;
+        // The module-import skip is replayed, matching or not, and never sent.
+        let (_, replayed) = decide("zzz");
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].node_id.as_str(), "w.py::never");
+        assert_eq!(replayed[0].skip_origin, "w.py");
+        assert_eq!(replayed[0].detail, "could not import 'nope'");
+        // The four the daemon cannot vouch for come through whatever the expression says.
+        let always = [
+            "s.py::unjudged",
+            "u.py::edited",
+            "v.py::unknown_dep",
+            "new.py::fresh",
+        ];
+        assert_eq!(keep("zzz"), always);
+        assert_eq!(
+            keep("plain"),
+            ["t.py::plain"]
+                .into_iter()
+                .chain(always)
+                .collect::<Vec<_>>()
+        );
+        // One matching case keeps its whole parametrized candidate; the workers pick the case.
+        assert_eq!(
+            keep("2-b"),
+            ["t.py::par"].into_iter().chain(always).collect::<Vec<_>>()
+        );
+        // An inherited method's record answers for its class, and a mark name is a keyword.
+        assert_eq!(
+            keep("slow"),
+            ["t.py::K"].into_iter().chain(always).collect::<Vec<_>>()
+        );
+        assert_eq!(keep("not t.py"), always);
+        assert_eq!(keep("t.py and not par").len(), 2 + always.len());
+    }
+
     /// TID-101: the collection is reused while the tree stamp holds, and taken again — with the
     /// change in it — the moment a test file is added, edited or removed.
     #[cfg(unix)]

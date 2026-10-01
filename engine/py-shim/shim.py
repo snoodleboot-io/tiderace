@@ -3293,9 +3293,9 @@ class Engine:
         # Deselected by the project's own `-m` filter (TID-32). Reported as an EMPTY expansion
         # rather than a skip: pytest deselects these, so they must not appear in the tally at all —
         # a skip would be a different, visible outcome.
-        names = (_mark_names(node_id, style)
-                 if (_MARKER_EXPR is not None or _STRICT_MARKS or _KEYWORD_EXPR is not None)
-                 else set())
+        # Always, `-k` or not (TID-102): the names `-k` would match against are reported with the
+        # result, so the daemon can take the verdict itself next time for a node nothing touched.
+        names = _mark_names(node_id, style)
         if _STRICT_MARKS:
             # `--strict-markers`: a mark the project never declared is a typo far more often than an
             # intention, and pytest errors the item rather than running it. Silently ignoring the flag
@@ -3318,7 +3318,8 @@ class Engine:
         # An "unknown" is settled per case once the case ids exist, below.
         keyword_verdict = _keyword_verdict(node_id, names, final=False) if _KEYWORD_EXPR is not None else True
         if keyword_verdict is False:
-            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
+            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": [],
+                    "keywords": _keyword_names(node_id, names)}
         try:
             requested = self._requested(node_id, style)
             marks = self._marks(node_id, style)
@@ -3477,13 +3478,16 @@ class Engine:
             selected = {i for i, vid in enumerate(variant_ids)
                         if _keyword_verdict(vid, names, final=True)}
             if not selected:
-                return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
+                return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": [],
+                        "keywords": _keyword_names(node_id, names)}
         if skip_reason is not None:  # the skip deferred above, one per selected variant (TID-88)
             if not parametrized_node:
-                return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason}
+                return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason,
+                        "keywords": _keyword_names(node_id, names)}
             return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason,
+                    "keywords": _keyword_names(node_id, names),
                     "variants": [{"node_id": vid, "outcome": "skipped", "detail": skip_reason,
-                                  "duration_ms": 0}
+                                  "duration_ms": 0, "keywords": _keyword_names(vid, names)}
                                  for i, vid in enumerate(variant_ids) if i in selected]}
         # Only now — after `-k` has chosen and a whole-node skip has returned — does the node's
         # *route* get decided (TID-99). It used to sit above the case expansion, so every node
@@ -3583,6 +3587,7 @@ class Engine:
                         "outcome": oc,
                         "detail": detail,
                         "duration_ms": int((time.perf_counter() - started) * 1000),
+                        "keywords": _keyword_names(variant_ids[variant_index], names),
                     }
                     if cov:
                         variant["coverage"] = {p: sorted(l) for p, l in cov.items()}
@@ -3612,7 +3617,8 @@ class Engine:
         # reads tiderace's native marks. Without this a test the author marked as expected-to-fail
         # was reported as a failure — one of click's two remaining divergences (TID-63).
         outcome, detail = _fold_pytest_marks(_pytest_markers(node_id, style), outcome, detail)
-        resp = {"node_id": node_id, "outcome": outcome, "detail": detail}
+        resp = {"node_id": node_id, "outcome": outcome, "detail": detail,
+                "keywords": _keyword_names(node_id, names)}
         # Additive and omitted for an unparametrized node, so its frame stays byte-identical.
         if variants:
             resp["variants"] = variants
@@ -3715,6 +3721,8 @@ class Engine:
                 variant["pure"] = res["pure"]
             if res.get("must_fork"):
                 variant["must_fork"] = True
+            if res.get("keywords"):
+                variant["keywords"] = res["keywords"]
             variants.append(variant)
         # Every child deselected ⇒ the class contributes nothing, exactly as an inherited-nothing
         # class does above. `_aggregate` of an empty list is `max()` of nothing, and that exception
@@ -4584,8 +4592,8 @@ def _mark_names(node_id: str, style: str) -> set:
     `__tiderace_marks__` (TID-59)."""
     try:
         module = importlib.import_module(_module_name(_module_key(node_id)))
-    except Exception:  # noqa: BLE001 — an unimportable module surfaces per node, not here
-        return set()
+    except (Exception, *_skip_exceptions()):  # noqa: BLE001 — an unimportable module, or one that
+        return set()  # skips at import (a BaseException), surfaces per node, not here (TID-102)
     owners = [module]
     if style in ("class_method", "unittest_method"):
         cls_name, method = _class_method(node_id)
@@ -5669,10 +5677,14 @@ def _apply_selection(selection: dict | None) -> None:
     global _KEYWORD_EXPR, _MARKER_EXPR, _STRICT_MARKS
     if not selection:
         return
-    if "keyword" in selection:
+    # A field that is absent *or null* keeps the image's value: the daemon serialises the run's
+    # selection with every field present, `null` for the ones the run did not give, and reading
+    # `null` as "clear it" dropped the project's own `addopts -m` on every `-k` run through the
+    # daemon — 32 tests pirn-core's config deselects ran (TID-102).
+    if selection.get("keyword") is not None:
         kexpr = selection["keyword"]
         _KEYWORD_EXPR = _compile_selection_tree(kexpr, "-k") if kexpr else None
-    if "marker" in selection:
+    if selection.get("marker") is not None:
         expr = selection["marker"]
         _MARKER_EXPR = _compile_marker_expr(expr) if expr else None
     if selection.get("strict_markers"):
