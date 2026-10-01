@@ -225,6 +225,19 @@ impl WellspringPool {
         root: &Path,
         restore: bool,
     ) -> Result<Self> {
+        Self::launch_persistent_selected(python, shim, root, restore, None)
+    }
+
+    /// [`launch_persistent`](Self::launch_persistent) with the shim's selective start-up
+    /// (`--modules`, TID-75): the one-shot run uses it too, since TID-106 — the image is up,
+    /// and its size known, before the run decides how many workers to fork off it.
+    pub fn launch_persistent_selected(
+        python: &str,
+        shim: &Path,
+        root: &Path,
+        restore: bool,
+        modules: Option<&Path>,
+    ) -> Result<Self> {
         let mut cmd = Command::new(python);
         cmd.arg(shim)
             .arg(root)
@@ -234,6 +247,9 @@ impl WellspringPool {
             .arg("-"); // the socket comes with each spawn request
         if restore {
             cmd.arg("--restore");
+        }
+        if let Some(file) = modules {
+            cmd.arg("--modules").arg(file);
         }
         let mut parent = cmd
             .env("OPENBLAS_NUM_THREADS", "1")
@@ -463,6 +479,10 @@ impl Worker for PooledWorker {
 
     fn is_lost(&self) -> bool {
         self.lost
+    }
+
+    fn pid(&self) -> Option<u32> {
+        u32::try_from(self.transport.peer_pid()).ok()
     }
 }
 

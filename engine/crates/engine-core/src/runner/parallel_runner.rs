@@ -156,13 +156,14 @@ fn run_batched(
             // Launched with restore unconditionally, exactly as `ForkWorker::launch_optimistic` does:
             // it costs nothing when the ladder is off, and it makes the unsound combination — in-process
             // execution with no snapshot — unreachable rather than merely unused.
+            // Persistent rather than sized at launch (TID-106): the image is up, and its resident
+            // size known, before the run decides how many workers to fork off it.
             Some(
-                WellspringPool::launch_selected(
+                WellspringPool::launch_persistent_selected(
                     python,
                     shim,
                     root,
                     true,
-                    threads,
                     Some(&modules_file.path),
                 )
                 .map_err(|e| e.to_string())?,
@@ -170,15 +171,30 @@ fn run_batched(
         } else {
             None
         };
-    // Warm (TID-84): the persistent parent forks this run's workers now, off its imported image.
+    // The persistent parent — warm (TID-84) or this run's own — forks the workers now, off its
+    // imported image; how many is the thread count, capped by what memory allows (TID-106).
+    #[cfg(unix)]
+    let mut threads = threads;
     #[cfg(unix)]
     let mut pool: Option<&mut WellspringPool> = match warm {
-        Some(w) => {
-            w.spawn_workers(threads).map_err(|e| e.to_string())?;
-            Some(w)
-        }
+        Some(w) => Some(w),
         None => owned_pool.as_mut(),
     };
+    #[cfg(unix)]
+    if let Some(p) = pool.as_deref_mut() {
+        let sizing = super::memory::workers_by_memory(
+            threads,
+            plan.workers_explicit,
+            super::memory::process_rss_bytes(p.pid()),
+            super::memory::available_memory_bytes(),
+            plan.memory_limit_mb.map(|mb| mb << 20),
+        );
+        if let Some(note) = &sizing.note {
+            eprintln!("tiderace: {note}");
+        }
+        threads = sizing.workers;
+        p.spawn_workers(threads).map_err(|e| e.to_string())?;
+    }
 
     let exec = BatchExec {
         strategy,
@@ -235,9 +251,18 @@ fn run_batched(
                 }
             };
             let mut mine = Vec::new();
+            // The worker process's peak resident size over the run, sampled after every unit
+            // (TID-106); stamped on its results on the way out.
+            let mut peak_rss: u64 = 0;
+            let finish = |mine: Vec<TestResult>, peak_rss: u64| -> Vec<TestResult> {
+                let mb = (peak_rss > 0).then_some(peak_rss >> 20);
+                mine.into_iter()
+                    .map(|r| r.with_worker_peak_rss_mb(mb))
+                    .collect()
+            };
             loop {
                 let Some(unit) = queue.lock().expect("the work queue is not poisoned").pop() else {
-                    return Ok(mine);
+                    return Ok(finish(mine, peak_rss));
                 };
                 let unit_index = unit_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let started_ms = run_started.elapsed().as_millis() as u64;
@@ -250,9 +275,12 @@ fn run_batched(
                         .into_iter()
                         .map(|r| r.with_schedule(worker_index, unit_index, started_ms, ended_ms)),
                 );
+                if let Some(rss) = worker.pid().and_then(super::memory::process_rss_bytes) {
+                    peak_rss = peak_rss.max(rss);
+                }
                 if worker.is_lost() {
                     // Its last unit is reported; the queue drains on the other workers (TID-93).
-                    return Ok(mine);
+                    return Ok(finish(mine, peak_rss));
                 }
             }
         }));
