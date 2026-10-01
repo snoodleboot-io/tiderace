@@ -66,7 +66,9 @@ edit that must produce a failure (the stale-pass check). Its numbers are in the 
 timings with peak memory, the second run, warm vs xdist, worker scaling. Same machine, one-minute
 load 3–11 recorded with every sample; three interleaved rounds after a discarded warm-up, medians.
 Parity is the 29 September result unchanged: eight suites, 0 outcome differences on seven, anyio's
-8 tiderace-only failures all `pytester`.
+8 tiderace-only failures all `pytester` — and 0 since TID-105 provided `pytester` and `testdir`
+(1 October, after the pass): anyio collects the same 1,479 node ids as pytest and fails none of
+them that pytest passes.
 
 **Cold timings**, median wall clock in seconds.
 
@@ -179,7 +181,7 @@ interleaved rounds after a discarded warm-up, medians.
 | cachetools | 215 | 0 | 0 |
 | click | 589 + 1 xfail + 21 skipped | 0 | 0 |
 | flask | 475 + 4 failed + 3 error + 2 skipped (both sides) | 0 | 0 |
-| anyio | 1,479 | 8 tiderace-only failures, every one `pytester`'s `testdir` (the plugin-host boundary) | 0 |
+| anyio | 1,479 | 0 — the last 8 were `pytester`'s `testdir`, provided since TID-105 | 0 |
 
 The click and flask "skipped" rows read as tiderace-only until [TID-88](https://linear.app/snoodleboot/issue/TID-88):
 `nodediff.py` took pytest's side from `-rA`, whose summary folds every skip into a `SKIPPED [16]
