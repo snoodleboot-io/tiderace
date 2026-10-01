@@ -14,26 +14,10 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestResult};
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn venv_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    venv.exists().then(|| venv.to_string_lossy().into_owned())
-}
 
 fn write_corpus() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("tiderace_t88_{}", std::process::id()));
@@ -102,7 +86,7 @@ fn tiderace_results(dir: &Path, python: &str) -> Vec<TestResult> {
 
 #[test]
 fn the_four_gaps_match_pytests_collection() {
-    let Some(python) = venv_python() else {
+    let Some(python) = python(PythonNeeds::FxVenv) else {
         skip_live("`.tiderace-fx-venv` not present");
         return;
     };

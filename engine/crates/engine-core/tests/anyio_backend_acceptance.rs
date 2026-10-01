@@ -25,52 +25,7 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-/// Only pytest is needed. The corpus declares its own `anyio_backend`, so the expansion under test
-/// does not depend on anyio being installed — and the run does not either: with a backend named but
-/// anyio absent, the driver falls back to plain asyncio. Requiring anyio here would have made this
-/// skip on any machine without it, and a skipped test proves nothing.
-fn python_with_pytest() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    let mut candidates: Vec<String> = Vec::new();
-    if venv.exists() {
-        candidates.push(venv.to_string_lossy().into_owned());
-    }
-    candidates.extend(["python3".to_string(), "python".to_string()]);
-    candidates.into_iter().find(|p| {
-        std::process::Command::new(p)
-            .args(["-c", "import pytest"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-}
-
-fn scratch(tag: &str) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "tiderace_t54_{tag}_{}_{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use engine_core::testing::{python, scratch, shim, skip_live, PythonNeeds};
 
 /// The suite declares its own single-backend fixture, so the expansion is deterministic here rather
 /// than depending on which backends the machine has installed.
@@ -100,7 +55,7 @@ def test_sync_is_not_expanded():
 
 #[test]
 fn an_anyio_marked_async_test_expands_over_the_backends() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no interpreter with pytest available");
         return;
     };

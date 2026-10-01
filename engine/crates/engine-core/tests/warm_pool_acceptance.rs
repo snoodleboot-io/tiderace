@@ -11,36 +11,8 @@ use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::WellspringPool;
 use engine_core::runner::{run_parallel_with_pool, RunPlan, SchedulerKind, WorkerStrategy};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::{Path, PathBuf};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    ["python3", "python"]
-        .into_iter()
-        .find(|cand| {
-            std::process::Command::new(cand)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-        .map(str::to_string)
-}
 
 /// The test module appends a line to `imports.log` whenever it is imported, and its first test
 /// bumps a module global from the value the image holds — which is only what it sees if every run
@@ -72,7 +44,7 @@ fn imports(dir: &Path) -> usize {
 
 #[test]
 fn a_persistent_parent_imports_once_and_every_run_forks_from_the_clean_image() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

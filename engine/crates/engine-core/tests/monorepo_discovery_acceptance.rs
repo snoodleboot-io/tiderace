@@ -17,49 +17,8 @@ use engine_core::domain::Outcome;
 #[cfg(unix)]
 use engine_core::exec::{PooledWorker, WellspringPool};
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-/// The skip cases raise pytest's own `Skipped`, so they need an interpreter with pytest.
-fn python_with_pytest() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    let mut candidates: Vec<String> = Vec::new();
-    if venv.exists() {
-        candidates.push(venv.to_string_lossy().into_owned());
-    }
-    candidates.extend(["python3".to_string(), "python".to_string()]);
-    candidates.into_iter().find(|p| {
-        std::process::Command::new(p)
-            .args(["-c", "import pytest"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-}
-
-fn scratch(tag: &str) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "tiderace_t48_{tag}_{}_{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use engine_core::testing::{python, scratch, shim, skip_live, PythonNeeds};
+use std::path::Path;
 
 fn write(path: &Path, body: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -86,7 +45,7 @@ const MISSING: &str = "tiderace_t48_this_module_does_not_exist";
 #[cfg(unix)]
 fn the_run_roots_basedir_wins_over_a_sibling_already_on_sys_path() {
     use std::os::unix::fs::PermissionsExt;
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -138,7 +97,7 @@ fn the_run_roots_basedir_wins_over_a_sibling_already_on_sys_path() {
 #[test]
 #[cfg(unix)]
 fn a_conftest_that_skips_its_directory_does_not_take_down_the_pool() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no interpreter with pytest available");
         return;
     };
@@ -183,7 +142,7 @@ fn a_conftest_that_skips_its_directory_does_not_take_down_the_pool() {
 /// which used to be reported as an error rather than a skip).
 #[test]
 fn a_module_level_skip_is_a_skip_and_the_worker_survives() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no interpreter with pytest available");
         return;
     };

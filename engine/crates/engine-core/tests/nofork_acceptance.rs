@@ -9,44 +9,13 @@
 //! On fork-capable platforms it *additionally* asserts the no-fork path is **result-identical** to
 //! `ForkWorker` on the same corpus — the §8 boundary-3 invariant that makes the fallback safe.
 
-use engine_core::testing::skip_live;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-/// A usable interpreter: prefer the rich fx venv (local dev), else a bare `python3`/`python` on `PATH`
-/// (CI, incl. Windows via `actions/setup-python`). `None` ⇒ skip cleanly.
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    for cand in ["python3", "python"] {
-        let ok = std::process::Command::new(cand)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(cand.to_string());
-        }
-    }
-    None
-}
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 
 /// A stdlib-only corpus spanning outcome types (pass / assert-fail / raise-error) and both styles
 /// (module function + class method). No third-party imports, so a bare CI interpreter runs it.
@@ -97,7 +66,7 @@ fn write_corpus(tag: &str) -> PathBuf {
 
 #[test]
 fn subprocess_worker_no_fork_runs_a_real_python_correctly() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -134,7 +103,7 @@ fn subprocess_worker_no_fork_runs_a_real_python_correctly() {
 fn no_fork_is_result_identical_to_fork() {
     use engine_core::exec::ForkWorker;
 
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -206,7 +175,7 @@ def test_after_the_opaque_module():
 
 #[test]
 fn opaque_module_is_isolated_by_fork_or_refused_never_leaked() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -286,7 +255,7 @@ def test_b():
 
 #[test]
 fn no_fork_restores_module_state_between_tests() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

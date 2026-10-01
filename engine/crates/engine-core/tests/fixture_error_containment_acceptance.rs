@@ -23,71 +23,15 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, scratch, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-/// The fx venv first: on CI the bare `actions/setup-python` interpreter has no pytest, and these
-/// corpora define real `@pytest.fixture`s, so picking `python3` there means the conftest fails to
-/// import and every fixture silently does not exist — which looks exactly like the bug under test.
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    for cand in ["python3", "python"] {
-        let ok = std::process::Command::new(cand)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(cand.to_string());
-        }
-    }
-    None
-}
-
-/// An interpreter that can `import pytest`. Without one these corpora cannot express what they are
-/// testing, so the tests self-skip rather than assert something they did not actually exercise.
-fn python_with_pytest() -> Option<String> {
-    let python = any_python()?;
-    let ok = std::process::Command::new(&python)
-        .args(["-c", "import pytest"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    ok.then_some(python)
-}
-
-fn scratch(tag: &str) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "tiderace_t34_{tag}_{}_{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("tests")).unwrap();
-    dir
-}
 
 /// A suite in the conventional layout: `pytest.ini` at the root, a suite-wide `conftest.py` beside
 /// it holding the session fixture, and the tests one directory down. Nothing here is exotic — the
 /// point is that this is the *normal* shape, and it did not work.
 fn write_rootdir_corpus() -> PathBuf {
     let dir = scratch("rootdir");
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
     std::fs::write(dir.join("pytest.ini"), "[pytest]\n").unwrap();
     std::fs::write(
         dir.join("conftest.py"),
@@ -112,6 +56,7 @@ fn write_rootdir_corpus() -> PathBuf {
 /// fix they were collateral damage, lost with the worker that died.
 fn write_containment_corpus() -> PathBuf {
     let dir = scratch("containment");
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
     std::fs::write(dir.join("pytest.ini"), "[pytest]\n").unwrap();
     std::fs::write(
         dir.join("conftest.py"),
@@ -150,7 +95,7 @@ fn write_containment_corpus() -> PathBuf {
 /// `pytest.ini` bounds the ancestor-conftest walk, so a session fixture defined beside it resolves.
 #[test]
 fn pytest_ini_marks_the_rootdir_so_ancestor_conftests_load() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no interpreter with pytest available");
         return;
     };
@@ -173,7 +118,7 @@ fn pytest_ini_marks_the_rootdir_so_ancestor_conftests_load() {
 /// A fixture that raises errors *its* test. The rest of the batch still runs and still reports.
 #[test]
 fn a_failing_fixture_errors_its_test_without_taking_the_batch_down() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no interpreter with pytest available");
         return;
     };

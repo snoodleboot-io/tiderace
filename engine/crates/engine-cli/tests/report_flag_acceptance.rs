@@ -7,33 +7,10 @@
 //! benchmark harness had to regex terminal output to compare node ids against pytest's, which is how
 //! a 62-test gap stayed hidden as two opposite errors partly cancelling.
 
+use engine_core::testing::{python, repo_root, PythonNeeds};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    ["python3", "python"]
-        .into_iter()
-        .find(|cand| {
-            Command::new(cand)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-        .map(str::to_string)
-}
 
 /// Two tests that pass, and one module holding two tests that never imports.
 fn write_project() -> PathBuf {
@@ -63,7 +40,7 @@ fn write_project() -> PathBuf {
 
 #[test]
 fn report_flag_writes_per_node_json_and_the_summary_names_both_dimensions() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         eprintln!("skipping: no Python interpreter available");
         return;
     };

@@ -15,49 +15,7 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{ForkWorker, Worker};
-use engine_core::testing::skip_live;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    ["python3", "python"]
-        .into_iter()
-        .find(|cand| {
-            std::process::Command::new(cand)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-        .map(str::to_string)
-}
-
-fn scratch(tag: &str) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "tiderace_t68_{tag}_{}_{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use engine_core::testing::{python, scratch, shim, skip_live, PythonNeeds};
 
 /// A library with one registry at import time and one it creates **lazily**, on first use — the
 /// shape of PIL registering a codec when a plugin loads, or a framework building its app table on
@@ -113,7 +71,7 @@ def test_c_sees_it_clean():
 
 #[test]
 fn a_container_added_to_an_existing_module_is_watched_from_the_next_test_on() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

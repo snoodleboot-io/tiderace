@@ -21,36 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{ExecRequest, PipeTransport, ShimTransport, SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    for cand in ["python3", "python"] {
-        let ok = Command::new(cand)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(cand.to_string());
-        }
-    }
-    None
-}
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 
 fn fresh_dir(tag: &str) -> PathBuf {
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -95,7 +66,7 @@ fn write_dynamic_corpus(tests: usize) -> PathBuf {
 /// `DISABLE` from one test would silence the next.
 #[test]
 fn every_test_carries_a_file_it_reaches_only_through_a_dynamic_import() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -177,7 +148,7 @@ fn write_plain_corpus() -> PathBuf {
 /// The default footprint names files and carries no line numbers — the shape the consumers read.
 #[test]
 fn default_capture_reports_files_without_lines() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -208,7 +179,7 @@ fn default_capture_reports_files_without_lines() {
 /// Line-level capture is still there for a consumer that wants it — behind a flag.
 #[test]
 fn coverage_lines_is_an_opt_in() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

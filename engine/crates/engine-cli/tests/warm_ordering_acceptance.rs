@@ -10,33 +10,10 @@
 //! impact planner reads a record with no changed deps as "up to date", so a record written only to
 //! carry a duration would turn the daemon's next impact-aware run into a stale pass.
 
+use engine_core::testing::{python, repo_root, PythonNeeds};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    ["python3", "python"]
-        .into_iter()
-        .find(|cand| {
-            Command::new(cand)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-        .map(str::to_string)
-}
 
 fn write_project() -> PathBuf {
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -80,7 +57,7 @@ fn run(python: &str, tests: &PathBuf) -> String {
 
 #[test]
 fn the_second_run_is_warm_and_says_so() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         eprintln!("skipping: no Python interpreter available");
         return;
     };

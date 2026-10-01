@@ -9,37 +9,10 @@
 
 #![cfg(unix)]
 
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use engine_daemon::{EngineHandler, RpcHandler, RpcRequest, RpcResponse};
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn python_with_pytest() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    let mut cands: Vec<String> = Vec::new();
-    if venv.exists() {
-        cands.push(venv.to_string_lossy().into_owned());
-    }
-    cands.extend(["python3".to_string(), "python".to_string()]);
-    cands.into_iter().find(|p| {
-        std::process::Command::new(p)
-            .args(["-c", "import pytest"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-}
+use std::path::Path;
 
 /// Plain, parametrized, marked, skip-marked, inherited, and a module that skips at import: every
 /// kind of node the verdict has to get right, and one the shim never judges.
@@ -121,7 +94,7 @@ fn records_with_keywords(dir: &Path) -> (usize, usize) {
 
 #[test]
 fn the_daemons_keyword_verdict_is_the_workers_verdict() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no Python with pytest available");
         return;
     };

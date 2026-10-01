@@ -8,41 +8,12 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::runner::{run_parallel, RunPlan, SchedulerKind, WorkerStrategy};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 const MODULES: usize = 6;
 const WORKERS: usize = 2;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    for cand in ["python3", "python"] {
-        let ok = std::process::Command::new(cand)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(cand.to_string());
-        }
-    }
-    None
-}
 
 /// Six modules of two tests each, every test sleeping long enough that a unit's span is measurable.
 fn write_project() -> PathBuf {
@@ -62,7 +33,7 @@ fn write_project() -> PathBuf {
 
 #[test]
 fn every_result_carries_its_worker_and_unit_slot_and_lanes_do_not_overlap() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

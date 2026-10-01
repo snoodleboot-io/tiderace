@@ -385,76 +385,7 @@ impl<W: Write, R: Read> ShimTransport for PipeTransport<W, R> {
 mod tests {
     use super::*;
     use crate::domain::{NodeId, ScopePath, TestStyle};
-
-    /// A pure-Rust shim that answers from a script — **no process, no pipe, no syscall**. Proves the
-    /// `Worker` run loop (request build → exchange → `TestResult` assembly) end to end, offline.
-    struct ScriptedShim {
-        pid: i64,
-        /// node_id → (outcome wire token, detail).
-        script: std::collections::HashMap<String, (String, String)>,
-        /// Outcome for any node_id not in `script`.
-        default_outcome: String,
-        /// node_ids in the order they were asked — lets a test assert on dispatch order.
-        seen: std::vec::Vec<String>,
-        /// If set, the Nth (0-based) exchange and every one after fails as if the shim closed mid-run.
-        close_after: Option<usize>,
-        calls: usize,
-    }
-
-    impl ScriptedShim {
-        fn new() -> Self {
-            Self {
-                pid: 0,
-                script: std::collections::HashMap::new(),
-                default_outcome: "passed".into(),
-                seen: Vec::new(),
-                close_after: None,
-                calls: 0,
-            }
-        }
-
-        fn answer(mut self, node_id: &str, outcome: &str, detail: &str) -> Self {
-            self.script
-                .insert(node_id.into(), (outcome.into(), detail.into()));
-            self
-        }
-
-        fn closes_after(mut self, n: usize) -> Self {
-            self.close_after = Some(n);
-            self
-        }
-    }
-
-    impl ShimTransport for ScriptedShim {
-        fn ready(&mut self) -> Result<ReadyInfo> {
-            Ok(ReadyInfo { pid: self.pid })
-        }
-
-        fn exchange(&mut self, req: &ExecRequest<'_>) -> Result<ExecResponse> {
-            if matches!(self.close_after, Some(n) if self.calls >= n) {
-                return Err(EngineError::Exec("shim closed mid-run".into()));
-            }
-            self.calls += 1;
-            self.seen.push(req.node_id.to_string());
-            let (outcome, detail) = self
-                .script
-                .get(req.node_id)
-                .cloned()
-                .unwrap_or((self.default_outcome.clone(), String::new()));
-            Ok(ExecResponse {
-                must_fork: false,
-                node_id: req.node_id.to_string(),
-                outcome,
-                detail,
-                coverage: Default::default(),
-                pure: None,
-                skip_origin: String::new(),
-                keywords: Vec::new(),
-                variants: Vec::new(),
-                expanded: false,
-            })
-        }
-    }
+    use crate::testing::ScriptedShim;
 
     fn item(node_id: &str) -> TestItem {
         TestItem::new(
@@ -487,7 +418,7 @@ mod tests {
         assert_eq!(results[1].outcome, Outcome::Failed);
         assert_eq!(results[1].detail, "assert 1 == 2");
         // Dispatch order is the item order.
-        assert_eq!(shim.seen, vec!["m.py::test_ok", "m.py::test_bad"]);
+        assert_eq!(shim.seen(), ["m.py::test_ok", "m.py::test_bad"]);
     }
 
     #[test]

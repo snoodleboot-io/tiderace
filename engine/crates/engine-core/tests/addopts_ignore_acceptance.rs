@@ -16,49 +16,8 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, scratch, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    ["python3", "python"]
-        .into_iter()
-        .find(|cand| {
-            std::process::Command::new(cand)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-        .map(str::to_string)
-}
-
-fn scratch(tag: &str) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "tiderace_t49_{tag}_{}_{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 /// Build a project whose `pyproject.toml` ignores `tests/perf`, and whose `tests/perf` test would
 /// fail loudly if it ever ran (it requests a fixture only a plugin provides).
@@ -86,7 +45,7 @@ fn write_project(tag: &str, addopts: &str) -> PathBuf {
 
 #[test]
 fn a_directory_the_project_ignores_is_not_collected() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -119,7 +78,7 @@ fn a_directory_the_project_ignores_is_not_collected() {
 /// about the flag, not about the fixture happening to be missing.
 #[test]
 fn without_the_flag_the_same_directory_does_run() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

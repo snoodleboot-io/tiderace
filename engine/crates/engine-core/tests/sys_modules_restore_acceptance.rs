@@ -13,34 +13,9 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    for cand in ["python3", "python"] {
-        let ok = std::process::Command::new(cand)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(cand.to_string());
-        }
-    }
-    None
-}
 
 /// The library: class-level state, and a reader bound to it at *its* import time.
 const LIB: &str = "\
@@ -135,7 +110,7 @@ fn write_corpus(tag: &str) -> PathBuf {
 /// selects on Unix.
 #[test]
 fn a_module_swap_does_not_leak_into_the_next_test() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -165,7 +140,7 @@ fn a_module_swap_does_not_leak_into_the_next_test() {
 fn the_same_corpus_passes_under_fork() {
     use engine_core::exec::ForkWorker;
 
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

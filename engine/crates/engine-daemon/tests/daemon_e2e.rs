@@ -5,29 +5,12 @@
 //! Gated on the Phase-3 venv + shim being present (the same guard engine-core's live tests use), so it
 //! runs here and skips cleanly in environments without Python.
 
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::io::{self, Cursor, Read, Write};
-use std::path::PathBuf;
 
 use engine_daemon::{
     read_frame, serve_connection, write_frame, EngineHandler, RpcRequest, RpcResponse,
 };
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn venv_python() -> Option<PathBuf> {
-    let p = repo_root().join(".tiderace-fx-venv/bin/python");
-    p.exists().then_some(p)
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
 
 /// In-memory bidirectional stream: serves preloaded request frames, captures written responses.
 struct Duplex {
@@ -67,7 +50,7 @@ fn responses(bytes: &[u8]) -> Vec<RpcResponse> {
 
 #[test]
 fn daemon_discovers_runs_and_stays_warm_over_a_real_wellspring() {
-    let Some(python) = venv_python() else {
+    let Some(python) = python(PythonNeeds::FxVenv) else {
         skip_live("`.tiderace-fx-venv` not present");
         return;
     };
@@ -82,7 +65,7 @@ fn daemon_discovers_runs_and_stays_warm_over_a_real_wellspring() {
     )
     .unwrap();
 
-    let mut handler = EngineHandler::new(python.to_string_lossy().to_string(), shim(), dir.clone());
+    let mut handler = EngineHandler::new(python.clone(), shim(), dir.clone());
 
     let mut stream = Duplex {
         inbox: Cursor::new(framed(&[

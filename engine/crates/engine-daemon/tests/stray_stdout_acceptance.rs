@@ -11,39 +11,10 @@
 #![cfg(unix)]
 
 use engine_core::collection::Collector;
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use engine_daemon::{EngineHandler, RpcHandler, RpcRequest, RpcResponse};
-use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    ["python3", "python"]
-        .into_iter()
-        .find(|cand| {
-            std::process::Command::new(cand)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-        .map(str::to_string)
-}
 
 /// Every way a test reaches fd 1 past the shim: Python's buffered `print` with and without a
 /// newline, a flush, a raw `os.write`, and a subprocess that inherits stdout.
@@ -80,7 +51,7 @@ def test_quiet():
 
 #[test]
 fn stray_stdout_does_not_hang_the_warm_image_or_the_one_shot_worker() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

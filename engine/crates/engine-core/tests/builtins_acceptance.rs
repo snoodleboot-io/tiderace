@@ -15,41 +15,9 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-/// An interpreter that can `import tiderace` — the precondition for any builtin to exist.
-///
-/// CI puts `engine/py-tiderace` on `PYTHONPATH`, which the spawned workers inherit; a developer can
-/// do the same. Without it there is nothing to assert, so this self-skips.
-fn python_with_tiderace() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    let mut candidates: Vec<String> = Vec::new();
-    if venv.exists() {
-        candidates.push(venv.to_string_lossy().into_owned());
-    }
-    candidates.extend(["python3".to_string(), "python".to_string()]);
-
-    candidates.into_iter().find(|cand| {
-        std::process::Command::new(cand)
-            .args(["-c", "import tiderace.builtins"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-}
 
 /// One test per builtin, each asserting the thing that would break if it silently vanished.
 ///
@@ -134,7 +102,7 @@ fn write_corpus(tag: &str) -> PathBuf {
 
 #[test]
 fn every_builtin_provider_resolves_and_tears_down() {
-    let Some(python) = python_with_tiderace() else {
+    let Some(python) = python(PythonNeeds::Tiderace) else {
         skip_live(
             "no interpreter can import `tiderace` — put engine/py-tiderace on PYTHONPATH \
              (CI does; see TID-21)",

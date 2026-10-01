@@ -19,38 +19,9 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    for cand in ["python3", "python"] {
-        let ok = std::process::Command::new(cand)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(cand.to_string());
-        }
-    }
-    None
-}
 
 /// A suite where one source module is imported by a module holding many tests, plus a shared module
 /// imported by everything, plus a conftest — the three kinds of dependency that runtime coverage
@@ -97,7 +68,7 @@ fn write_corpus(tag: &str, tests_per_module: usize) -> PathBuf {
 /// Every test in the module records the source its module imports — not merely the first to run.
 #[test]
 fn every_test_in_a_module_carries_the_modules_imports() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -142,7 +113,7 @@ fn every_test_in_a_module_carries_the_modules_imports() {
 /// change should invalidate the whole suite.
 #[test]
 fn the_import_closure_is_transitive() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

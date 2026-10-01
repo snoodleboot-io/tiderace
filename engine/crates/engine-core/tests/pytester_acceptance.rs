@@ -9,36 +9,7 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
-use std::path::PathBuf;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-/// A Python that has pytest *and* can import `tiderace` (the builtins live there).
-fn python_with_pytest_and_tiderace() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    let mut cands: Vec<String> = Vec::new();
-    if venv.exists() {
-        cands.push(venv.to_string_lossy().into_owned());
-    }
-    cands.extend(["python3".to_string(), "python".to_string()]);
-    cands.into_iter().find(|p| {
-        std::process::Command::new(p)
-            .args(["-c", "import pytest, tiderace.builtins"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-}
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 
 const CORPUS: &str = "\
 import os
@@ -78,7 +49,7 @@ def test_d_the_worker_is_intact_afterwards():
 
 #[test]
 fn pytester_and_testdir_run_an_inner_pytest_and_leave_the_worker_intact() {
-    let Some(python) = python_with_pytest_and_tiderace() else {
+    let Some(python) = python(PythonNeeds::PytestAndTiderace) else {
         skip_live("no interpreter with both pytest and tiderace importable");
         return;
     };

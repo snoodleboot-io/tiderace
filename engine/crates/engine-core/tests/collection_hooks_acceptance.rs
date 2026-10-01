@@ -14,36 +14,9 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn python_with_pytest() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    let mut candidates: Vec<String> = Vec::new();
-    if venv.exists() {
-        candidates.push(venv.to_string_lossy().into_owned());
-    }
-    candidates.extend(["python3".to_string(), "python".to_string()]);
-    candidates.into_iter().find(|cand| {
-        std::process::Command::new(cand)
-            .args(["-c", "import pytest"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-}
 
 /// The shape real suites use: an opt-in flag, plus a hook that skips marked tests without it.
 const CONFTEST: &str = "\
@@ -146,7 +119,7 @@ fn expected(node_id: &str) -> Outcome {
 
 #[test]
 fn collection_hooks_and_skip_markers_are_honoured() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no interpreter with pytest available");
         return;
     };

@@ -17,34 +17,9 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestResult};
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    for cand in ["python3", "python"] {
-        let ok = std::process::Command::new(cand)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(cand.to_string());
-        }
-    }
-    None
-}
 
 /// Every shape that can hold a reference across a restore. Each `_b` test runs after its `_a`
 /// sibling (alphabetical within the module) and fails if the restore rebound instead of restoring.
@@ -226,7 +201,7 @@ fn assert_all_passed(results: &[TestResult], label: &str) {
 /// identity behaviour is observable. This is the configuration Windows always runs.
 #[test]
 fn restore_preserves_identity_on_the_no_fork_tier() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -243,7 +218,7 @@ fn restore_preserves_identity_on_the_no_fork_tier() {
 fn the_optimistic_ladder_preserves_identity_too() {
     use engine_core::exec::ForkWorker;
 
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

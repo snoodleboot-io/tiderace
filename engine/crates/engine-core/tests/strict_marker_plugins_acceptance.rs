@@ -18,39 +18,7 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-/// Any interpreter with pytest. The corpus registers its own marker through a conftest rather than
-/// depending on a particular plugin being installed — `pytest_configure` + `addinivalue_line` is the
-/// same mechanism every plugin uses, so this reproduces the case without requiring one.
-fn python_with_pytest() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    let mut candidates: Vec<String> = Vec::new();
-    if venv.exists() {
-        candidates.push(venv.to_string_lossy().into_owned());
-    }
-    candidates.extend(["python3".to_string(), "python".to_string()]);
-    candidates.into_iter().find(|p| {
-        std::process::Command::new(p)
-            .args(["-c", "import pytest"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-}
+use engine_core::testing::{python, scratch, shim, skip_live, PythonNeeds};
 
 /// Registers a marker the way a plugin does: from `pytest_configure`, at runtime, nowhere in the
 /// project's own `markers` list.
@@ -58,18 +26,6 @@ const CONFTEST: &str = r#"
 def pytest_configure(config):
     config.addinivalue_line("markers", "registered_at_runtime: added by a hook, as plugins do")
 "#;
-
-fn scratch(tag: &str) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "tiderace_t60_{tag}_{}_{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 const CORPUS: &str = r#"
 import pytest
@@ -94,7 +50,7 @@ def test_a_mark_nobody_declared():
 
 #[test]
 fn a_plugin_registered_marker_is_not_a_typo() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no interpreter with pytest available");
         return;
     };

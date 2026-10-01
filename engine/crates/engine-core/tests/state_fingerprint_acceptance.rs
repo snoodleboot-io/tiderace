@@ -28,34 +28,9 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestResult};
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    for cand in ["python3", "python"] {
-        let ok = std::process::Command::new(cand)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(cand.to_string());
-        }
-    }
-    None
-}
 
 /// The `_a`/`_c`/`_e` tests leak; the `_b`/`_d`/`_f` checks live in the **next module**, which the
 /// same worker runs after it, and fail if the leak survived the module boundary. Inside a file
@@ -215,7 +190,7 @@ fn assert_detected_and_restored(results: &[TestResult], tier: &str) {
 /// entire remedy here, and the leakers' own results are not re-run.
 #[test]
 fn leaks_are_restored_and_demoted_on_the_no_fork_tier() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -237,7 +212,7 @@ fn leaks_are_restored_and_demoted_on_the_no_fork_tier() {
 fn leaks_are_restored_and_demoted_on_the_optimistic_ladder() {
     use engine_core::exec::ForkWorker;
 
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -260,7 +235,7 @@ fn leaks_are_restored_and_demoted_on_the_optimistic_ladder() {
 fn the_offender_is_re_run_in_a_fork() {
     use engine_core::exec::ForkWorker;
 
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -290,7 +265,7 @@ fn the_offender_is_re_run_in_a_fork() {
 fn the_same_corpus_passes_under_fork() {
     use engine_core::exec::ForkWorker;
 
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -328,7 +303,7 @@ fn a_recorded_offender_is_forked_from_the_start() {
     use engine_core::exec::ForkWorker;
     use std::collections::HashSet;
 
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

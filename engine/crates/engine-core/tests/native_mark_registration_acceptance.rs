@@ -14,50 +14,8 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-/// A Python that can `import tiderace` — the fx venv, or whatever `PYTHONPATH` makes work (CI sets
-/// it to `engine/py-tiderace`).
-fn python_with_tiderace() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    let mut cands: Vec<String> = Vec::new();
-    if venv.exists() {
-        cands.push(venv.to_string_lossy().into_owned());
-    }
-    cands.extend(["python3".to_string(), "python".to_string()]);
-    cands.into_iter().find(|p| {
-        std::process::Command::new(p)
-            .args(["-c", "import tiderace"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-}
-
-fn scratch(tag: &str) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "tiderace_t67_{tag}_{}_{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use engine_core::testing::{python, scratch, shim, skip_live, PythonNeeds};
+use std::path::Path;
 
 fn write_project(dir: &Path) {
     // No pyproject.toml, no pytest.ini, no setup.cfg. The conftest is the declaration.
@@ -98,7 +56,7 @@ fn outcome<'a>(
 
 #[test]
 fn a_mark_registered_in_a_conftest_is_declared_without_any_config_file() {
-    let Some(python) = python_with_tiderace() else {
+    let Some(python) = python(PythonNeeds::Tiderace) else {
         skip_live("no interpreter that can import tiderace");
         return;
     };

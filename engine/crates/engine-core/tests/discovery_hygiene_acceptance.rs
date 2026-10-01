@@ -15,56 +15,13 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-/// These corpora define real pytest marks, so an interpreter without pytest cannot express what is
-/// being tested. Prefer the fx venv, which CI provisions for exactly this.
-fn python_with_pytest() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    let candidates: Vec<String> = if venv.exists() {
-        vec![venv.to_string_lossy().into_owned()]
-    } else {
-        vec!["python3".into(), "python".into()]
-    };
-    candidates.into_iter().find(|p| {
-        std::process::Command::new(p)
-            .args(["-c", "import pytest"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-}
-
-fn scratch(tag: &str) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "tiderace_hyg_{tag}_{}_{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use engine_core::testing::{python, scratch, shim, skip_live, PythonNeeds};
 
 /// A module using the scalar `pytestmark` spelling, alongside one using the list spelling, so the
 /// test also pins that the list form still works.
 #[test]
 fn a_scalar_pytestmark_does_not_take_the_run_down() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no interpreter with pytest available");
         return;
     };
@@ -121,7 +78,7 @@ fn a_scalar_pytestmark_does_not_take_the_run_down() {
 /// booby trap never fires and the real test passes.
 #[test]
 fn discovery_does_not_descend_into_a_virtualenv() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no interpreter with pytest available");
         return;
     };
@@ -183,7 +140,7 @@ fn discovery_does_not_descend_into_a_virtualenv() {
 /// probe `__name__` on arbitrary values and had the identical weakness.
 #[test]
 fn a_module_global_that_raises_on_attribute_access_does_not_crash_discovery() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no interpreter with pytest available");
         return;
     };

@@ -15,39 +15,9 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{ForkWorker, Worker};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-/// Prefer the rich fx venv (local dev), else a bare interpreter on `PATH` (CI). `None` ⇒ skip.
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    for cand in ["python3", "python"] {
-        let ok = std::process::Command::new(cand)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(cand.to_string());
-        }
-    }
-    None
-}
 
 /// Two fixtures that raise, one sync and one async, plus a passing control.
 ///
@@ -97,7 +67,7 @@ fn write_corpus(tag: &str) -> PathBuf {
 /// A fixture that raises is reported with its cause, not as a lost result.
 #[test]
 fn fixture_failure_is_reported_with_a_traceback_not_a_lost_result() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -164,7 +134,7 @@ fn fixture_failure_is_reported_with_a_traceback_not_a_lost_result() {
 /// than emit the old bare string, and, critically, the worker must survive to run the next test.
 #[test]
 fn a_child_that_exits_itself_reports_that_and_the_worker_survives() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

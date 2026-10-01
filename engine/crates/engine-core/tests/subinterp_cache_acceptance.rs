@@ -14,20 +14,9 @@
 //! on a shared runner would prove nothing.
 
 use engine_core::exec::SafeSetCache;
-use engine_core::testing::skip_live;
+use engine_core::testing::{repo_root, shim, skip_live};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
 
 /// The probe needs CPython 3.14's interpreter API; anything older answers "undeterminable" for every
 /// module and the tier falls back, so there would be nothing to cache.

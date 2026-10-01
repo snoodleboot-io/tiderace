@@ -7,37 +7,9 @@
 
 #![cfg(unix)]
 
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use engine_daemon::{EngineHandler, RpcHandler, RpcRequest, RpcResponse};
 use std::path::{Path, PathBuf};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    ["python3", "python"]
-        .into_iter()
-        .find(|cand| {
-            std::process::Command::new(cand)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-        .map(str::to_string)
-}
 
 fn write_corpus() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("tiderace_t84_daemon_{}", std::process::id()));
@@ -77,7 +49,7 @@ fn warm(handler: &mut EngineHandler) -> bool {
 
 #[test]
 fn run_full_reuses_the_warm_image_until_the_tree_changes() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

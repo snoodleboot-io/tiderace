@@ -35,14 +35,13 @@ use engine_core::fixtures::{
     Fixture, FixtureError, FixtureGraph, FixtureResolver, LayeredResolver, OverrideTable,
     ParamValue,
 };
-use engine_core::testing::skip_live;
 
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 
 use fx_support::{
-    corpus_param_values, corpus_scope_fixtures, fx, fx_corpus_root, fx_venv_python, module_path,
-    run_pytest_oracle, shim_path,
+    corpus_param_values, corpus_scope_fixtures, fx, fx_corpus_root, module_path, run_pytest_oracle,
 };
 
 // =====================================================================
@@ -110,7 +109,7 @@ fn setup_order_is_topo_and_teardown_is_strict_reverse() {
 // probe (the load-bearing "1x not 500x" claim, §8 boundary 1).
 #[test]
 fn module_fixture_body_runs_once_function_per_test() {
-    let Some(python) = fx_venv_python() else {
+    let Some(python) = python(PythonNeeds::FxVenv).map(std::path::PathBuf::from) else {
         skip_live("`.tiderace-fx-venv` not found — run the Phase-3 Lane-0 env gate first");
         return;
     };
@@ -362,7 +361,7 @@ fn session_depending_on_function_is_scope_widen_error() {
 // drive the real corpus through the real ForkWorker; sqlite is NEVER mocked.
 #[test]
 fn forked_child_gets_fresh_sqlite_connection() {
-    let Some(python) = fx_venv_python() else {
+    let Some(python) = python(PythonNeeds::FxVenv).map(std::path::PathBuf::from) else {
         skip_live("`.tiderace-fx-venv` not found — run the Phase-3 Lane-0 env gate first");
         return;
     };
@@ -413,7 +412,7 @@ fn forked_child_gets_fresh_sqlite_connection() {
 // paths drive the real venv; neither is mocked.
 #[test]
 fn subprocess_worker_outcomes_and_teardown_match_fork() {
-    let Some(python) = fx_venv_python() else {
+    let Some(python) = python(PythonNeeds::FxVenv).map(std::path::PathBuf::from) else {
         skip_live("`.tiderace-fx-venv` not found — run the Phase-3 Lane-0 env gate first");
         return;
     };
@@ -469,13 +468,13 @@ fn run_engine_on_corpus(
         .collect(&root)
         .expect("collect fx_corpus");
     if fork {
-        let mut worker = ForkWorker::launch(python.to_str().unwrap(), &shim_path(), &root)
+        let mut worker = ForkWorker::launch(python.to_str().unwrap(), &shim(), &root)
             .expect("launch fork worker");
         worker.run(&items).expect("fork run")
     } else {
         let mut worker = SubprocessWorker::new(5_000, num_cpus_or_one()).with_target(
             python.to_str().unwrap(),
-            &shim_path(),
+            &shim(),
             &root,
         );
         worker.run(&items).expect("subprocess run")
@@ -498,8 +497,8 @@ fn run_engine_scope_counts(python: &std::path::Path) -> std::collections::BTreeM
     let items = RegexCollector::new()
         .collect(&root)
         .expect("collect fx_corpus");
-    let mut worker = ForkWorker::launch(python.to_str().unwrap(), &shim_path(), &root)
-        .expect("launch fork worker");
+    let mut worker =
+        ForkWorker::launch(python.to_str().unwrap(), &shim(), &root).expect("launch fork worker");
     let _ = worker.run(&items).expect("fork run");
 
     let report = fx_support::ProbeReport::read_from(&probe_dir);

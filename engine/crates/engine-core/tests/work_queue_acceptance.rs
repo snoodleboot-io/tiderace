@@ -20,41 +20,13 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::runner::{run_parallel, RunPlan, SchedulerKind, WorkerStrategy};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MODULES: usize = 12;
 const WORKERS: usize = 2;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    ["python3", "python"]
-        .into_iter()
-        .find(|cand| {
-            std::process::Command::new(cand)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-        .map(str::to_string)
-}
 
 /// Twelve modules, one of which is slow. Every test records `module pid` to a file on disk — a
 /// module-level list would be rolled back by the in-process restore, and the runner's own results
@@ -113,7 +85,7 @@ fn who_ran_what(log: &PathBuf) -> HashMap<String, String> {
 
 #[test]
 fn a_worker_that_finishes_early_takes_more_modules_than_its_static_share() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -163,7 +135,7 @@ fn a_worker_that_finishes_early_takes_more_modules_than_its_static_share() {
 /// The queue must not change *what* runs. Many more modules than workers, every result once.
 #[test]
 fn every_test_still_runs_exactly_once_when_units_outnumber_workers() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

@@ -19,49 +19,8 @@ use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, RunReport};
 use engine_core::exec::{SubprocessWorker, Worker};
 use engine_core::reporter::{JsonReporter, Reporter};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, scratch, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    ["python3", "python"]
-        .into_iter()
-        .find(|cand| {
-            std::process::Command::new(cand)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-        .map(str::to_string)
-}
-
-fn scratch(tag: &str) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "tiderace_t55_{tag}_{}_{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 /// Six skipped tests from three different causes: a module that does not import (3 tests), a
 /// directory whose conftest does not import (2 tests), and one test that skips itself (1 test).
@@ -128,7 +87,7 @@ fn run(python: &str, tests: &std::path::Path) -> RunReport {
 
 #[test]
 fn skips_are_counted_in_both_dimensions() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -164,7 +123,7 @@ fn skips_are_counted_in_both_dimensions() {
 /// of the two, and the tests that come from a module skip name the module they came from.
 #[test]
 fn a_per_test_skip_carries_no_module_origin() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -197,7 +156,7 @@ fn a_per_test_skip_carries_no_module_origin() {
 /// rather than parsing a terminal tally, because a tally hides two errors that cancel.
 #[test]
 fn the_json_report_carries_node_ids_and_both_dimensions() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

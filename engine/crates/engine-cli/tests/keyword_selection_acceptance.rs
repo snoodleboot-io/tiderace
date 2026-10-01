@@ -9,34 +9,11 @@
 //! Deselected items are absent from the tally, as `-m` deselection and `--ignore` already are:
 //! pytest does not collect them, and a skip would be a different, visible outcome.
 
+use engine_core::testing::{python, repo_root, PythonNeeds};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-/// A Python that has pytest, since the oracle is pytest itself.
-fn python_with_pytest() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    let mut cands: Vec<String> = Vec::new();
-    if venv.exists() {
-        cands.push(venv.to_string_lossy().into_owned());
-    }
-    cands.extend(["python3".to_string(), "python".to_string()]);
-    cands.into_iter().find(|p| {
-        Command::new(p)
-            .args(["-c", "import pytest"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-}
 
 fn write_project() -> PathBuf {
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -153,7 +130,7 @@ fn tiderace_selects(python: &str, tests: &Path, expr: &str) -> (BTreeSet<String>
 
 #[test]
 fn k_selects_exactly_what_pytest_selects() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         eprintln!("skipping: no Python with pytest available");
         return;
     };
@@ -193,7 +170,7 @@ fn k_selects_exactly_what_pytest_selects() {
 
 #[test]
 fn an_expression_that_selects_nothing_is_an_empty_run_not_an_error() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         eprintln!("skipping: no Python with pytest available");
         return;
     };
