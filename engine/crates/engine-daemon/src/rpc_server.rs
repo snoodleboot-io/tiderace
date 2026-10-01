@@ -103,7 +103,7 @@ mod tests {
                             .into_iter()
                             .map(|n| RpcResult {
                                 node_id: n,
-                                outcome: "passed".into(),
+                                outcome: engine_core::domain::Outcome::Passed,
                                 duration_ms: 1,
                             })
                             .collect(),

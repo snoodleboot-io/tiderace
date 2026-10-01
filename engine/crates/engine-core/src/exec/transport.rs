@@ -28,8 +28,8 @@ use crate::exec::shim_protocol::{read_frame, write_frame, ExecRequest, ExecRespo
 /// What a shim reports in its readiness handshake (the first frame it sends).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadyInfo {
-    /// The shim/wellspring process id (`-1` when a transport has no underlying process, e.g. tests).
-    pub pid: i64,
+    /// The shim/wellspring process id; `None` when a transport has no process of its own.
+    pub pid: Option<u32>,
 }
 
 /// One synchronous request→response exchange with a shim. At most one request is ever in flight,
@@ -67,8 +67,8 @@ pub(crate) fn run_batch<T: ShimTransport + ?Sized>(
     items: &[TestItem],
     deadline_ms: u64,
     force_no_fork: bool,
-    trusted: &std::collections::HashSet<String>,
-    must_fork: &std::collections::HashSet<String>,
+    trusted: &std::collections::HashSet<NodeId>,
+    must_fork: &std::collections::HashSet<NodeId>,
 ) -> Result<Vec<TestResult>> {
     run_batch_lost(
         transport,
@@ -89,13 +89,13 @@ pub(crate) fn run_batch_lost<T: ShimTransport + ?Sized>(
     items: &[TestItem],
     deadline_ms: u64,
     force_no_fork: bool,
-    trusted: &std::collections::HashSet<String>,
-    must_fork: &std::collections::HashSet<String>,
+    trusted: &std::collections::HashSet<NodeId>,
+    must_fork: &std::collections::HashSet<NodeId>,
     on_lost: LostWorker,
 ) -> Result<(Vec<TestResult>, Option<String>)> {
     let mut results = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
-        let mut req = ExecRequest::bare(item.node_id.as_str(), item.style.wire(), deadline_ms);
+        let mut req = ExecRequest::bare(&item.node_id, item.style, deadline_ms);
         // TID-33: a test recorded as disturbing interpreter state never takes the in-process ladder
         // again. The shim still catches a first offence at runtime and re-runs it forked, but that
         // costs a wasted in-process run every time; this is what stops paying it repeatedly.
@@ -160,7 +160,7 @@ pub struct PipeTransport<W: Write, R: Read> {
     stdout: R,
     /// The shim's pid as its ready frame reported it (`-1` before the handshake or when unknown):
     /// what a worker that stops answering is killed by (TID-93).
-    peer_pid: i64,
+    peer_pid: Option<u32>,
 }
 
 /// The concrete transport over a child process's pipes (what `Wellspring` holds).
@@ -179,7 +179,7 @@ pub struct BudgetedTransport<W: Write> {
     stdin: Option<W>,
     frames: mpsc::Receiver<std::io::Result<Option<std::vec::Vec<u8>>>>,
     budget: Duration,
-    peer_pid: i64,
+    peer_pid: Option<u32>,
     lost: bool,
 }
 
@@ -202,7 +202,7 @@ impl<W: Write> BudgetedTransport<W> {
             stdin: Some(stdin),
             frames: rx,
             budget,
-            peer_pid: -1,
+            peer_pid: None,
             lost: false,
         }
     }
@@ -256,7 +256,10 @@ impl<W: Write> ShimTransport for BudgetedTransport<W> {
         if frame.get("ready").and_then(Value::as_bool) != Some(true) {
             return Err(EngineError::Exec(format!("shim failed to warm: {frame}")));
         }
-        self.peer_pid = frame.get("pid").and_then(Value::as_i64).unwrap_or(-1);
+        self.peer_pid = frame
+            .get("pid")
+            .and_then(Value::as_u64)
+            .and_then(|p| u32::try_from(p).ok());
         Ok(ReadyInfo { pid: self.peer_pid })
     }
 
@@ -291,34 +294,26 @@ pub(crate) fn results_for(
             .into_iter()
             .map(|v| {
                 let touched = v.coverage.keys().cloned().collect();
-                TestResult::new(
-                    NodeId::new(v.node_id),
-                    Outcome::from_wire(&v.outcome),
-                    v.duration_ms,
-                    v.detail,
-                )
-                .with_touched(touched)
-                .with_pure(v.pure)
-                .with_must_fork(v.must_fork)
-                .with_keywords(v.keywords)
-                // These ids did not come from the static collector — they were produced here, by
-                // expanding a parametrized node or an inherited class (TID-55).
-                .with_expanded(true)
+                TestResult::new(v.node_id, v.outcome, v.duration_ms, v.detail)
+                    .with_touched(touched)
+                    .with_pure(v.pure)
+                    .with_must_fork(v.must_fork)
+                    .with_keywords(v.keywords)
+                    // These ids did not come from the static collector — they were produced here, by
+                    // expanding a parametrized node or an inherited class (TID-55).
+                    .with_expanded(true)
             })
             .collect();
     }
     let touched = resp.coverage.keys().cloned().collect();
-    vec![TestResult::new(
-        item.node_id.clone(),
-        Outcome::from_wire(&resp.outcome),
-        duration_ms,
-        resp.detail,
-    )
-    .with_touched(touched)
-    .with_pure(resp.pure)
-    .with_must_fork(resp.must_fork)
-    .with_skip_origin(resp.skip_origin)
-    .with_keywords(resp.keywords)]
+    vec![
+        TestResult::new(item.node_id.clone(), resp.outcome, duration_ms, resp.detail)
+            .with_touched(touched)
+            .with_pure(resp.pure)
+            .with_must_fork(resp.must_fork)
+            .with_skip_origin(resp.skip_origin)
+            .with_keywords(resp.keywords),
+    ]
 }
 
 /// One frame's payload bytes, `None` at EOF — [`read_frame`] without the parse, for a reader
@@ -344,12 +339,12 @@ impl<W: Write, R: Read> PipeTransport<W, R> {
         Self {
             stdin: Some(stdin),
             stdout,
-            peer_pid: -1,
+            peer_pid: None,
         }
     }
 
     /// The shim's pid from the ready frame, `-1` when unknown.
-    pub fn peer_pid(&self) -> i64 {
+    pub fn peer_pid(&self) -> Option<u32> {
         self.peer_pid
     }
 
@@ -367,7 +362,10 @@ impl<W: Write, R: Read> ShimTransport for PipeTransport<W, R> {
         if frame.get("ready").and_then(Value::as_bool) != Some(true) {
             return Err(EngineError::Exec(format!("shim failed to warm: {frame}")));
         }
-        self.peer_pid = frame.get("pid").and_then(Value::as_i64).unwrap_or(-1);
+        self.peer_pid = frame
+            .get("pid")
+            .and_then(Value::as_u64)
+            .and_then(|p| u32::try_from(p).ok());
         Ok(ReadyInfo { pid: self.peer_pid })
     }
 
@@ -491,7 +489,7 @@ mod tests {
         });
 
         let mut transport = PipeTransport::new(req_w, BufReader::new(resp_r));
-        assert_eq!(transport.ready().unwrap().pid, 4242);
+        assert_eq!(transport.ready().unwrap().pid, Some(4242));
 
         let items = [item("m.py::test_ok"), item("m.py::test_bad")];
         let results = run_batch(

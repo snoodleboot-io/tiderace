@@ -196,32 +196,11 @@ fn daemon_run(
         strict_markers: selection.strict_markers,
     };
     Some(match daemon_call(&root, request) {
-        Some(RpcResponse::RanFull { results }) => Ok(results.into_iter().map(from_rpc).collect()),
+        Some(RpcResponse::RanFull { results }) => Ok(results),
         Some(RpcResponse::Error { message }) => Err(message),
         Some(other) => Err(format!("unexpected answer: {other:?}")),
         None => Err("the daemon went away mid-run".to_string()),
     })
-}
-
-fn from_rpc(r: engine_daemon::RpcFullResult) -> engine_core::domain::TestResult {
-    use engine_core::domain::{NodeId, TestResult};
-    let mut out = TestResult::new(
-        NodeId::new(r.node_id),
-        Outcome::from_wire(&r.outcome),
-        r.duration_ms,
-        r.detail,
-    )
-    .with_touched(r.touched_files)
-    .with_pure(r.pure)
-    .with_must_fork(r.must_fork)
-    .with_skip_origin(r.skip_origin)
-    .with_expanded(r.expanded);
-    if let (Some(w), Some(u), Some(s), Some(e)) =
-        (r.worker, r.unit, r.unit_started_ms, r.unit_ended_ms)
-    {
-        out = out.with_schedule(w, u, s, e);
-    }
-    out
 }
 
 /// `tiderace daemon start|status|stop <path>`.
@@ -724,6 +703,8 @@ fn label(outcome: Outcome) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{effective_plan, Options};
+    use engine_core::domain::Outcome;
+    use engine_core::runner::RecordedOutcome;
     use engine_core::runner::{RunPlan, SchedulerKind, WorkerStrategy, DEFAULT_DEADLINE_MS};
 
     fn parse(args: &[&str]) -> Result<Options, String> {
@@ -883,25 +864,25 @@ mod tests {
         state.tests.insert(
             "t.py::disturber".into(),
             TestRecord {
-                outcome: "passed".into(),
+                outcome: RecordedOutcome::Ran(Outcome::Passed),
                 detail: String::new(),
                 deps: vec!["src.py".into()],
                 pure: Some(false),
                 must_fork: true,
                 keywords: Vec::new(),
-                skip_origin: String::new(),
+                skip_origin: None,
             },
         );
         state.tests.insert(
             "t.py::clean".into(),
             TestRecord {
-                outcome: "passed".into(),
+                outcome: RecordedOutcome::Ran(Outcome::Passed),
                 detail: String::new(),
                 deps: vec!["src.py".into()],
                 pure: Some(true),
                 must_fork: false,
                 keywords: Vec::new(),
-                skip_origin: String::new(),
+                skip_origin: None,
             },
         );
         state.save(&dir.join(STATE_FILE)).unwrap();

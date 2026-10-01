@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use std::collections::HashSet;
 
-use crate::domain::{TestItem, TestResult};
+use crate::domain::{NodeId, TestItem, TestResult};
 use crate::error::{EngineError, Result};
 use crate::exec::transport::{PipeTransport, ShimTransport};
 use crate::exec::{Selection, Worker};
@@ -394,8 +394,8 @@ pub struct PooledWorker {
     transport: PooledTransport,
     deadline_ms: u64,
     optimistic_no_fork: bool,
-    trusted: HashSet<String>,
-    must_fork: HashSet<String>,
+    trusted: HashSet<NodeId>,
+    must_fork: HashSet<NodeId>,
     /// Set when the worker stopped answering (TID-93); it was killed and takes no more work.
     lost: bool,
 }
@@ -421,13 +421,13 @@ impl PooledWorker {
     }
 
     /// Node ids recorded pure and unchanged: bare no-fork, skipping the snapshot (TID-1).
-    pub fn with_trusted_pure(mut self, trusted: HashSet<String>) -> Self {
+    pub fn with_trusted_pure(mut self, trusted: HashSet<NodeId>) -> Self {
         self.trusted = trusted;
         self
     }
 
     /// Node ids recorded as disturbing interpreter state: forked regardless of the ladder (TID-33).
-    pub fn with_must_fork(mut self, must_fork: HashSet<String>) -> Self {
+    pub fn with_must_fork(mut self, must_fork: HashSet<NodeId>) -> Self {
         self.must_fork = must_fork;
         self
     }
@@ -456,8 +456,7 @@ impl Worker for PooledWorker {
         )?;
         if fault.is_some() {
             self.lost = true;
-            let pid = self.transport.peer_pid();
-            if pid > 0 {
+            if let Some(pid) = self.transport.peer_pid() {
                 // SAFETY: a plain kill(2) on a pid this pool's parent forked for this run.
                 unsafe { kill(pid as i32, 9) };
             }
@@ -471,7 +470,7 @@ impl Worker for PooledWorker {
     }
 
     fn pid(&self) -> Option<u32> {
-        u32::try_from(self.transport.peer_pid()).ok()
+        self.transport.peer_pid()
     }
 }
 

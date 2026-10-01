@@ -31,6 +31,7 @@ pub use phase_timer::PhaseTimer;
 pub use run_plan::{default_workers, RunPlan, DEFAULT_DEADLINE_MS};
 pub use scheduler_kind::SchedulerKind;
 pub use verdicts::{
-    changed_files, record_durations, PersistedState, TestRecord, VerdictStore, STATE_FILE,
+    changed_files, record_durations, PersistedState, RecordedOutcome, TestRecord, VerdictStore,
+    STATE_FILE,
 };
 pub use worker_strategy::WorkerStrategy;

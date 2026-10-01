@@ -29,14 +29,37 @@ pub enum TestStyle {
 }
 
 impl TestStyle {
-    /// The wire token the Python shim dispatches on.
-    pub fn wire(self) -> &'static str {
+    /// The wire token the Python shim dispatches on — the serde form, as a `&'static str` for
+    /// the in-process transport that hands it to Python directly. A unit test holds the two
+    /// together.
+    pub fn token(self) -> &'static str {
         match self {
             TestStyle::Function => "function",
             TestStyle::ClassMethod => "class_method",
             TestStyle::UnittestMethod => "unittest_method",
             TestStyle::InheritedMethods => "inherited_methods",
             TestStyle::UnresolvedClass => "unresolved_class",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TestStyle;
+
+    #[test]
+    fn the_token_is_the_serde_form() {
+        for style in [
+            TestStyle::Function,
+            TestStyle::ClassMethod,
+            TestStyle::UnittestMethod,
+            TestStyle::InheritedMethods,
+            TestStyle::UnresolvedClass,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&style).unwrap(),
+                format!("\"{}\"", style.token())
+            );
         }
     }
 }

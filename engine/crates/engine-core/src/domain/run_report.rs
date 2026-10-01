@@ -27,8 +27,7 @@ impl RunReport {
     pub fn skipped_modules(&self) -> usize {
         self.results
             .iter()
-            .filter(|r| !r.skip_origin.is_empty())
-            .map(|r| r.skip_origin.as_str())
+            .filter_map(|r| r.skip_origin.as_deref())
             .collect::<std::collections::BTreeSet<_>>()
             .len()
     }

@@ -18,3 +18,12 @@ pub use scope_path::ScopePath;
 pub use test_item::TestItem;
 pub use test_result::TestResult;
 pub use test_style::TestStyle;
+
+/// Deserialize a string field where the wire and old files spell "absent" as `""`.
+pub(crate) fn empty_as_none<'de, D>(d: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: Option<String> = serde::Deserialize::deserialize(d)?;
+    Ok(s.filter(|s| !s.is_empty()))
+}

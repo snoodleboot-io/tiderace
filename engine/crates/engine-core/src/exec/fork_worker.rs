@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::domain::{TestItem, TestResult};
+use crate::domain::{NodeId, TestItem, TestResult};
 use crate::error::Result;
 use crate::exec::transport::run_batch;
 use crate::exec::wellspring::Wellspring;
@@ -12,9 +12,9 @@ pub struct ForkWorker {
     wellspring: Wellspring,
     deadline_ms: u64,
     optimistic_no_fork: bool,
-    trusted: HashSet<String>,
+    trusted: HashSet<NodeId>,
     /// Node ids recorded as disturbing interpreter state — forked even under the ladder (TID-33).
-    must_fork: HashSet<String>,
+    must_fork: HashSet<NodeId>,
 }
 
 impl ForkWorker {
@@ -77,7 +77,7 @@ impl ForkWorker {
 
     /// Node ids known to be *pure and unchanged* (TID-1): each runs BARE no-fork (skip the snapshot).
     /// Only honored together with `with_optimistic_no_fork(true)`.
-    pub fn with_trusted_pure(mut self, trusted: HashSet<String>) -> Self {
+    pub fn with_trusted_pure(mut self, trusted: HashSet<NodeId>) -> Self {
         self.trusted = trusted;
         self
     }
@@ -85,13 +85,13 @@ impl ForkWorker {
     /// Node ids recorded as disturbing interpreter state (TID-33): each is forked even under
     /// `with_optimistic_no_fork(true)`. The shim catches a first offence on its own and re-runs it
     /// forked; this is what stops paying for that discovery on every subsequent run.
-    pub fn with_must_fork(mut self, must_fork: HashSet<String>) -> Self {
+    pub fn with_must_fork(mut self, must_fork: HashSet<NodeId>) -> Self {
         self.must_fork = must_fork;
         self
     }
 
     /// The underlying Wellspring pid (for diagnostics/tests).
-    pub fn wellspring_pid(&self) -> i64 {
+    pub fn wellspring_pid(&self) -> Option<u32> {
         self.wellspring.pid()
     }
 }

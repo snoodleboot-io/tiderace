@@ -32,8 +32,12 @@ pub struct TestResult {
     ///
     /// One skip event can produce hundreds of skipped tests. Both numbers are worth reporting and
     /// neither substitutes for the other, so the origin is kept rather than the count.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub skip_origin: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::empty_as_none"
+    )]
+    pub skip_origin: Option<String>,
     /// This node id came from *runtime expansion* — a parametrize case or an inherited method the
     /// collector could not see statically — rather than from static collection (TID-55).
     ///
@@ -77,7 +81,7 @@ impl TestResult {
             touched_files: Vec::new(),
             pure: None,
             must_fork: false,
-            skip_origin: String::new(),
+            skip_origin: None,
             expanded: false,
             keywords: Vec::new(),
             worker: None,
@@ -88,13 +92,13 @@ impl TestResult {
         }
     }
 
-    /// Stamp the schedule slot this result ran in (TID-78).
     /// Record the running worker's peak resident size (builder style, TID-106).
     pub fn with_worker_peak_rss_mb(mut self, mb: Option<u64>) -> Self {
         self.worker_peak_rss_mb = mb;
         self
     }
 
+    /// Stamp the schedule slot this result ran in (TID-78).
     pub fn with_schedule(
         mut self,
         worker: usize,
@@ -128,8 +132,8 @@ impl TestResult {
     }
 
     /// Name the module whose import skipped this test (builder style).
-    pub fn with_skip_origin(mut self, skip_origin: impl Into<String>) -> Self {
-        self.skip_origin = skip_origin.into();
+    pub fn with_skip_origin(mut self, skip_origin: Option<String>) -> Self {
+        self.skip_origin = skip_origin;
         self
     }
 

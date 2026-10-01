@@ -37,13 +37,13 @@ fn temp(tag: &str) -> PathBuf {
 
 fn record(deps: &[&str], pure: Option<bool>, must_fork: bool) -> TestRecord {
     TestRecord {
-        outcome: "passed".into(),
+        outcome: RecordedOutcome::Ran(Outcome::Passed),
         detail: String::new(),
         deps: deps.iter().map(|d| (*d).to_string()).collect(),
         pure,
         must_fork,
         keywords: Vec::new(),
-        skip_origin: String::new(),
+        skip_origin: None,
     }
 }
 
@@ -229,6 +229,7 @@ fn a_missing_or_corrupt_state_file_is_a_cold_start() {
 
 use engine_core::domain::{NodeId, Outcome, TestResult};
 use engine_core::runner::record_durations;
+use engine_core::runner::RecordedOutcome;
 
 fn timed(node: &str, ms: u64) -> TestResult {
     TestResult::new(NodeId::new(node), Outcome::Passed, ms, "")

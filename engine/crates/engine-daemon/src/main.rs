@@ -105,7 +105,7 @@ fn cmd_run_impacted(handler: &mut EngineHandler) -> ExitCode {
             let failures = summary
                 .results
                 .iter()
-                .filter(|r| r.outcome == "failed" || r.outcome == "error")
+                .filter(|r| r.outcome.is_failure())
                 .count();
             eprintln!(
                 "{} ran, {} cached, {} total, {} failing",
@@ -132,10 +132,10 @@ fn cmd_run(handler: &mut EngineHandler) -> ExitCode {
         Ok(results) => {
             let mut failures = 0;
             for r in &results {
-                if r.outcome == "failed" || r.outcome == "error" {
+                if r.outcome.is_failure() {
                     failures += 1;
                 }
-                println!("{}\t{}", r.outcome.to_uppercase(), r.node_id);
+                println!("{}\t{}", r.outcome.token().to_uppercase(), r.node_id);
             }
             eprintln!(
                 "{} tests, {} failing (parallel pool)",

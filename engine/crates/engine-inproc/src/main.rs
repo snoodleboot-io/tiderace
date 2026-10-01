@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use engine_core::collection::{Collector, RegexCollector};
+use engine_core::domain::{NodeId, Outcome, TestStyle};
 use engine_core::exec::{ExecRequest, ShimTransport};
 use engine_inproc::{engine_py_paths, InProcessTransport};
 
@@ -41,7 +42,7 @@ fn smart(args: &[String]) -> i32 {
     let mut passed = 0;
     for it in &items {
         let (outcome, p) = t
-            .run_node(it.node_id.as_str(), it.style.wire(), 5000, false)
+            .run_node(it.node_id.as_str(), it.style.token(), 5000, false)
             .unwrap();
         if outcome == "passed" {
             passed += 1;
@@ -81,7 +82,7 @@ fn time_run(
     let started = Instant::now();
     for it in items {
         let nf = no_fork(it.node_id.as_str());
-        t.run_node(it.node_id.as_str(), it.style.wire(), 5000, nf)
+        t.run_node(it.node_id.as_str(), it.style.token(), 5000, nf)
             .unwrap();
     }
     started.elapsed().as_secs_f64() * 1000.0
@@ -119,13 +120,9 @@ fn bench(args: &[String]) -> i32 {
             passed = 0;
             for it in &items {
                 let resp = transport
-                    .exchange(&ExecRequest::bare(
-                        it.node_id.as_str(),
-                        it.style.wire(),
-                        5000,
-                    ))
+                    .exchange(&ExecRequest::bare(&it.node_id, it.style, 5000))
                     .expect("exchange");
-                if resp.outcome == "passed" {
+                if resp.outcome == Outcome::Passed {
                     passed += 1;
                 }
             }
@@ -164,7 +161,7 @@ fn proof() {
     let ready = transport.ready().expect("ready");
     println!(
         "[ready] in-process wellspring pid={} (one embedded interpreter, project imported once)",
-        ready.pid
+        ready.pid.map_or("?".to_string(), |p| p.to_string())
     );
 
     let expected = [
@@ -176,11 +173,11 @@ fn proof() {
     ];
     let mut ok = true;
     for (name, want) in expected {
-        let node = format!("test_x.py::{name}");
+        let node = NodeId::new(format!("test_x.py::{name}"));
         let resp = transport
-            .exchange(&ExecRequest::bare(&node, "function", 5000))
+            .exchange(&ExecRequest::bare(&node, TestStyle::Function, 5000))
             .expect("exchange");
-        let mark = if resp.outcome == want {
+        let mark = if resp.outcome.token() == want {
             "ok"
         } else {
             ok = false;

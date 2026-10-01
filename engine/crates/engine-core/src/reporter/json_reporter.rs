@@ -1,7 +1,6 @@
 use serde::Serialize;
 
 use crate::domain::{Outcome, RunReport, TestResult};
-use crate::reporter::reporter::outcome_token;
 use crate::reporter::Reporter;
 
 /// JSON reporter — a machine-readable run summary for dashboards, bots, and `--report` consumers.
@@ -46,8 +45,8 @@ struct JsonTest<'a> {
     #[serde(skip_serializing_if = "str::is_empty")]
     detail: &'a str,
     /// The module whose import skipped this test; absent for a per-test skip.
-    #[serde(skip_serializing_if = "str::is_empty")]
-    skip_origin: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skip_origin: Option<&'a str>,
     /// Produced by runtime expansion (a parametrize case, an inherited method) rather than collection.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     expanded: bool,
@@ -106,10 +105,10 @@ impl Reporter for JsonReporter {
 fn json_test(r: &TestResult) -> JsonTest<'_> {
     JsonTest {
         node_id: r.node_id.as_str(),
-        outcome: outcome_token(r.outcome),
+        outcome: r.outcome.token(),
         duration_ms: r.duration_ms,
         detail: &r.detail,
-        skip_origin: &r.skip_origin,
+        skip_origin: r.skip_origin.as_deref(),
         expanded: r.expanded,
         pure: r.pure,
         must_fork: r.must_fork,

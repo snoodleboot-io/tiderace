@@ -71,7 +71,7 @@ fn a_deselected_test_is_recorded_and_never_runs_again_until_the_config_changes()
     assert!(
         warm.results
             .iter()
-            .any(|r| r.node_id.ends_with("test_slow")),
+            .any(|r| r.node_id.as_str().ends_with("test_slow")),
         "{:?}",
         warm.results
     );

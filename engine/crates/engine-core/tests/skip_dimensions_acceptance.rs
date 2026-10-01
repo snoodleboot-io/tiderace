@@ -113,7 +113,7 @@ fn skips_are_counted_in_both_dimensions() {
         report
             .results
             .iter()
-            .map(|r| (r.node_id.as_str(), r.skip_origin.as_str()))
+            .map(|r| (r.node_id.as_str(), r.skip_origin.as_deref()))
             .collect::<Vec<_>>()
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -133,7 +133,7 @@ fn a_per_test_skip_carries_no_module_origin() {
     let inline = find(&report, "test_inline");
     assert_eq!(inline.outcome, Outcome::Skipped, "{}", inline.detail);
     assert!(
-        inline.skip_origin.is_empty(),
+        inline.skip_origin.is_none(),
         "a test that skips itself did not take its module down with it, so it has no origin — got {:?}",
         inline.skip_origin
     );
@@ -145,7 +145,8 @@ fn a_per_test_skip_carries_no_module_origin() {
         let r = find(&report, node);
         assert_eq!(r.outcome, Outcome::Skipped, "{}", r.detail);
         assert_eq!(
-            r.skip_origin, module,
+            r.skip_origin.as_deref(),
+            Some(module),
             "{node} is skipped because {module} never imported, and says so"
         );
     }

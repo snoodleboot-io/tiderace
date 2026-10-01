@@ -76,6 +76,8 @@ fn expansions_of<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::domain::Outcome;
+    use engine_core::runner::RecordedOutcome;
 
     fn state() -> PersistedState {
         let mut s = PersistedState::default();
@@ -84,25 +86,25 @@ mod tests {
         s.tests.insert(
             "t.py::a".into(),
             TestRecord {
-                outcome: "passed".into(),
+                outcome: RecordedOutcome::Ran(Outcome::Passed),
                 detail: String::new(),
                 deps: vec!["src.py".into()],
                 pure: Some(true),
                 must_fork: false,
                 keywords: Vec::new(),
-                skip_origin: String::new(),
+                skip_origin: None,
             },
         );
         s.tests.insert(
             "t.py::b".into(),
             TestRecord {
-                outcome: "passed".into(),
+                outcome: RecordedOutcome::Ran(Outcome::Passed),
                 detail: String::new(),
                 deps: vec!["other.py".into()],
                 pure: None,
                 must_fork: false,
                 keywords: Vec::new(),
-                skip_origin: String::new(),
+                skip_origin: None,
             },
         );
         s
@@ -135,13 +137,13 @@ mod tests {
         s.tests.insert(
             node.into(),
             TestRecord {
-                outcome: "passed".into(),
+                outcome: RecordedOutcome::Ran(Outcome::Passed),
                 detail: String::new(),
                 deps: deps.iter().map(|d| d.to_string()).collect(),
                 pure: Some(true),
                 must_fork: false,
                 keywords: Vec::new(),
-                skip_origin: String::new(),
+                skip_origin: None,
             },
         );
     }
