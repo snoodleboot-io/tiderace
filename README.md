@@ -61,7 +61,7 @@ timed. Medians of interleaved rounds; the full tables, method and caveats are in
 Outcomes are identical to pytest's on seven of the eight suites, node id for node id. And the run
 a developer actually waits on, on the 5,600-test suite: **nothing edited, 0.16 s** (pytest has no
 warm mode: 80 s); **one leaf module edited, 1.4 s**; **one test by name through a warm daemon,
-0.6 s**.
+0.3 s**.
 
 ## Install
 
@@ -93,7 +93,7 @@ tiderace run tests/                   # the whole suite, pytest's outcomes and e
 tiderace run -k test_login tests/     # one test by name
 
 tiderace daemon start tests/          # keep the imported suite warm for the session…
-tiderace run -k test_login tests/     # …0.6s on a 5,600-test suite instead of 5s
+tiderace run -k test_login tests/     # …0.3s on a 5,600-test suite instead of 5s
 tiderace daemon stop tests/
 
 tiderace-daemon run tests/            # first pass records footprints; later passes run only
