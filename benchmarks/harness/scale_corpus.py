@@ -1,7 +1,7 @@
 """Generate a synthetic suite of any size, for the question the real corpora cannot answer: how
 the runners scale with the number of tests.
 
-    python benchmarks/harness/scale_corpus.py --packages 20 --modules 20 --tests 50 --out /tmp/scale20k
+    python -m benchmarks.harness.scale_corpus --packages 20 --modules 20 --tests 50 --out /tmp/scale20k
 
 20 packages × 20 modules × 50 tests = 20,000 tests, every one trivial (a few hundred nanoseconds
 of work), so what is measured is the runner — collection, dispatch, selection, reporting — not
@@ -41,6 +41,11 @@ def session_counter():
 '''
 
 
+def _write(path: str, text: str) -> None:
+    with open(path, "w") as fh:
+        fh.write(text)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--packages", type=int, default=20)
@@ -51,21 +56,21 @@ def main() -> None:
     root = os.path.abspath(a.out)
     tests = os.path.join(root, "tests")
     os.makedirs(tests, exist_ok=True)
-    open(os.path.join(root, "pytest.ini"), "w").write("[pytest]\nmarkers =\n    slow: slow\n")
-    open(os.path.join(tests, "conftest.py"), "w").write(CONFTEST)
-    open(os.path.join(tests, "__init__.py"), "w").write("")
+    _write(os.path.join(root, "pytest.ini"), "[pytest]\nmarkers =\n    slow: slow\n")
+    _write(os.path.join(tests, "conftest.py"), CONFTEST)
+    _write(os.path.join(tests, "__init__.py"), "")
     total = 0
     for p in range(a.packages):
         pkg = os.path.join(tests, f"pkg_{p:02d}")
         os.makedirs(pkg, exist_ok=True)
-        open(os.path.join(pkg, "__init__.py"), "w").write("")
+        _write(os.path.join(pkg, "__init__.py"), "")
         for m in range(a.modules):
             mod = f"p{p:02d}m{m:02d}"
             body = [MODULE.format(mod=mod)]
             for i in range(a.tests - 4):  # the parametrized three and the marked one count too
                 tmpl = TEST_FIXTURE if i % 2 else TEST_PLAIN
                 body.append(tmpl.format(mod=mod, i=i, j=i + 1))
-            open(os.path.join(pkg, f"test_{mod}.py"), "w").write("".join(body))
+            _write(os.path.join(pkg, f"test_{mod}.py"), "".join(body))
             total += a.tests
     print(f"{total} tests in {a.packages * a.modules} modules under {tests}")
 
