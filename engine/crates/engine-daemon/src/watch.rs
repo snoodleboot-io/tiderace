@@ -3,7 +3,6 @@ use std::path::Path;
 use std::time::Duration;
 
 use engine_core::cache::Cache;
-use engine_core::fixtures::ClosureHasher;
 
 use crate::fs_watcher::{Debouncer, FsWatcher};
 use crate::rpc_method::{RpcRequest, RpcResponse};
@@ -26,7 +25,7 @@ pub enum WatchAction {
 /// The 32-byte content digest the [`Session`]/cache key consume, reusing the engine's deterministic
 /// [`ClosureHasher`] (no extra hash dependency).
 pub fn content_hash(bytes: &[u8]) -> [u8; 32] {
-    *ClosureHasher::new().feed(bytes).finish().as_bytes()
+    engine_core::runner::digest(bytes)
 }
 
 /// React to one changed file — the edit→result core of `tiderace watch`. Classifies the change via the

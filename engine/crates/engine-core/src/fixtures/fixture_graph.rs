@@ -325,7 +325,7 @@ impl FixtureGraph {
             if fixture.name != name {
                 continue;
             }
-            if let Some(len) = Self::prefix_len(&fixture.scope_path, scope_path) {
+            if let Some(len) = fixture.scope_path.is_prefix_of(scope_path) {
                 if best.is_none_or(|(b, _)| len > b) {
                     best = Some((len, node_id));
                 }
@@ -343,30 +343,7 @@ impl FixtureGraph {
     /// `true` if a fixture declared at `decl` applies to a test at `test_loc` (decl is a segment-wise
     /// prefix of the test location; the session root applies everywhere).
     fn location_applies(decl: &ScopePath, test_loc: &ScopePath) -> bool {
-        Self::prefix_len(decl, test_loc).is_some()
-    }
-
-    /// Segment-wise prefix length (in segments) of `decl.module` within `test_loc.module`, or `None`
-    /// if not a prefix. Shares the segment semantics of `OverrideTable` (`/` and `.` separators).
-    fn prefix_len(decl: &ScopePath, test_loc: &ScopePath) -> Option<usize> {
-        let dseg: Vec<&str> = decl
-            .module
-            .split(['/', '.'])
-            .filter(|s| !s.is_empty())
-            .collect();
-        let tseg: Vec<&str> = test_loc
-            .module
-            .split(['/', '.'])
-            .filter(|s| !s.is_empty())
-            .collect();
-        if dseg.len() > tseg.len() {
-            return None;
-        }
-        if dseg.iter().zip(&tseg).all(|(d, t)| d == t) {
-            Some(dseg.len())
-        } else {
-            None
-        }
+        decl.is_prefix_of(test_loc).is_some()
     }
 
     /// The fixture's `name` for diagnostics (falls back to the node id string if unknown).

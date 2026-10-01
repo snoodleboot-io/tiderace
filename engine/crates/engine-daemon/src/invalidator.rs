@@ -68,17 +68,12 @@ enum Kind {
     Ignored,
 }
 
-const CONFIG_FILES: &[&str] = &[
-    "pyproject.toml",
-    "setup.cfg",
-    "setup.py",
-    "tox.ini",
-    "conftest.py",
-];
+/// Beyond pytest's config files, the two that shape the imported image itself.
+const RECYCLE_ALSO: &[&str] = &["setup.py", "conftest.py"];
 
 fn classify(path: &Path) -> Kind {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if CONFIG_FILES.contains(&name) {
+    if engine_core::collection::CONFIG_FILES.contains(&name) || RECYCLE_ALSO.contains(&name) {
         return Kind::Recycle;
     }
     match path.extension().and_then(|e| e.to_str()) {

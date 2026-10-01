@@ -28,19 +28,12 @@ fn main() -> ExitCode {
     let mode = args[1].as_str();
     let root = PathBuf::from(&args[2]);
 
-    let python = std::env::var("TIDERACE_PYTHON").unwrap_or_else(|_| engine_core::default_python());
-    let shim = match std::env::var("TIDERACE_SHIM") {
-        Ok(s) => PathBuf::from(s),
-        Err(_) => match engine_core::default_shim(&python) {
-            Some(p) => p, // shim shipped inside the installed `tiderace` package
-            None => {
-                eprintln!(
-                    "error: TIDERACE_SHIM not set and no bundled shim found — \
-                     `pip install tiderace` into this interpreter, or point TIDERACE_SHIM at py-shim/shim.py"
-                );
-                return ExitCode::FAILURE;
-            }
-        },
+    let engine_core::Target { python, shim } = match engine_core::resolve_target() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
     };
     // Impact-aware `run` needs coverage to record each test's footprint (the warm-mode skip). The
     // wellspring (a child process) inherits this env. `--all` opts out (full run, no coverage).
@@ -176,14 +169,7 @@ fn cmd_probe(python: &str, shim: &Path, root: &Path) -> ExitCode {
     // Distinct module rel-paths (the file part of each node id).
     let mut modules: Vec<String> = items
         .iter()
-        .map(|it| {
-            it.node_id
-                .as_str()
-                .split("::")
-                .next()
-                .unwrap_or("")
-                .to_string()
-        })
+        .map(|it| it.node_id.file().to_string())
         .collect();
     modules.sort();
     modules.dedup();

@@ -13,21 +13,24 @@
 //!
 //! One type per file (ADR-E005).
 
+mod hashing;
 mod memory;
 mod parallel_runner;
+mod phase_timer;
 mod run_plan;
 mod scheduler_kind;
 mod verdicts;
 mod worker_strategy;
 
+pub use hashing::{digest, hash_bytes, hash_file, hash_file_or_missing, MISSING};
 pub use memory::{available_memory_bytes, process_rss_bytes, workers_by_memory, MemorySizing};
+pub use parallel_runner::run_parallel;
 #[cfg(unix)]
 pub use parallel_runner::run_parallel_with_pool;
-pub use parallel_runner::{locality_key, run_parallel};
+pub use phase_timer::PhaseTimer;
 pub use run_plan::{default_workers, RunPlan, DEFAULT_DEADLINE_MS};
 pub use scheduler_kind::SchedulerKind;
 pub use verdicts::{
-    changed_files, hash_file, record_durations, PersistedState, TestRecord, VerdictStore,
-    STATE_FILE,
+    changed_files, record_durations, PersistedState, TestRecord, VerdictStore, STATE_FILE,
 };
 pub use worker_strategy::WorkerStrategy;

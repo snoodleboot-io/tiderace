@@ -4,4 +4,4 @@ mod collector;
 mod regex_collector;
 
 pub use collector::Collector;
-pub use regex_collector::{RegexCollector, SKIP_DIRS};
+pub use regex_collector::{RegexCollector, CONFIG_FILES, SKIP_DIRS};

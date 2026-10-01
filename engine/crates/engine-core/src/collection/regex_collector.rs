@@ -22,6 +22,11 @@ pub const SKIP_DIRS: &[&str] = &[
     "node_modules",
 ];
 
+/// The files pytest reads its configuration from, at the rootdir: `addopts`, `markers`,
+/// `testpaths`, `norecursedirs`. A change to one can change what is collected or deselected, so
+/// anything that stamps a tree or records a verdict's dependencies lists these.
+pub const CONFIG_FILES: &[&str] = &["pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg"];
+
 /// Regex-based collector — evolves `tiderace/collector.rs`. Recognizes module-level `def test_*`
 /// (pytest functions), methods of `Test*` classes (pytest class methods), and methods of
 /// `unittest.TestCase` subclasses (driven later via stdlib `TestCase.run()`). Indentation tracks
@@ -258,15 +263,6 @@ fn has_opaque_base(bases: &str) -> bool {
         .any(|b| !INERT.contains(&b))
 }
 
-/// The file part of a node id — everything before the first `::`.
-fn module_of(node_id: &crate::domain::NodeId) -> &str {
-    node_id
-        .as_str()
-        .split("::")
-        .next()
-        .unwrap_or(node_id.as_str())
-}
-
 impl Collector for RegexCollector {
     fn collect(&self, root: &Path) -> Result<Vec<TestItem>> {
         let mut out = Vec::new();
@@ -276,7 +272,7 @@ impl Collector for RegexCollector {
         // it. Sorting by node id put `test_two` before `test_one`... alphabetically, which is how a
         // moto module that passes under pytest lost its objects here (TID-80). A stable sort on the
         // module alone keeps each file's own order.
-        out.sort_by(|a, b| module_of(&a.node_id).cmp(module_of(&b.node_id)));
+        out.sort_by(|a, b| a.node_id.file().cmp(b.node_id.file()));
         Ok(out)
     }
 }

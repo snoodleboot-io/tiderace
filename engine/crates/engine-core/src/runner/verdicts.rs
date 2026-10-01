@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::hashing::hash_file_or_missing;
 use crate::domain::TestResult;
 use crate::exec::SafeModule;
-use crate::fixtures::ClosureHasher;
 
 /// The state file, written by the daemon and read by both front ends.
 pub const STATE_FILE: &str = ".tiderace-state.json";
@@ -128,22 +128,6 @@ pub fn changed_files(
         .collect()
 }
 
-/// Hex content hash of `<root>/rel`; a sentinel for a missing or unreadable file, so it always
-/// counts as changed.
-pub fn hash_file(root: &Path, rel: &str) -> String {
-    match std::fs::read(root.join(rel)) {
-        Ok(bytes) => {
-            let digest = ClosureHasher::new().feed(&bytes).finish();
-            let mut s = String::with_capacity(64);
-            for b in digest.as_bytes() {
-                s.push_str(&format!("{b:02x}"));
-            }
-            s
-        }
-        Err(_) => "missing".to_string(),
-    }
-}
-
 /// Write **only** the durations of `results` into the state file beside `root` (TID-62).
 ///
 /// This is the one thing `tiderace run` writes, and the module doc's "reading only" still holds for
@@ -207,7 +191,7 @@ impl VerdictStore {
             .state
             .files
             .keys()
-            .map(|p| (p.clone(), hash_file(&self.root, p)))
+            .map(|p| (p.clone(), hash_file_or_missing(&self.root, p)))
             .collect();
         let changed = changed_files(&self.state, &current);
         self.state

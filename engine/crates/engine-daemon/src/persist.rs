@@ -5,6 +5,7 @@
 //! (see `engine_core::runner::VerdictStore`). What stays here is the part only the daemon does:
 //! deciding which tests to re-execute and which to serve from cache.
 
+use engine_core::domain::NodeId;
 use std::collections::{BTreeSet, HashSet};
 
 pub use engine_core::runner::{changed_files, PersistedState, TestRecord, STATE_FILE};
@@ -67,11 +68,7 @@ fn expansions_of<'a>(
         .tests
         .range(node.to_string()..)
         .take_while(|(k, _)| k.starts_with(node))
-        .filter(|(k, _)| {
-            k.len() > node.len()
-                && (k.as_bytes()[node.len()] == b'[' || k[node.len()..].starts_with("::"))
-                && !direct.contains(k.as_str())
-        })
+        .filter(|(k, _)| NodeId::expands(k, node) && !direct.contains(k.as_str()))
         .map(|(k, _)| k)
         .collect()
 }

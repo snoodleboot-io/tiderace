@@ -51,15 +51,12 @@ impl OverrideTable {
     /// Ties on prefix length cannot occur here: two distinct keys with equal segment-prefix length
     /// that are both prefixes of `from` would have to be identical, so the table (a map) holds one.
     pub fn nearest(&self, name: &str, from: &ScopePath) -> Option<NodeId> {
-        let target = Self::segments(&from.module);
-
         let mut best: Option<(usize, &NodeId)> = None;
         for ((entry_name, entry_module), node) in &self.entries {
             if entry_name != name {
                 continue;
             }
-            let candidate = Self::segments(entry_module);
-            let Some(len) = Self::prefix_len(&candidate, &target) else {
+            let Some(len) = ScopePath::module_prefix_len(entry_module, &from.module) else {
                 continue;
             };
             // Longer prefix = nearer definition. Strictly-greater keeps the first equal-length match
@@ -69,25 +66,6 @@ impl OverrideTable {
             }
         }
         best.map(|(_, node)| node.clone())
-    }
-
-    /// Split a module identifier into path segments, treating `/` and `.` as separators and dropping
-    /// empty segments (so the session root `""` yields zero segments — a prefix of everything).
-    fn segments(module: &str) -> Vec<&str> {
-        module.split(['/', '.']).filter(|s| !s.is_empty()).collect()
-    }
-
-    /// If `candidate` is a (possibly equal) segment-wise prefix of `target`, return its length in
-    /// segments; otherwise `None`. The empty candidate (session root) is a prefix of everything.
-    fn prefix_len(candidate: &[&str], target: &[&str]) -> Option<usize> {
-        if candidate.len() > target.len() {
-            return None;
-        }
-        if candidate.iter().zip(target).all(|(c, t)| c == t) {
-            Some(candidate.len())
-        } else {
-            None
-        }
     }
 }
 
