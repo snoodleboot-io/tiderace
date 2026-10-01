@@ -16,7 +16,8 @@
 
 use std::io::{BufReader, Read, Write};
 use std::process::{ChildStdin, ChildStdout};
-use std::time::Instant;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -196,8 +197,132 @@ pub struct PipeTransport<W: Write, R: Read> {
     peer_pid: i64,
 }
 
-/// The concrete transport over a child process's pipes (what `Wellspring`/`NoForkProc` hold).
+/// The concrete transport over a child process's pipes (what `Wellspring` holds).
 pub type Live = PipeTransport<ChildStdin, BufReader<ChildStdout>>;
+
+/// How long past the per-test deadline a worker may stay silent before it is given up on
+/// (TID-93): the deadline itself is the shim's to enforce; this is the engine's margin over it.
+pub(crate) const LOST_WORKER_MARGIN_MS: u64 = 10_000;
+
+/// [`PipeTransport`] with a read budget (TID-98): a thread drains the read half into a channel,
+/// so a reply that does not arrive within `budget` is an error — the one guarantee a worker
+/// blocked inside a C call cannot defeat from the inside, and the only deadline Windows has.
+/// A Unix socket takes a read timeout directly (the warm pool); a child's stdout pipe does not,
+/// on any platform.
+pub struct BudgetedTransport<W: Write> {
+    stdin: Option<W>,
+    frames: mpsc::Receiver<std::io::Result<Option<std::vec::Vec<u8>>>>,
+    budget: Duration,
+    peer_pid: i64,
+    lost: bool,
+}
+
+impl<W: Write> BudgetedTransport<W> {
+    pub fn new<R: Read + Send + 'static>(stdin: W, mut stdout: R, budget: Duration) -> Self {
+        let (tx, rx) = mpsc::channel();
+        // Blocks in `read` until the child writes or exits; a hung child holds it until the
+        // child is killed, which the owner does once a reply is overdue.
+        std::thread::Builder::new()
+            .name("tiderace-reader".into())
+            .spawn(move || loop {
+                let frame = read_raw_frame(&mut stdout);
+                let last = !matches!(frame, Ok(Some(_)));
+                if tx.send(frame).is_err() || last {
+                    break;
+                }
+            })
+            .expect("spawn the transport reader");
+        Self {
+            stdin: Some(stdin),
+            frames: rx,
+            budget,
+            peer_pid: -1,
+            lost: false,
+        }
+    }
+
+    /// Whether a reply was overdue: the worker is to be killed, not waited for.
+    pub fn is_lost(&self) -> bool {
+        self.lost
+    }
+
+    /// Close the write half (→ shim sees EOF and exits). Idempotent.
+    pub fn close_input(&mut self) {
+        self.stdin.take();
+    }
+
+    fn next_frame<T: serde::de::DeserializeOwned>(
+        &mut self,
+        wait: Option<Duration>,
+    ) -> Result<Option<T>> {
+        let received = match wait {
+            Some(d) => self.frames.recv_timeout(d).map_err(|e| match e {
+                mpsc::RecvTimeoutError::Timeout => Some(d),
+                mpsc::RecvTimeoutError::Disconnected => None,
+            }),
+            None => self.frames.recv().map_err(|_| None),
+        };
+        match received {
+            Ok(Ok(Some(bytes))) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| EngineError::Exec(e.to_string())),
+            Ok(Ok(None)) | Err(None) => Ok(None),
+            Ok(Err(e)) => Err(EngineError::Io(e)),
+            Err(Some(budget)) => {
+                self.lost = true;
+                Err(EngineError::Exec(format!(
+                    "no answer from the worker within {:.1}s — its test overran the deadline \
+                     and the in-process timeout could not interrupt it; the worker is killed \
+                     and reported lost (TID-98)",
+                    budget.as_secs_f64()
+                )))
+            }
+        }
+    }
+}
+
+impl<W: Write> ShimTransport for BudgetedTransport<W> {
+    fn ready(&mut self) -> Result<ReadyInfo> {
+        // The import of the suite happens before the ready frame: no budget on this one.
+        let frame: Value = self
+            .next_frame(None)?
+            .ok_or_else(|| EngineError::Exec("shim sent no ready frame".into()))?;
+        if frame.get("ready").and_then(Value::as_bool) != Some(true) {
+            return Err(EngineError::Exec(format!("shim failed to warm: {frame}")));
+        }
+        self.peer_pid = frame.get("pid").and_then(Value::as_i64).unwrap_or(-1);
+        Ok(ReadyInfo { pid: self.peer_pid })
+    }
+
+    fn exchange(&mut self, req: &ExecRequest<'_>) -> Result<ExecResponse> {
+        if self.lost {
+            return Err(EngineError::Exec("the worker was lost".into()));
+        }
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| EngineError::Exec("shim already shut down".into()))?;
+        write_frame(stdin, req)?;
+        self.next_frame(Some(self.budget))?
+            .ok_or_else(|| EngineError::Exec("shim closed mid-run".into()))
+    }
+}
+
+/// One frame's payload bytes, `None` at EOF — [`read_frame`] without the parse, for a reader
+/// thread that cannot know the type its owner wants.
+fn read_raw_frame<R: Read>(r: &mut R) -> std::io::Result<Option<std::vec::Vec<u8>>> {
+    let mut header = [0u8; 4];
+    if let Err(e) = r.read_exact(&mut header) {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            return Ok(None);
+        }
+        return Err(e);
+    }
+    let len = u32::from_le_bytes(header) as usize;
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf)?;
+    Ok(Some(buf))
+}
 
 impl<W: Write, R: Read> PipeTransport<W, R> {
     /// Wrap a write half and an (already-buffered) read half. Does not perform the handshake; call

@@ -146,9 +146,19 @@ fn every_available_tier_runs_the_corpus_and_agrees() {
         match &baseline {
             None => baseline = Some((strategy, fp)),
             Some((first, expected)) => assert_eq!(
-                &fp, expected,
+                &fp,
+                expected,
                 "TID-17: the {strategy} tier disagreed with {first} — selecting a tier must be a \
-                 performance decision, not a correctness one"
+                 performance decision, not a correctness one; details: {}",
+                results
+                    .iter()
+                    .map(|r| format!(
+                        "{} => {}",
+                        r.node_id,
+                        r.detail.chars().take(240).collect::<String>()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
             ),
         }
     }
