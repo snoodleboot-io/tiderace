@@ -171,6 +171,53 @@ impl Drop for NoForkProc {
     }
 }
 
+/// The no-fork tier for one run (TID-118): one process per lane, launched on the lane's thread.
+/// The fork-only knobs (ladder, trusted-pure) do not apply — this tier runs in-process by
+/// configuration, not by guess — so it carries only the deadline.
+pub struct SubprocessTier {
+    target: ShimTarget,
+    deadline_ms: u64,
+}
+
+impl SubprocessTier {
+    pub fn new(target: ShimTarget, deadline_ms: u64) -> Self {
+        Self {
+            target,
+            deadline_ms,
+        }
+    }
+}
+
+impl crate::exec::tier::TierFactory for SubprocessTier {
+    fn lane(
+        &mut self,
+        _index: usize,
+        modules: &Path,
+    ) -> Result<Box<dyn crate::exec::tier::LaneSeed>> {
+        Ok(Box::new(SubprocessLane {
+            target: self.target.clone(),
+            deadline_ms: self.deadline_ms,
+            modules: modules.to_path_buf(),
+        }))
+    }
+}
+
+struct SubprocessLane {
+    target: ShimTarget,
+    deadline_ms: u64,
+    modules: PathBuf,
+}
+
+impl crate::exec::tier::LaneSeed for SubprocessLane {
+    fn start(self: Box<Self>) -> Result<Box<dyn Worker>> {
+        Ok(Box::new(
+            SubprocessWorker::new(self.deadline_ms, 1)
+                .with_shim_target(self.target)
+                .with_modules(&self.modules),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

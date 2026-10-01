@@ -202,3 +202,100 @@ struct Proc {
     transport: SubInterpTransport,
     process: ShimProcess,
 }
+
+/// The sub-interpreter tier for one run (ADR-E015 / TID-11, TID-118): probe each module, run the
+/// **safe** subset on one parallel sub-interpreter pool, and hand everything else to the
+/// platform fallback's lanes.
+///
+/// It is hybrid by necessity rather than by policy. A sub-interpreter cannot load a single-phase
+/// C extension — numpy's `_multiarray_umath` is the canonical refusal — so "run this whole corpus
+/// on sub-interpreters" is not a configuration that exists for any corpus with a compiled
+/// dependency. The pool is not threaded per scheduler unit either: `SubInterpWorker` takes a
+/// whole batch and fans it out across its own interpreters in one process, so threading it per
+/// unit would nest two pools and oversubscribe the machine.
+///
+/// A probe that cannot classify a module (CPython < 3.14, no probe API) returns `None`, and
+/// `None` routes to the fallback — always sound, never wrong, just not accelerated.
+pub struct SubInterpTier<'a> {
+    target: ShimTarget,
+    deadline_ms: u64,
+    workers: usize,
+    fallback: Box<dyn crate::exec::tier::TierFactory + 'a>,
+}
+
+impl<'a> SubInterpTier<'a> {
+    pub fn new(
+        target: ShimTarget,
+        plan: &crate::runner::RunPlan,
+        fallback: Box<dyn crate::exec::tier::TierFactory + 'a>,
+    ) -> Self {
+        Self {
+            target,
+            deadline_ms: plan.deadline_ms,
+            workers: plan.workers.get(),
+            fallback,
+        }
+    }
+}
+
+impl crate::exec::tier::TierFactory for SubInterpTier<'_> {
+    fn claim(
+        &mut self,
+        items: Vec<TestItem>,
+        notes: &mut crate::runner::RunNotes,
+    ) -> Result<(Vec<TestResult>, Vec<TestItem>)> {
+        let mut modules: Vec<String> = items.iter().map(|i| i.node_id.file().to_string()).collect();
+        modules.sort();
+        modules.dedup();
+
+        // Probing means launching a fresh interpreter per module, so it is cached by content hash
+        // and only new or changed modules pay (TID-35). Without this the CLI re-probed the whole
+        // corpus on every invocation, which on a small module count is most of this tier's cost —
+        // and it hurt most on Windows, the one platform the tier exists for and the one with no
+        // daemon to lean on.
+        let mut cache = crate::exec::SafeSetCache::load(&self.target.root);
+        let safe = cache
+            .resolve(
+                &self.target.python,
+                &self.target.shim,
+                &self.target.root,
+                &modules,
+            )
+            .map_err(EngineError::Exec)?;
+        // Best-effort: an unwritable tree must still run, just without the speedup next time —
+        // but say so, or the re-probe on every run looks like the tier being slow.
+        if let Err(e) = cache.save(&self.target.root) {
+            notes.push(format!("sub-interpreter safe-set cache not saved: {e}"));
+        }
+
+        let (safe_items, rest): (Vec<TestItem>, Vec<TestItem>) = items
+            .into_iter()
+            .partition(|it| safe.contains(it.node_id.file()));
+        let mut results = Vec::new();
+        if !safe_items.is_empty() {
+            let pool = self.workers.max(1).min(safe_items.len().max(1));
+            let mut worker = SubInterpWorker::new(self.deadline_ms)
+                .with_shim_target(self.target.clone())
+                .with_pool_size(pool);
+            results.extend(worker.run(&safe_items)?);
+        }
+        Ok((results, rest))
+    }
+
+    fn prepare(
+        &mut self,
+        lanes: usize,
+        modules: &Path,
+        notes: &mut crate::runner::RunNotes,
+    ) -> Result<usize> {
+        self.fallback.prepare(lanes, modules, notes)
+    }
+
+    fn lane(
+        &mut self,
+        index: usize,
+        modules: &Path,
+    ) -> Result<Box<dyn crate::exec::tier::LaneSeed>> {
+        self.fallback.lane(index, modules)
+    }
+}

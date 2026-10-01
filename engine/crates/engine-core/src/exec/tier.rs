@@ -1,6 +1,17 @@
 use std::fmt;
+use std::path::Path;
 
-/// Which isolation tier executes a batch (TID-17).
+use crate::domain::{TestItem, TestResult};
+#[cfg(not(unix))]
+use crate::error::EngineError;
+use crate::error::Result;
+use crate::exec::knobs::RunKnobs;
+use crate::exec::process::ShimTarget;
+use crate::exec::worker::Worker;
+use crate::runner::{RunNotes, RunPlan};
+
+/// Which isolation tier executes a batch (TID-17). Lives in `exec` because the tiers are its;
+/// the runner knows it only as a name and a [`factory`](WorkerStrategy::factory).
 ///
 /// The engine has shipped three for a while, but nothing outside the daemon could ask for one: the
 /// CLI always launched a [`ForkWorker`](crate::exec::ForkWorker). Every measurement taken through it
@@ -81,6 +92,137 @@ impl fmt::Display for WorkerStrategy {
             Self::SubInterp => "subinterp",
             Self::Subprocess => "subprocess",
         })
+    }
+}
+
+impl WorkerStrategy {
+    /// The factory that builds this tier's lanes for one run (TID-118). The runner asks it to
+    /// [`claim`](TierFactory::claim) what it runs outside the lane loop, to
+    /// [`prepare`](TierFactory::prepare) once the lane count is known, and for one
+    /// [`lane`](TierFactory::lane) per thread; it never matches on the tier itself.
+    ///
+    /// `warm` is a daemon's already-imported image, which only the fork tier can use; it forces
+    /// the fork tier, as the warm run path always has.
+    pub fn factory<'a>(
+        self,
+        target: &ShimTarget,
+        plan: &RunPlan,
+        knobs: RunKnobs,
+        warm: WarmImage<'a>,
+    ) -> Result<Box<dyn TierFactory + 'a>> {
+        match self {
+            Self::Fork => {
+                #[cfg(unix)]
+                {
+                    Ok(Box::new(crate::exec::tiers::fork_tier::ForkTier::new(
+                        target.clone(),
+                        plan,
+                        knobs,
+                        warm,
+                    )))
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = (target, plan, knobs, warm);
+                    Err(EngineError::Unavailable(
+                        "fork is unavailable on this platform".to_string(),
+                    ))
+                }
+            }
+            Self::Subprocess => Ok(Box::new(
+                crate::exec::tiers::subprocess::SubprocessTier::new(
+                    target.clone(),
+                    knobs.deadline_ms,
+                ),
+            )),
+            Self::SubInterp => {
+                // Hybrid: the safe subset on the pool, the rest on the platform fallback — which
+                // never gets the warm image, as it never has.
+                let fallback = self
+                    .fallback()
+                    .factory(target, plan, knobs, WarmImage::none())?;
+                Ok(Box::new(crate::exec::tiers::subinterp::SubInterpTier::new(
+                    target.clone(),
+                    plan,
+                    fallback,
+                )))
+            }
+        }
+    }
+}
+
+/// One run's view of a tier: what it runs itself, how many lanes it can field, and a seed for
+/// each lane (TID-118). The runner drives every tier through this and nothing else.
+pub trait TierFactory {
+    /// Items this tier runs outside the lane loop — the sub-interpreter pool's safe subset — with
+    /// their results; the rest are scheduled into lanes. The default claims nothing.
+    fn claim(
+        &mut self,
+        items: Vec<TestItem>,
+        notes: &mut RunNotes,
+    ) -> Result<(Vec<TestResult>, Vec<TestItem>)> {
+        let _ = notes;
+        Ok((Vec::new(), items))
+    }
+
+    /// Once: the lane count the scheduler chose and the modules file every lane starts from.
+    /// Returns the lane count to use — fewer when memory says so (TID-106). The default keeps it.
+    fn prepare(&mut self, lanes: usize, modules: &Path, notes: &mut RunNotes) -> Result<usize> {
+        let _ = (modules, notes);
+        Ok(lanes)
+    }
+
+    /// The seed for lane `index`, started on that lane's own thread.
+    fn lane(&mut self, index: usize, modules: &Path) -> Result<Box<dyn LaneSeed>>;
+}
+
+/// What a lane's thread turns into its worker. A seed rather than a worker so that a tier whose
+/// workers are processes launches them in parallel, one per thread, as before.
+pub trait LaneSeed: Send {
+    fn start(self: Box<Self>) -> Result<Box<dyn Worker>>;
+}
+
+/// A daemon's already-imported image for this run's fork-tier workers to fork from (TID-84), or
+/// none. A plain type on every platform, so the runner carries it without a `cfg`.
+pub struct WarmImage<'a> {
+    #[cfg(unix)]
+    pool: Option<&'a mut crate::exec::WellspringPool>,
+    #[cfg(not(unix))]
+    _none: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> WarmImage<'a> {
+    /// No warm image: the run imports for itself.
+    pub fn none() -> Self {
+        Self {
+            #[cfg(unix)]
+            pool: None,
+            #[cfg(not(unix))]
+            _none: std::marker::PhantomData,
+        }
+    }
+
+    /// Fork this run's workers off `pool`.
+    #[cfg(unix)]
+    pub fn of(pool: &'a mut crate::exec::WellspringPool) -> Self {
+        Self { pool: Some(pool) }
+    }
+
+    /// Whether there is an image to fork from.
+    pub fn is_some(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.pool.is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn into_pool(self) -> Option<&'a mut crate::exec::WellspringPool> {
+        self.pool
     }
 }
 
