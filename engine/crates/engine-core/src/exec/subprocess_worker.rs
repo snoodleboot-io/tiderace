@@ -14,11 +14,14 @@
 
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::time::Duration;
 
 use crate::domain::{TestItem, TestResult};
 use crate::error::{EngineError, Result};
-use crate::exec::transport::{run_batch, Live, PipeTransport, ShimTransport};
+use crate::exec::transport::{
+    run_batch_lost, BudgetedTransport, LostWorker, ShimTransport, LOST_WORKER_MARGIN_MS,
+};
 use crate::exec::worker::Worker;
 use crate::exec::worker_caps::WorkerCaps;
 
@@ -99,7 +102,7 @@ impl SubprocessWorker {
     }
 
     /// Launch the no-fork wellspring (`python <shim> <root> --no-fork`) and complete the handshake.
-    fn launch(target: &Target) -> Result<NoForkProc> {
+    fn launch(target: &Target, deadline_ms: u64) -> Result<NoForkProc> {
         let mut child = Command::new(&target.python)
             .arg(&target.shim)
             .arg(&target.root)
@@ -136,7 +139,11 @@ impl SubprocessWorker {
             .take()
             .ok_or_else(|| EngineError::Exec("subprocess worker stdout unavailable".into()))?;
 
-        let mut transport = PipeTransport::new(stdin, BufReader::new(stdout));
+        // The engine's own deadline on every reply (TID-98): the shim's in-process timeout ends
+        // what CPython can interrupt; a test blocked in a C call is ended here, by the budget —
+        // the only per-test deadline Windows has, where the shim cannot arm a timer signal.
+        let budget = Duration::from_millis(deadline_ms.saturating_add(LOST_WORKER_MARGIN_MS));
+        let mut transport = BudgetedTransport::new(stdin, BufReader::new(stdout), budget);
         transport.ready()?;
         Ok(NoForkProc { child, transport })
     }
@@ -148,10 +155,10 @@ impl Worker for SubprocessWorker {
             let target = self.target.clone().ok_or_else(|| {
                 EngineError::Exec("SubprocessWorker has no target; call with_target".into())
             })?;
-            self.proc = Some(SubprocessWorker::launch(&target)?);
+            self.proc = Some(SubprocessWorker::launch(&target, self.deadline_ms)?);
         }
         let proc = self.proc.as_mut().expect("just launched");
-        run_batch(
+        let (results, fault) = run_batch_lost(
             &mut proc.transport,
             items,
             self.deadline_ms,
@@ -160,18 +167,28 @@ impl Worker for SubprocessWorker {
             // No ladder to gate: `force_no_fork` is already false, and this tier runs in-process by
             // configuration rather than by optimistic guess (TID-33).
             &std::collections::HashSet::new(),
-        )
+            // A worker that stops answering is reported per node — the one that overran names
+            // the fault, the rest of the batch names it as not run — and replaced (TID-98).
+            LostWorker::Report,
+        )?;
+        if fault.is_some() {
+            self.proc = None; // dropped: killed if lost, reaped either way
+        }
+        Ok(results)
     }
 }
 
 /// A live no-fork wellspring process + its framed pipe (mirrors `Wellspring`, minus the fork).
 struct NoForkProc {
     child: Child,
-    transport: Live,
+    transport: BudgetedTransport<ChildStdin>,
 }
 
 impl Drop for NoForkProc {
     fn drop(&mut self) {
+        if self.transport.is_lost() {
+            let _ = self.child.kill(); // still inside the test that overran: it will not exit
+        }
         self.transport.close_input(); // EOF → shim exits + runs wider-scope finalizers once
         let _ = self.child.wait();
     }

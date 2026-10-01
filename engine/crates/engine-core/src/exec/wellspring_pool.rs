@@ -468,7 +468,7 @@ impl Worker for PooledWorker {
 
 /// How long past the per-test deadline a silent worker is waited on before it is declared lost:
 /// the shim's own deadline fires first when it can, and reports; this is for when it cannot.
-const LOST_WORKER_MARGIN_MS: u64 = 10_000;
+use crate::exec::transport::LOST_WORKER_MARGIN_MS;
 
 unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;

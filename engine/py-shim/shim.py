@@ -5554,8 +5554,16 @@ def _clean_room_serve(sock, engine: "Engine") -> None:
 
 
 class _InProcessTimeout(BaseException):
-    """Raised in the main thread by the in-process deadline's signal handler (TID-93). A
-    `BaseException`, so a test's `except Exception` cannot swallow it."""
+    """Raised in the main thread by the in-process deadline's signal handler (TID-93), or in the
+    test's thread by its watchdog (TID-98). A `BaseException`, so a test's `except Exception`
+    cannot swallow it. The watchdog delivers the class, not an instance, so the message lives
+    beside it."""
+
+    def __str__(self) -> str:
+        return self.args[0] if self.args else _WATCHDOG_MESSAGE
+
+
+_WATCHDOG_MESSAGE = "timeout on the in-process tier"
 
 
 class _in_process_deadline:
@@ -5564,20 +5572,33 @@ class _in_process_deadline:
     `SIGALRM` through `setitimer`: the handler raises `_InProcessTimeout` in the main thread, which
     ends any wait CPython lets a signal interrupt — a lock, a sleep, a socket read, a thread join.
     A wait it cannot interrupt (inside a C extension that never returns to the interpreter) is the
-    engine's job: its read on the worker times out and the worker is killed. Off when there is no
-    deadline, no `setitimer` (Windows), or this is not the main thread (signals only land there);
-    a test's own `SIGALRM` handler is put back afterwards."""
+    engine's job: its read on the worker times out and the worker is killed. A test's own
+    `SIGALRM` handler is put back afterwards.
+
+    Where there is no `setitimer` (Windows), or this is not the main thread (signals land only
+    there — a sub-interpreter's tests, say), a watchdog thread delivers the same exception with
+    `PyThreadState_SetAsyncExc` (TID-98). It lands at the next bytecode boundary: a busy test is
+    ended, a wait inside a C call — a `sleep`, a socket read — is not, and that one is the
+    engine's read budget's to end. Off when there is no deadline."""
 
     def __init__(self, deadline_ms: int):
         self.seconds = max(deadline_ms, 0) / 1000.0
         self.armed = False
         self.previous = None
+        self.timer = None
+        self.target = 0
+        self.fired = False
 
     def __enter__(self):
-        if (self.seconds <= 0 or not hasattr(signal, "setitimer")
-                or threading.current_thread() is not threading.main_thread()):
+        if self.seconds <= 0:
             return self
         seconds = self.seconds
+        # `TIDERACE_DEADLINE_WATCHDOG=1` takes the watchdog on a platform that has the signal:
+        # the way to exercise the Windows path on Linux.
+        if (not hasattr(signal, "setitimer")
+                or threading.current_thread() is not threading.main_thread()
+                or os.environ.get("TIDERACE_DEADLINE_WATCHDOG") == "1"):
+            return self._arm_watchdog(seconds)
 
         def on_alarm(_signum, _frame):
             raise _InProcessTimeout(
@@ -5592,12 +5613,47 @@ class _in_process_deadline:
             self.armed = False
         return self
 
-    def __exit__(self, *_exc):
+    def _arm_watchdog(self, seconds: float):
+        global _WATCHDOG_MESSAGE
+        _WATCHDOG_MESSAGE = (
+            f"timeout after {seconds:g}s on the in-process tier — the test was still running; "
+            f"it forks from the next run on, where the deadline kills instead of interrupts")
+        self.target = threading.get_ident()
+        self.fired = False
+
+        def fire() -> None:
+            self.fired = True
+            _set_async_exc(self.target, _InProcessTimeout)
+
+        self.timer = threading.Timer(seconds, fire)
+        self.timer.daemon = True
+        self.timer.start()
+        return self
+
+    def __exit__(self, exc_type, *_exc):
         if self.armed:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, self.previous if self.previous is not None
                           else signal.SIG_DFL)
+        if self.timer is not None:
+            self.timer.cancel()
+            # Fired as the test was ending, with its exception not yet delivered: it would land in
+            # the shim's own next bytecode. Withdraw it.
+            if self.fired and exc_type is not _InProcessTimeout:
+                _set_async_exc(self.target, None)
         return False
+
+
+def _set_async_exc(thread_ident: int, exc_class) -> None:
+    """`PyThreadState_SetAsyncExc`: raise `exc_class` in the thread at its next bytecode boundary;
+    `None` withdraws a raise still pending. The class is passed by address and stays alive — it
+    is a module global — and `None` is the NULL the API documents."""
+    import ctypes
+
+    api = ctypes.pythonapi.PyThreadState_SetAsyncExc
+    api.argtypes = [ctypes.c_ulong, ctypes.c_void_p]
+    api.restype = ctypes.c_int
+    api(ctypes.c_ulong(thread_ident), None if exc_class is None else id(exc_class))
 
 
 def _clean_room_run(node_id: str, style: str, deadline_ms: int) -> dict | None:
