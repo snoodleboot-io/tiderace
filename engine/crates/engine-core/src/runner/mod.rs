@@ -33,7 +33,9 @@ pub use parallel_runner::{run_parallel, run_parallel_with_notes};
 pub use parallel_runner::{run_parallel_with_pool, run_parallel_with_pool_notes};
 pub use phase_timer::PhaseTimer;
 pub use run_notes::{RunNotes, RunOutcome};
-pub use run_plan::{default_workers, RunPlan, DEFAULT_DEADLINE_MS};
+pub use run_plan::{
+    default_workers, ForkOptions, Learned, RunPlan, Sharding, WorkerCount, DEFAULT_DEADLINE_MS,
+};
 pub use scheduler_kind::SchedulerKind;
 pub use verdicts::{
     changed_files, record_durations, PersistedState, RecordedOutcome, TestRecord, VerdictStore,

@@ -28,6 +28,7 @@ use std::collections::HashSet;
 
 use crate::domain::{NodeId, TestItem, TestResult};
 use crate::error::{EngineError, Result};
+use crate::exec::knobs::RunKnobs;
 use crate::exec::process::{reap_lost, ShimLaunch, ShimMode, ShimProcess, ShimTarget};
 use crate::exec::transport::{PipeTransport, ShimTransport};
 use crate::exec::{Selection, Worker};
@@ -345,10 +346,7 @@ impl Drop for WellspringPool {
 /// is the same `run_batch`.
 pub struct PooledWorker {
     transport: PooledTransport,
-    deadline_ms: u64,
-    optimistic_no_fork: bool,
-    trusted: HashSet<NodeId>,
-    must_fork: HashSet<NodeId>,
+    knobs: RunKnobs,
     /// Set when the worker stopped answering (TID-93); it was killed and takes no more work.
     lost: bool,
 }
@@ -357,31 +355,34 @@ impl PooledWorker {
     pub fn new(transport: PooledTransport, deadline_ms: u64) -> Self {
         Self {
             transport,
-            deadline_ms,
-            optimistic_no_fork: false,
+            knobs: RunKnobs::new(deadline_ms),
             lost: false,
-            trusted: HashSet::new(),
-            must_fork: HashSet::new(),
         }
+    }
+
+    /// Every knob at once.
+    pub fn with_knobs(mut self, knobs: RunKnobs) -> Self {
+        self.knobs = knobs;
+        self
     }
 
     /// Take the in-process ladder for restorable tests. Sound only because the pool always launches
     /// with `restore` — see [`WellspringPool::launch`], which mirrors `ForkWorker::launch_optimistic`
     /// in making the unsound combination unreachable.
     pub fn with_optimistic_no_fork(mut self, on: bool) -> Self {
-        self.optimistic_no_fork = on;
+        self.knobs.optimistic_no_fork = on;
         self
     }
 
     /// Node ids recorded pure and unchanged: bare no-fork, skipping the snapshot (TID-1).
     pub fn with_trusted_pure(mut self, trusted: HashSet<NodeId>) -> Self {
-        self.trusted = trusted;
+        self.knobs = self.knobs.with_trusted_pure(trusted);
         self
     }
 
     /// Node ids recorded as disturbing interpreter state: forked regardless of the ladder (TID-33).
     pub fn with_must_fork(mut self, must_fork: HashSet<NodeId>) -> Self {
-        self.must_fork = must_fork;
+        self.knobs = self.knobs.with_must_fork(must_fork);
         self
     }
 }
@@ -396,15 +397,13 @@ impl Worker for PooledWorker {
         // The backstop behind the shim's own deadline (TID-93): a test the shim cannot interrupt
         // — blocked inside a C call — leaves the worker silent. The read gives up a margin after
         // the deadline, the worker is killed, and the batch is reported rather than the run hung.
-        let budget = Duration::from_millis(self.deadline_ms.saturating_add(LOST_WORKER_MARGIN_MS));
+        let budget =
+            Duration::from_millis(self.knobs.deadline_ms.saturating_add(LOST_WORKER_MARGIN_MS));
         self.transport.set_budget(Some(budget));
         let (results, fault) = crate::exec::transport::run_batch_lost(
             &mut self.transport,
             items,
-            self.deadline_ms,
-            self.optimistic_no_fork,
-            &self.trusted,
-            &self.must_fork,
+            &self.knobs,
             crate::exec::transport::LostWorker::Report,
         )?;
         if fault.is_some() {

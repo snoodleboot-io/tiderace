@@ -20,8 +20,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::domain::{NodeId, TestItem, TestResult};
+use crate::domain::{TestItem, TestResult};
 use crate::error::{EngineError, Result};
+use crate::exec::knobs::RunKnobs;
 use crate::exec::process::BudgetedReader;
 use crate::exec::results::NotRun;
 use crate::exec::shim_protocol::{ready_info, write_frame, ExecRequest, ExecResponse};
@@ -73,21 +74,9 @@ pub(crate) enum LostWorker {
 pub(crate) fn run_batch<T: ShimTransport + ?Sized>(
     transport: &mut T,
     items: &[TestItem],
-    deadline_ms: u64,
-    force_no_fork: bool,
-    trusted: &std::collections::HashSet<NodeId>,
-    must_fork: &std::collections::HashSet<NodeId>,
+    knobs: &RunKnobs,
 ) -> Result<Vec<TestResult>> {
-    run_batch_lost(
-        transport,
-        items,
-        deadline_ms,
-        force_no_fork,
-        trusted,
-        must_fork,
-        LostWorker::Fail,
-    )
-    .map(|(results, _)| results)
+    run_batch_lost(transport, items, knobs, LostWorker::Fail).map(|(results, _)| results)
 }
 
 /// [`run_batch`] with a [`LostWorker`] policy; the second value names the fault that took the
@@ -95,12 +84,16 @@ pub(crate) fn run_batch<T: ShimTransport + ?Sized>(
 pub(crate) fn run_batch_lost<T: ShimTransport + ?Sized>(
     transport: &mut T,
     items: &[TestItem],
-    deadline_ms: u64,
-    force_no_fork: bool,
-    trusted: &std::collections::HashSet<NodeId>,
-    must_fork: &std::collections::HashSet<NodeId>,
+    knobs: &RunKnobs,
     on_lost: LostWorker,
 ) -> Result<(Vec<TestResult>, Option<String>)> {
+    let RunKnobs {
+        deadline_ms,
+        optimistic_no_fork: force_no_fork,
+        trusted_pure: trusted,
+        must_fork,
+    } = knobs;
+    let (deadline_ms, force_no_fork) = (*deadline_ms, *force_no_fork);
     let mut results = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         let mut req = ExecRequest::bare(&item.node_id, item.style, deadline_ms);
@@ -291,15 +284,8 @@ mod tests {
             .answer("m.py::test_bad", "failed", "assert 1 == 2");
         let items = [item("m.py::test_ok"), item("m.py::test_bad")];
 
-        let results = run_batch(
-            &mut shim,
-            &items,
-            5_000,
-            false,
-            &std::collections::HashSet::new(),
-            &std::collections::HashSet::new(),
-        )
-        .expect("offline batch runs");
+        let results =
+            run_batch(&mut shim, &items, &RunKnobs::new(5_000)).expect("offline batch runs");
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].node_id.as_str(), "m.py::test_ok");
@@ -313,15 +299,7 @@ mod tests {
     #[test]
     fn unknown_wire_token_becomes_error_outcome_through_the_loop() {
         let mut shim = ScriptedShim::new().answer("m.py::t", "kaboom", "weird");
-        let results = run_batch(
-            &mut shim,
-            &[item("m.py::t")],
-            5_000,
-            false,
-            &std::collections::HashSet::new(),
-            &std::collections::HashSet::new(),
-        )
-        .unwrap();
+        let results = run_batch(&mut shim, &[item("m.py::t")], &RunKnobs::new(5_000)).unwrap();
         assert_eq!(results[0].outcome, Outcome::Error);
     }
 
@@ -331,10 +309,7 @@ mod tests {
         let err = run_batch(
             &mut shim,
             &[item("m.py::a"), item("m.py::b")],
-            5_000,
-            false,
-            &std::collections::HashSet::new(),
-            &std::collections::HashSet::new(),
+            &RunKnobs::new(5_000),
         )
         .expect_err("a shim that closes mid-batch must error");
         assert!(matches!(err, EngineError::PeerClosed { .. }), "{err:?}");
@@ -383,15 +358,8 @@ mod tests {
         assert_eq!(transport.ready().unwrap().pid, Some(4242));
 
         let items = [item("m.py::test_ok"), item("m.py::test_bad")];
-        let results = run_batch(
-            &mut transport,
-            &items,
-            5_000,
-            false,
-            &std::collections::HashSet::new(),
-            &std::collections::HashSet::new(),
-        )
-        .expect("loopback batch");
+        let results =
+            run_batch(&mut transport, &items, &RunKnobs::new(5_000)).expect("loopback batch");
 
         transport.close_input(); // EOF → the fake-shim thread's read loop ends
         shim.join().expect("fake shim thread");

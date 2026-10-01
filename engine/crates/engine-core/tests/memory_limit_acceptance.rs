@@ -9,7 +9,7 @@
 
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
-use engine_core::runner::{run_parallel, RunPlan, WorkerStrategy};
+use engine_core::runner::{run_parallel, Learned, RunPlan, WorkerCount, WorkerStrategy};
 use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
 
@@ -40,12 +40,13 @@ fn a_memory_limit_caps_the_pool_and_every_result_carries_its_workers_peak() {
     assert_eq!(items.len(), 8);
     let plan = RunPlan {
         strategy: WorkerStrategy::Fork,
-        workers: 4,
-        workers_explicit: true, // an explicit count — the limit still caps it
+        workers: WorkerCount::Explicit(4),
+        // an explicit count — the limit still caps it
         memory_limit_mb: Some(1),
         ..RunPlan::default()
     };
-    let results = run_parallel(&python, &shim(), &dir, items, &plan).expect("the run");
+    let results =
+        run_parallel(&python, &shim(), &dir, items, &plan, &Learned::default()).expect("the run");
     assert_eq!(results.len(), 8);
     for r in &results {
         assert_eq!(r.outcome, Outcome::Passed, "{}: {}", r.node_id, r.detail);
@@ -78,10 +79,11 @@ fn without_a_limit_the_default_count_is_kept_when_memory_allows() {
     // more than four, so every module gets its own worker and the schedule shows all four lanes.
     let plan = RunPlan {
         strategy: WorkerStrategy::Fork,
-        workers: 4,
+        workers: WorkerCount::Default(4),
         ..RunPlan::default()
     };
-    let results = run_parallel(&python, &shim(), &dir, items, &plan).expect("the run");
+    let results =
+        run_parallel(&python, &shim(), &dir, items, &plan, &Learned::default()).expect("the run");
     let lanes: std::collections::BTreeSet<usize> =
         results.iter().filter_map(|r| r.worker).collect();
     assert_eq!(lanes.len(), 4, "{lanes:?}");

@@ -11,6 +11,7 @@
 
 mod fork_permit;
 mod fork_plan;
+mod knobs;
 mod limits;
 mod memory_governor;
 mod process;
@@ -27,6 +28,7 @@ mod worker_caps;
 
 pub use fork_permit::ForkPermit;
 pub use fork_plan::ForkPlan;
+pub use knobs::RunKnobs;
 pub use limits::{
     default_parallelism, DEFAULT_DEADLINE_MS, IMPORT_DEADLINE, LOST_WORKER_MARGIN,
     LOST_WORKER_MARGIN_MS, POOL_POLL, WORKER_DEADLINE,

@@ -19,7 +19,9 @@
 
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
-use engine_core::runner::{run_parallel, RunPlan, SchedulerKind, WorkerStrategy};
+use engine_core::runner::{
+    run_parallel, ForkOptions, Learned, RunPlan, SchedulerKind, WorkerCount, WorkerStrategy,
+};
 use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -95,13 +97,17 @@ fn a_worker_that_finishes_early_takes_more_modules_than_its_static_share() {
     assert_eq!(items.len(), MODULES, "one test per module: {items:?}");
 
     let plan = RunPlan {
-        workers: WORKERS,
+        fork: ForkOptions {
+            shared_import: false,
+            ..ForkOptions::default()
+        },
+        workers: WorkerCount::Default(WORKERS),
         strategy: WorkerStrategy::Subprocess,
         scheduler: SchedulerKind::Locality,
-        shared_import: false,
         ..RunPlan::default()
     };
-    let results = run_parallel(&python, &shim(), &tests, items, &plan).expect("the corpus runs");
+    let results = run_parallel(&python, &shim(), &tests, items, &plan, &Learned::default())
+        .expect("the corpus runs");
     assert_eq!(results.len(), MODULES, "every test reports exactly once");
     for r in &results {
         assert_eq!(r.outcome, Outcome::Passed, "{}: {}", r.node_id, r.detail);
@@ -143,12 +149,16 @@ fn every_test_still_runs_exactly_once_when_units_outnumber_workers() {
     let tests = dir.join("tests");
     let items = RegexCollector::new().collect(&tests).expect("collection");
     let plan = RunPlan {
-        workers: 4,
+        fork: ForkOptions {
+            shared_import: false,
+            ..ForkOptions::default()
+        },
+        workers: WorkerCount::Default(4),
         strategy: WorkerStrategy::Subprocess,
-        shared_import: false,
         ..RunPlan::default()
     };
-    let results = run_parallel(&python, &shim(), &tests, items, &plan).expect("the corpus runs");
+    let results = run_parallel(&python, &shim(), &tests, items, &plan, &Learned::default())
+        .expect("the corpus runs");
     let ids: HashSet<&str> = results.iter().map(|r| r.node_id.as_str()).collect();
     assert_eq!(
         ids.len(),
