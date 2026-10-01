@@ -863,6 +863,8 @@ mod tests {
                 deps: vec!["src.py".into()],
                 pure: Some(false),
                 must_fork: true,
+                keywords: Vec::new(),
+                skip_origin: String::new(),
             },
         );
         state.tests.insert(
@@ -873,6 +875,8 @@ mod tests {
                 deps: vec!["src.py".into()],
                 pure: Some(true),
                 must_fork: false,
+                keywords: Vec::new(),
+                skip_origin: String::new(),
             },
         );
         state.save(&dir.join(STATE_FILE)).unwrap();

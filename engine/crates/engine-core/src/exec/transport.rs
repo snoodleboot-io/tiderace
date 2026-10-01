@@ -146,6 +146,7 @@ pub(crate) fn run_batch_lost<T: ShimTransport + ?Sized>(
                 .with_touched(touched)
                 .with_pure(v.pure)
                 .with_must_fork(v.must_fork)
+                .with_keywords(v.keywords)
                 // These ids did not come from the static collector — they were produced here, by
                 // expanding a parametrized node or an inherited class (TID-55).
                 .with_expanded(true)
@@ -163,7 +164,8 @@ pub(crate) fn run_batch_lost<T: ShimTransport + ?Sized>(
             .with_touched(touched)
             .with_pure(resp.pure)
             .with_must_fork(resp.must_fork)
-            .with_skip_origin(resp.skip_origin),
+            .with_skip_origin(resp.skip_origin)
+            .with_keywords(resp.keywords),
         );
     }
     Ok((results, None))
@@ -309,6 +311,7 @@ mod tests {
                 coverage: Default::default(),
                 pure: None,
                 skip_origin: String::new(),
+                keywords: Vec::new(),
                 variants: Vec::new(),
                 expanded: false,
             })

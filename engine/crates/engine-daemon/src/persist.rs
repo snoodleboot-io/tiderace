@@ -92,6 +92,8 @@ mod tests {
                 deps: vec!["src.py".into()],
                 pure: Some(true),
                 must_fork: false,
+                keywords: Vec::new(),
+                skip_origin: String::new(),
             },
         );
         s.tests.insert(
@@ -102,6 +104,8 @@ mod tests {
                 deps: vec!["other.py".into()],
                 pure: None,
                 must_fork: false,
+                keywords: Vec::new(),
+                skip_origin: String::new(),
             },
         );
         s
@@ -139,6 +143,8 @@ mod tests {
                 deps: deps.iter().map(|d| d.to_string()).collect(),
                 pure: Some(true),
                 must_fork: false,
+                keywords: Vec::new(),
+                skip_origin: String::new(),
             },
         );
     }

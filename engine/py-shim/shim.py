@@ -1353,10 +1353,13 @@ def _keyword_path_names(module_key: str) -> tuple:
     root = os.path.abspath(_ROOT or ".")
     rootdir = os.path.abspath(_CONFIG_DIR) if _CONFIG_DIR else root
     module_path = os.path.join(root, module_key)
-    rel = os.path.relpath(module_path, rootdir)
-    if rel.startswith(os.pardir):  # the ini sits beside, not above: the run root is the rootdir
-        rootdir, rel = root, os.path.relpath(module_path, root)
-    parts = [p for p in rel.split(os.sep) if p and p != os.curdir and p != os.pardir]
+    try:
+        rel = os.path.relpath(module_path, rootdir)
+        if rel.startswith(os.pardir):  # the ini sits beside, not above: the run root is the rootdir
+            rootdir, rel = root, os.path.relpath(module_path, root)
+    except ValueError:  # Windows: the config and the run root on different drives — no common
+        rootdir, rel = root, module_key  # ancestor; the run root is the rootdir then
+    parts = [p for p in rel.replace("\\", "/").split("/") if p and p != os.curdir and p != os.pardir]
     if _pytest_major() >= 8:
         names = tuple(parts)
     elif len(parts) > 1 and os.path.exists(os.path.join(os.path.dirname(module_path), "__init__.py")):
@@ -3293,9 +3296,22 @@ class Engine:
         # Deselected by the project's own `-m` filter (TID-32). Reported as an EMPTY expansion
         # rather than a skip: pytest deselects these, so they must not appear in the tally at all —
         # a skip would be a different, visible outcome.
-        names = (_mark_names(node_id, style)
-                 if (_MARKER_EXPR is not None or _STRICT_MARKS or _KEYWORD_EXPR is not None)
-                 else set())
+        # A module that skips at import is skipped under any `-k` or `-m`: pytest's collection
+        # skips it before either is consulted. The verdicts below used to come first, so a `-k`
+        # that was a definite No at node level (`-k "not unit"` over `tests/unit/`) deselected
+        # these where `-k nomatch` — undecided until the import — reported them; the daemon,
+        # replaying the skip from its record (TID-102), reported them either way. The import is
+        # the first thing now, as it is for pytest.
+        try:
+            importlib.import_module(_module_name(module_key))
+        except _skip_exceptions() as exc:
+            return {"node_id": node_id, "outcome": "skipped", "detail": _skip_reason(exc),
+                    "skip_origin": module_key}
+        except Exception:  # noqa: BLE001 — an unimportable module surfaces per node, below
+            pass
+        # Always, `-k` or not (TID-102): the names `-k` would match against are reported with the
+        # result, so the daemon can take the verdict itself next time for a node nothing touched.
+        names = _mark_names(node_id, style)
         if _STRICT_MARKS:
             # `--strict-markers`: a mark the project never declared is a typo far more often than an
             # intention, and pytest errors the item rather than running it. Silently ignoring the flag
@@ -3318,7 +3334,8 @@ class Engine:
         # An "unknown" is settled per case once the case ids exist, below.
         keyword_verdict = _keyword_verdict(node_id, names, final=False) if _KEYWORD_EXPR is not None else True
         if keyword_verdict is False:
-            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
+            return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": [],
+                    "keywords": _keyword_names(node_id, names)}
         try:
             requested = self._requested(node_id, style)
             marks = self._marks(node_id, style)
@@ -3477,13 +3494,16 @@ class Engine:
             selected = {i for i, vid in enumerate(variant_ids)
                         if _keyword_verdict(vid, names, final=True)}
             if not selected:
-                return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": []}
+                return {"node_id": node_id, "outcome": "passed", "expanded": True, "variants": [],
+                        "keywords": _keyword_names(node_id, names)}
         if skip_reason is not None:  # the skip deferred above, one per selected variant (TID-88)
             if not parametrized_node:
-                return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason}
+                return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason,
+                        "keywords": _keyword_names(node_id, names)}
             return {"node_id": node_id, "outcome": "skipped", "detail": skip_reason,
+                    "keywords": _keyword_names(node_id, names),
                     "variants": [{"node_id": vid, "outcome": "skipped", "detail": skip_reason,
-                                  "duration_ms": 0}
+                                  "duration_ms": 0, "keywords": _keyword_names(vid, names)}
                                  for i, vid in enumerate(variant_ids) if i in selected]}
         # Only now — after `-k` has chosen and a whole-node skip has returned — does the node's
         # *route* get decided (TID-99). It used to sit above the case expansion, so every node
@@ -3583,6 +3603,7 @@ class Engine:
                         "outcome": oc,
                         "detail": detail,
                         "duration_ms": int((time.perf_counter() - started) * 1000),
+                        "keywords": _keyword_names(variant_ids[variant_index], names),
                     }
                     if cov:
                         variant["coverage"] = {p: sorted(l) for p, l in cov.items()}
@@ -3612,7 +3633,8 @@ class Engine:
         # reads tiderace's native marks. Without this a test the author marked as expected-to-fail
         # was reported as a failure — one of click's two remaining divergences (TID-63).
         outcome, detail = _fold_pytest_marks(_pytest_markers(node_id, style), outcome, detail)
-        resp = {"node_id": node_id, "outcome": outcome, "detail": detail}
+        resp = {"node_id": node_id, "outcome": outcome, "detail": detail,
+                "keywords": _keyword_names(node_id, names)}
         # Additive and omitted for an unparametrized node, so its frame stays byte-identical.
         if variants:
             resp["variants"] = variants
@@ -3715,6 +3737,8 @@ class Engine:
                 variant["pure"] = res["pure"]
             if res.get("must_fork"):
                 variant["must_fork"] = True
+            if res.get("keywords"):
+                variant["keywords"] = res["keywords"]
             variants.append(variant)
         # Every child deselected ⇒ the class contributes nothing, exactly as an inherited-nothing
         # class does above. `_aggregate` of an empty list is `max()` of nothing, and that exception
@@ -4584,8 +4608,8 @@ def _mark_names(node_id: str, style: str) -> set:
     `__tiderace_marks__` (TID-59)."""
     try:
         module = importlib.import_module(_module_name(_module_key(node_id)))
-    except Exception:  # noqa: BLE001 — an unimportable module surfaces per node, not here
-        return set()
+    except (Exception, *_skip_exceptions()):  # noqa: BLE001 — an unimportable module, or one that
+        return set()  # skips at import (a BaseException), surfaces per node, not here (TID-102)
     owners = [module]
     if style in ("class_method", "unittest_method"):
         cls_name, method = _class_method(node_id)
@@ -5669,10 +5693,14 @@ def _apply_selection(selection: dict | None) -> None:
     global _KEYWORD_EXPR, _MARKER_EXPR, _STRICT_MARKS
     if not selection:
         return
-    if "keyword" in selection:
+    # A field that is absent *or null* keeps the image's value: the daemon serialises the run's
+    # selection with every field present, `null` for the ones the run did not give, and reading
+    # `null` as "clear it" dropped the project's own `addopts -m` on every `-k` run through the
+    # daemon — 32 tests pirn-core's config deselects ran (TID-102).
+    if selection.get("keyword") is not None:
         kexpr = selection["keyword"]
         _KEYWORD_EXPR = _compile_selection_tree(kexpr, "-k") if kexpr else None
-    if "marker" in selection:
+    if selection.get("marker") is not None:
         expr = selection["marker"]
         _MARKER_EXPR = _compile_marker_expr(expr) if expr else None
     if selection.get("strict_markers"):
@@ -5720,8 +5748,19 @@ def _fork_pool_workers(size: int, socket_path: str, engine_args: dict,
 
 def serve() -> int:
     root = sys.argv[1]
-    global _ROOT
+    global _ROOT, _STDOUT
     _ROOT = root
+    # The protocol owns a private duplicate of fd 1, and fd 1 itself — what `print()`, a C
+    # extension and a subprocess's inherited stdout reach — is pointed at stderr (TID-103). The
+    # frames are length-prefixed, so one stray byte on the stream desynchronises it for good: in
+    # the warm image (TID-84) the parent's stdout is the daemon's control pipe, shared by
+    # inheritance with every forked worker, and the first test that printed put its bytes in
+    # front of the next spawn's acknowledgement — read as a frame length and waited on forever.
+    # click's suite hung the daemon on its second run, deterministically. A one-shot worker's
+    # stdout is the engine's result stream, with the same exposure; its stray output now reaches
+    # the engine's stderr instead.
+    _STDOUT = os.dup(1)
+    os.dup2(2, 1)
     no_fork = "--no-fork" in sys.argv[2:]
     coverage = "--coverage" in sys.argv[2:] or os.environ.get("TIDERACE_COVERAGE") == "1"
     coverage_lines = ("--coverage-lines" in sys.argv[2:]

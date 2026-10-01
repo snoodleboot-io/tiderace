@@ -34,7 +34,7 @@ pub use fork_worker::ForkWorker;
 pub use memory_governor::MemoryGovernor;
 pub use module_probe::probe_modules;
 pub use safe_set_cache::{SafeModule, SafeSetCache};
-pub use selection::Selection;
+pub use selection::{KeywordExpr, Selection};
 pub use shim_protocol::{read_frame, write_frame, ExecRequest, ExecResponse};
 pub use subinterp_worker::SubInterpWorker;
 pub use subprocess_worker::SubprocessWorker;

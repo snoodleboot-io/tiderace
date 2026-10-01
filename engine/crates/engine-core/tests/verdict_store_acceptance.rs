@@ -42,6 +42,8 @@ fn record(deps: &[&str], pure: Option<bool>, must_fork: bool) -> TestRecord {
         deps: deps.iter().map(|d| (*d).to_string()).collect(),
         pure,
         must_fork,
+        keywords: Vec::new(),
+        skip_origin: String::new(),
     }
 }
 
