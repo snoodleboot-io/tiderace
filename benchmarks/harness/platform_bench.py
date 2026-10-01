@@ -1,7 +1,10 @@
 """Cold timings on the platform this runs on — Windows, macOS, Linux — for the corpora that need
 no private snapshot: pytest, pytest -n auto, and tiderace in each execution tier the platform has.
 
-    ROUNDS=3 python benchmarks/harness/platform_bench.py fx_corpus click cachetools
+    ROUNDS=3 python benchmarks/harness/platform_bench.py fx_corpus cachetools
+
+(click 8.1.7's own suite does not collect under pytest on Python 3.14 — `filterwarnings = error`
+meets a deprecation — so it is not a baseline there; it stays available by name.)
 
 Round-robin interleaved like `timing_rr.py`, the median of the rounds reported, the first round a
 discarded warm-up. Writes `platform-<system>.json` beside this file and, under GitHub Actions, a
@@ -21,9 +24,19 @@ SYSTEM = platform.system().lower()
 out_path = os.path.join(HERE, f"platform-{SYSTEM}.json")
 
 
+# A run that outlasts this is recorded as hung (`rc -1`) and the pass goes on: a tier that
+# cannot end a blocked test is itself a finding, not a reason to lose the other numbers.
+HUNG_AFTER = int(os.environ.get("HUNG_AFTER", "600"))
+
+
 def run(cmd, cwd, env):
     t0 = time.perf_counter()
-    p = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=3600)
+    try:
+        p = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=HUNG_AFTER)
+    except subprocess.TimeoutExpired as exc:
+        tail = ((exc.stdout or b"") + (exc.stderr or b""))
+        tail = tail.decode("utf-8", "replace") if isinstance(tail, bytes) else tail
+        return time.perf_counter() - t0, -1, f"hung: no exit after {HUNG_AFTER}s\n" + tail[-400:]
     return time.perf_counter() - t0, p.returncode, (p.stdout + p.stderr)[-400:]
 
 
@@ -55,8 +68,13 @@ for name in sys.argv[1:] or ["fx_corpus"]:
             if rc not in (0, 1):
                 print("      " + tail.strip().replace("\n", "\n      ")[-300:], flush=True)
     med = {t: statistics.median(x["secs"] for x in v) for t, v in runs.items() if v}
-    print("   medians: " + "  ".join(f"{t} {m:.2f}s" for t, m in med.items()), flush=True)
-    results["corpora"][name] = {"group": group, "runs": runs, "median": med}
+    hung = sorted(t for t, v in runs.items() if any(x["rc"] == -1 for x in v))
+    failed = sorted(t for t, v in runs.items() if any(x["rc"] not in (0, 1, -1) for x in v))
+    print("   medians: " + "  ".join(f"{t} {m:.2f}s" for t, m in med.items())
+          + (f"   hung: {', '.join(hung)}" if hung else "")
+          + (f"   did not run: {', '.join(failed)}" if failed else ""), flush=True)
+    results["corpora"][name] = {"group": group, "runs": runs, "median": med, "hung": hung,
+                                "did_not_run": failed}
     json.dump(results, open(out_path, "w"), indent=1)
 print(f"wrote {out_path}")
 
@@ -68,4 +86,10 @@ if summary:
         fh.write(f"### {SYSTEM} {platform.machine()}, Python {platform.python_version()} — median of {ROUNDS} rounds, seconds\n\n")
         fh.write("| corpus | " + " | ".join(present) + " |\n|--|" + "--:|" * len(present) + "\n")
         for name, c in results["corpora"].items():
-            fh.write(f"| {name} | " + " | ".join(f"{c['median'][t]:.2f}" if t in c["median"] else "—" for t in present) + " |\n")
+            def cell(t):
+                if t in c["hung"]:
+                    return "hung"
+                if t in c["did_not_run"]:
+                    return "did not run"
+                return f"{c['median'][t]:.2f}" if t in c["median"] else "—"
+            fh.write(f"| {name} | " + " | ".join(cell(t) for t in present) + " |\n")
