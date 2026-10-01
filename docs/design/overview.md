@@ -65,7 +65,7 @@ tiderace captures each test's executed-source footprint via CPython's `sys.monit
 ([coverage](coverage.md), ADR-E006) — **not** coverage.py — and folds it into a dependency graph.
 Two complementary layers exploit it:
 
-- **Impact-skip** (the active path, `engine-daemon/persist.rs`): `.tiderace-state.json` stores each
+- **Impact-skip** (the active path, `engine-daemon/state/plan.rs`): `.tiderace-state.json` stores each
   test's dependency files plus the content hash of every touched file. On re-run, only tests whose
   dependencies changed execute. With **no** changes, nothing runs — the wellspring isn't even
   launched. See [impact analysis](impact-analysis.md) and [state & cache](database.md).

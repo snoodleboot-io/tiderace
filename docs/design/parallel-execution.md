@@ -86,8 +86,9 @@ boundary.
 
 ## The parallel pool
 
-The daemon runs **N wellsprings, one per core** (`engine-daemon/pool.rs`), each with its own warm
-import. The `LocalityScheduler` (ADR-E010) packs work into per-worker batches with two goals at once:
+The runner (`engine-core/runner/run.rs`) runs **N workers, one per core**; on Unix they are forked
+off one warm image (`WellspringPool`, `engine-core/exec/tiers/pool.rs`), which the daemon keeps
+between runs (`engine-daemon/warm_image.rs`). The `LocalityScheduler` (ADR-E010) packs work into per-worker batches with two goals at once:
 
 ```mermaid
 flowchart LR
@@ -102,7 +103,8 @@ flowchart LR
 
 A `RoundRobinScheduler` exists as a simpler baseline.
 
-Each batch runs on the platform's isolation backend, chosen once in `pool.rs`:
+Each batch runs on the platform's isolation tier, chosen once per run (`WorkerStrategy::factory`,
+`engine-core/exec/tier.rs`):
 
 - **Unix** — a `ForkWorker`: one warm wellspring, fork-per-test (the model above).
 - **Windows** — no `fork()`, so a `SubprocessWorker` runs the batch **no-fork** (in-process, with

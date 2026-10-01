@@ -73,10 +73,10 @@ flowchart TB
 
     subgraph daemon["engine-daemon (warm server)"]
         EH["EngineHandler"]
-        POOL["pool (parallel wellsprings)"]
-        PERS["persist (.tiderace-state.json)"]
+        POOL["warm_image (the image workers fork from)"]
+        PERS["state (.tiderace-state.json)"]
         WATCH["watch · fs_watcher · invalidator"]
-        RPC["rpc_server · socket · session"]
+        RPC["rpc (server · socket · client) · session"]
     end
 
     subgraph python["Python"]
@@ -162,8 +162,8 @@ flowchart TB
 - **Per-test deadline** — a child exceeding its deadline is killed and reported `Error`.
 - **WatermarkStack** — tracks fixture setup/teardown across scopes so finalizers run in the right order
   as the engine moves between modules/classes.
-- **Parallelism** — the daemon runs **N wellsprings, one per core** (`engine-daemon/pool.rs`), each its
-  own warm import; the [`LocalityScheduler`](#5-scheduling) keeps a module's tests on one worker.
+- **Parallelism** — the runner (`engine-core/runner/run.rs`) runs **N workers, one per core**, forked
+  off one warm image on Unix (`exec/tiers/pool.rs`; the daemon keeps it in `warm_image.rs`); the [`LocalityScheduler`](#5-scheduling) keeps a module's tests on one worker.
 
 > **Historical note:** `fork()` per test (~4.5 ms) was the dominant cost. The isolation ladder (§6) now
 > avoids the fork wherever it's sound, so most tests never pay it.
@@ -314,7 +314,7 @@ flowchart TB
 
 Two complementary layers:
 
-- **Impact-skip (active path, `engine-daemon/persist.rs`).** Per-run, local: `.tiderace-state.json` stores
+- **Impact-skip (active path, `engine-daemon/state/plan.rs`).** Per-run, local: `.tiderace-state.json` stores
   each test's dependency files (from coverage) + file content hashes. On re-run, `changed_files()` +
   `plan()` select only impacted tests; with **no** changes nothing runs — the wellspring isn't even
   launched.
@@ -406,12 +406,12 @@ The authoritative rationale lives in `planning/current/pure-rust-test-engine/des
 | How tests are found | `engine-core/src/collection/regex_collector.rs` |
 | The fixture graph | `engine-core/src/fixtures/fixture_graph.rs`, `layered_resolver.rs` |
 | Scheduling | `engine-core/src/scheduler/locality_scheduler.rs` |
-| The fork model | `engine-core/src/exec/wellspring.rs`, `fork_worker.rs` |
+| The fork model | `engine-core/src/exec/tiers/fork.rs`, `tiers/pool.rs`, `process/shim_process.rs` |
 | The transport seam | `engine-core/src/exec/transport.rs`, `shim_protocol.rs` |
 | The isolation ladder | `py-shim/shim.py` (`static_impurity`, `_restorable`, `_restore_shared`, `Engine.run`) |
-| Impact-skip | `engine-daemon/src/persist.rs`, `engine_handler.rs` (`run_impacted`) |
+| Impact-skip | `engine-daemon/src/state/plan.rs`, `impacted_run.rs` |
 | The cache | `engine-core/src/cache/` (`cache_key.rs`, `tiered_cache.rs`, `purity.rs`) |
-| Parallel pool | `engine-daemon/src/pool.rs` |
-| Daemon modes | `engine-daemon/src/main.rs`, `rpc_server.rs`, `watch.rs` |
+| Parallel pool | `engine-core/src/runner/run.rs`, `exec/tier.rs`, `exec/tiers/` |
+| Daemon modes | `engine-daemon/src/main.rs`, `rpc/server.rs`, `watch.rs` |
 | Authoring / migration | `py-tiderace/tiderace/` (`builtins`, `_resolve.py`, `migrate.py`) |
 | Benchmarks | `benchmarks/RESULTS-3way.md`, `RESULTS-inproc.md`, `bench_3way.sh` |

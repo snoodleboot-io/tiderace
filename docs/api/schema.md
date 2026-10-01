@@ -6,7 +6,7 @@ code.
 
 ## `.tiderace-state.json` — impact-skip state
 
-Written at `<root>/.tiderace-state.json` by the daemon — impact-aware `tiderace-daemon run`, `run --all`, and a `tiderace run` it serves (`engine-daemon/src/persist.rs`).
+Written at `<root>/.tiderace-state.json` by the daemon — impact-aware `tiderace-daemon run`, `run --all`, and a `tiderace run` it serves (`engine-daemon/src/state/plan.rs`).
 It records each test's last outcome and dependency footprint plus the content hash of every touched
 file, so a later run re-executes only the tests whose dependencies changed. A missing or unparseable
 file is treated as a cold start (empty state).
