@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import shlex
 
-from ._config import _declared_ini
+from ._runtime import context
 
 # pytest's `log_format` / `log_date_format` defaults, so `caplog.text` reads the same.
 _DEFAULT_FORMAT = "%(levelname)-8s %(name)s:%(filename)s:%(lineno)d %(message)s"
@@ -33,7 +33,7 @@ _DEFAULT_DATE_FORMAT = "%H:%M:%S"
 
 
 def _ini_text(name: str) -> str | None:
-    value = _declared_ini(name)
+    value = context().ini(name)
     if isinstance(value, (list, tuple)):
         value = " ".join(str(v) for v in value)
     if isinstance(value, str) and value.strip():
@@ -57,7 +57,7 @@ def _configured_level() -> int | None:
             elif arg.startswith("--log-level="):
                 raw = arg.split("=", 1)[1]
     if not raw:
-        raw = _declared_ini("log_level")
+        raw = context().ini("log_level")
     if not raw:
         return None
     if isinstance(raw, str):
@@ -130,7 +130,14 @@ class CapLog:
     def _handler(self) -> _Recorder:  # the pre-TID-97 spelling, kept for anything that reached in
         return self.handler
 
-    # ---- lifecycle, driven by the provider ----
+    # ---- lifecycle: `with CapLog() as log:` ----
+    def __enter__(self):
+        self._start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop()
+
     def _start(self) -> None:
         root = logging.getLogger()
         self._root_prior = root.level

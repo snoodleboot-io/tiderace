@@ -21,9 +21,9 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
-import tiderace
-
 from ._config import RunConfig
+from ._registry import builtin
+from ._runtime import context
 
 
 class PytesterRef:
@@ -72,26 +72,14 @@ class _PytesterRequest:
 
 
 def _rootdir() -> str:
-    import os
-
-    try:
-        import shim
-
-        return getattr(shim, "_ROOT", "") or os.getcwd()
-    except Exception:  # noqa: BLE001
-        return os.getcwd()
+    return context().rootdir
 
 
 def _declared_options() -> dict:
-    try:
-        import shim
-
-        return dict(getattr(shim, "_CLI_OPTIONS", {}) or {})
-    except Exception:  # noqa: BLE001
-        return {}
+    return dict(context().options)
 
 
-@tiderace.provides(type=PytesterRef)
+@builtin(type=PytesterRef)
 def pytester(request, tmp_path_factory, monkeypatch) -> Iterator[Any]:
     """pytest's `pytester`: a `Pytester` over a fresh directory, torn down with its finalizers.
     `request` is the shim's, carrying the node under test, whose name and function name the
@@ -111,7 +99,7 @@ def pytester(request, tmp_path_factory, monkeypatch) -> Iterator[Any]:
         request._finalize()
 
 
-@tiderace.provides(type=TestdirRef)
+@builtin(type=TestdirRef)
 def testdir(pytester) -> Any:
     """pytest's legacy `testdir`, over the same `Pytester`."""
     from _pytest.legacypath import Testdir
