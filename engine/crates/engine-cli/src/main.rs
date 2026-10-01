@@ -114,33 +114,33 @@ fn main() -> ExitCode {
         },
         "run" => match Options::parse(&args[1..]) {
             Ok(opts) => {
+                let selection = engine_core::exec::Selection {
+                    keyword: opts.keyword_expr.clone(),
+                    marker: opts.marker_expr.clone(),
+                    strict_markers: opts.strict_markers,
+                };
                 // Handed to the shim through the environment: it is the process that reads the
                 // project's own `addopts`, and it applies the same precedence pytest does — an
-                // expression on the command line wins over one in the config (TID-59).
-                if let Some(expr) = &opts.marker_expr {
-                    // SAFETY: single-threaded here; workers are spawned further down.
-                    unsafe { std::env::set_var("TIDERACE_MARKER_EXPR", expr) };
-                }
-                if let Some(expr) = &opts.keyword_expr {
-                    // SAFETY: as above.
-                    unsafe { std::env::set_var("TIDERACE_KEYWORD_EXPR", expr) };
-                }
-                if opts.strict_markers {
-                    // The same route `-m` takes (TID-67): a project with no config file has
-                    // nowhere else to say it, and the shim is what enforces it.
-                    // SAFETY: as above.
-                    unsafe { std::env::set_var("TIDERACE_STRICT_MARKERS", "1") };
-                }
+                // expression on the command line wins over one in the config (TID-59); strict
+                // markers take the same route (TID-67), since a project with no config file has
+                // nowhere else to say it. Only what is set is written: an absent `-k` leaves
+                // whatever the environment already carries.
+                // SAFETY: single-threaded here; workers are spawned further down, and the guard
+                // lives until the run is over.
+                let _selection_env = unsafe {
+                    engine_core::exec::Selection {
+                        keyword: selection.keyword.clone(),
+                        marker: selection.marker.clone(),
+                        strict_markers: selection.strict_markers,
+                    }
+                    .apply_env_set_only()
+                };
                 // A run under `TIDERACE_NO_DAEMON` stays in this process — a gate that must not
                 // share an image with earlier runs. A filtered run goes through the daemon with
                 // its selection (TID-90): the image's workers apply it after the fork.
-                let daemon = std::env::var_os("TIDERACE_NO_DAEMON").is_none().then(|| {
-                    engine_core::exec::Selection {
-                        keyword: opts.keyword_expr.clone(),
-                        marker: opts.marker_expr.clone(),
-                        strict_markers: opts.strict_markers,
-                    }
-                });
+                let daemon = std::env::var_os("TIDERACE_NO_DAEMON")
+                    .is_none()
+                    .then_some(selection);
                 cmd_run(
                     &opts.root,
                     &opts.plan,
