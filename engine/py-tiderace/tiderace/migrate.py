@@ -17,24 +17,27 @@ import ast
 import sys
 from dataclasses import dataclass, field
 
-# pytest builtins tiderace now provides natively (ROADMAP-v2 B1): name -> tiderace.builtins type. A
-# request for one is rewritten to a typed param (`monkeypatch` -> `monkeypatch: MonkeyPatch`) wired by
-# type, and the matching `from tiderace.builtins import ...` is injected. `tmpdir` maps to `TmpPath`
-# (pathlib) — its legacy py.path methods (`.join`, `.strpath`, …) still need a manual port, so it's
-# mapped *with a caveat*, not silently.
-BUILTIN_PROVIDERS = {
-    "monkeypatch": "MonkeyPatch",
-    "tmp_path": "TmpPath",
-    "tmpdir": "TmpPath",
-    "capsys": "Capsys",
-    "capfd": "Capfd",
-}
+def _builtin_tables() -> tuple[dict, set]:
+    """What `tiderace.builtins` provides, by pytest's fixture name → the tiderace type to annotate
+    with (ROADMAP-v2 B1), derived from the builtin registry so a new builtin is mapped the day it
+    is added (TID-111). A request for one is rewritten to a typed param (`monkeypatch` ->
+    `monkeypatch: MonkeyPatch`) wired by type, and the matching `from tiderace.builtins import ...`
+    is injected. `tmpdir` and `tmpdir_factory` map to the pathlib types — their legacy py.path
+    methods (`.join`, `.strpath`, …) still need a manual port, so they are mapped *with a caveat*,
+    not silently. The second table is pytest's builtins tiderace has no equivalent for."""
+    from tiderace.builtins import providers
 
-# pytest builtins tiderace has no native equivalent for (yet) — requesting one can't auto-map.
-BUILTIN_FIXTURES = {
-    "request", "tmp_path_factory", "tmpdir_factory",
-    "caplog", "recwarn", "pytestconfig", "cache", "doctest_namespace",
-}
+    mapped = {}
+    for provider in providers():
+        spec = provider.__tiderace_provider__
+        mapped[spec.name] = getattr(spec.provides, "__name__", None) or str(spec.provides)
+    mapped["tmpdir"] = "TmpPath"  # provided as `Any`: py.path.local when importable, else TmpPath
+    return mapped, {"request", "cache", "doctest_namespace"}
+
+
+BUILTIN_PROVIDERS, BUILTIN_FIXTURES = _builtin_tables()
+# The two legacy py.path builtins: mapped to the pathlib type, with the caveat in the report.
+_LEGACY_PATH_BUILTINS = {"tmpdir", "tmpdir_factory"}
 
 
 @dataclass
@@ -399,7 +402,8 @@ class _Migrator(ast.NodeTransformer):
                 tname = BUILTIN_PROVIDERS[arg.arg]
                 arg.annotation = ast.Name(id=tname, ctx=ast.Load())
                 self.used_builtins.add(tname)
-                caveat = " — port py.path calls (.join/.strpath) to pathlib" if arg.arg == "tmpdir" else ""
+                caveat = (" — port py.path calls (.join/.strpath) to pathlib"
+                          if arg.arg in _LEGACY_PATH_BUILTINS else "")
                 self.report.mapped(node.lineno, f"builtin `{arg.arg}` → `{arg.arg}: {tname}` "
                                    f"(tiderace.builtins, type-DI) in {node.name}{caveat}")
                 continue

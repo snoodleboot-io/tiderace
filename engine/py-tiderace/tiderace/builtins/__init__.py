@@ -13,6 +13,9 @@ they are available to every test without an import in the test's own conftest.
 
     def test_writes(p: TmpPath):
         (p / "f.txt").write_text("hi")  # fresh dir, removed at teardown
+
+Adding one is a `@builtin` provider (TID-111): `providers()` and `__all__` are derived from the
+registry, and `tiderace migrate` derives its builtin table from the same place.
 """
 from __future__ import annotations
 
@@ -21,17 +24,17 @@ import shutil
 import tempfile
 from typing import Any, Iterator
 
-import tiderace
-
 from ._capture import Capfd, Capsys, CaptureResult
 from ._config import NullPluginManager, RunConfig
-from ._pytester import pytester, testdir
 from ._logging import CapLog
 from ._monkeypatch import MonkeyPatch
 from ._paths import TmpPath
+from ._registry import builtin, providers
+from ._runtime import RunContext, context, set_context
 from ._warnings import Warnings
 
-__all__ = [
+# The types a test names. The provider names in `__all__` come from the registry, below.
+_TYPES = [
     "MonkeyPatch",
     "TmpPath",
     "Capsys",
@@ -41,24 +44,15 @@ __all__ = [
     "Warnings",
     "RunConfig",
     "NullPluginManager",
-    "monkeypatch",
-    "tmp_path",
-    "capsys",
-    "capfd",
-    "caplog",
-    "recwarn",
-    "tmpdir",
-    "tmp_path_factory",
-    "tmpdir_factory",
     "TmpPathFactory",
-    "pytestconfig",
-    "pytester",
-    "testdir",
-    "providers",
+    "TmpdirFactory",
+    "PytesterRef",
+    "TestdirRef",
+    "RunContext",
 ]
 
 
-@tiderace.provides
+@builtin
 def monkeypatch() -> Iterator[MonkeyPatch]:
     """Function-scoped record-and-undo patcher; all mutations reversed at teardown."""
     mp = MonkeyPatch()
@@ -66,7 +60,7 @@ def monkeypatch() -> Iterator[MonkeyPatch]:
     mp.undo()
 
 
-@tiderace.provides
+@builtin
 def tmp_path() -> Iterator[TmpPath]:
     """Function-scoped fresh temp directory; the whole tree is removed at teardown."""
     raw = tempfile.mkdtemp(prefix="tiderace-")
@@ -75,93 +69,61 @@ def tmp_path() -> Iterator[TmpPath]:
     shutil.rmtree(raw, ignore_errors=True)
 
 
-@tiderace.provides
+@builtin
 def capsys() -> Iterator[Capsys]:
     """Function-scoped sys-level stdout/stderr capture; real streams restored at teardown."""
-    cap = Capsys()
-    cap._start()
-    yield cap
-    cap._stop()
+    with Capsys() as cap:
+        yield cap
 
 
-@tiderace.provides
+@builtin
 def capfd() -> Iterator[Capfd]:
     """Function-scoped fd-level stdout/stderr capture (catches C-ext writes); restored at teardown."""
-    cap = Capfd()
-    cap._start()
-    yield cap
-    cap._stop()
+    with Capfd() as cap:
+        yield cap
 
 
-@tiderace.provides
+@builtin
 def caplog() -> Iterator[CapLog]:
     """Function-scoped log capture; the handler is removed and levels restored at teardown."""
-    cap = CapLog()
-    cap._start()
-    yield cap
-    cap._stop()
+    with CapLog() as cap:
+        yield cap
 
 
-@tiderace.provides
+@builtin
 def recwarn() -> Iterator[Warnings]:
     """Function-scoped warning recorder; the warnings filter is restored at teardown.
 
     Native form: `w: Warnings`. `recwarn` is pytest's name for the same resource."""
-    rec = Warnings()
-    rec._start()
-    yield rec
-    rec._stop()
+    with Warnings() as rec:
+        yield rec
 
 
-@tiderace.provides
+def _legacy_path(path: str | os.PathLike) -> Any:
+    """`py.path.local` for `path` when an implementation is importable — pytest's vendored one,
+    else the standalone `py` package — otherwise the modern `TmpPath`, which covers the common
+    `str()` / `join()`-free usage rather than failing the test outright."""
+    try:
+        from _pytest._py.path import LocalPath  # pytest vendors py.path
+    except Exception:  # noqa: BLE001 — no vendored py.path
+        try:
+            from py.path import local as LocalPath  # the standalone `py` package
+        except Exception:  # noqa: BLE001 — neither: hand back the modern object
+            return TmpPath(path)
+    return LocalPath(str(path))
+
+
+@builtin
 def tmpdir() -> Iterator[Any]:
     """pytest's legacy `py.path.local` temp directory, for suites that still ask for it.
 
     `tmp_path` is the modern spelling and the one to migrate to — this exists so a suite written
     before `pathlib` runs unmodified. When no `py.path` implementation is importable the resource
-    resolves to a `TmpPath`, which covers the common `str()` / `join()`-free usage rather than
-    failing the test outright.
+    resolves to a `TmpPath` (see `_legacy_path`).
     """
     raw = tempfile.mkdtemp(prefix="tiderace-")
-    try:
-        from _pytest._py.path import LocalPath  # pytest vendors py.path
-        value: Any = LocalPath(raw)
-    except Exception:  # noqa: BLE001 — no vendored py.path
-        try:
-            from py.path import local as LocalPath  # the standalone `py` package
-
-            value = LocalPath(raw)
-        except Exception:  # noqa: BLE001 — neither: hand back the modern object
-            value = TmpPath(raw)
-    yield value
+    yield _legacy_path(raw)
     shutil.rmtree(raw, ignore_errors=True)
-
-
-@tiderace.provides
-def pytestconfig() -> RunConfig:
-    """Session-wide run configuration: declared options and the project root.
-
-    Native form: `config: RunConfig`. Values come from what the engine already knows — the project's
-    `addopts` and any `pytest_addoption` defaults a conftest declared (TID-14)."""
-    return RunConfig(_declared_options(), _rootdir())
-
-
-def _declared_options() -> dict:
-    """Option defaults the shim collected from conftest `pytest_addoption` hooks, if it is driving."""
-    try:
-        import shim  # the engine's own module, present only when the shim is running this
-    except Exception:  # noqa: BLE001 — imported directly (tests of this package); no options known
-        return {}
-    return dict(getattr(shim, "_CLI_OPTIONS", {}) or {})
-
-
-def _rootdir() -> str:
-    try:
-        import shim
-
-        return getattr(shim, "_ROOT", "") or os.getcwd()
-    except Exception:  # noqa: BLE001
-        return os.getcwd()
 
 
 class TmpPathFactory:
@@ -192,7 +154,7 @@ class TmpPathFactory:
                 n += 1
 
 
-@tiderace.provides(scope="session")
+@builtin(scope="session")
 def tmp_path_factory() -> Iterator[TmpPathFactory]:
     """Session-scoped factory of temp directories (pytest's `tmp_path_factory`); the base tree is
     removed when the session ends. A class-scoped fixture that needs a directory for the whole
@@ -203,41 +165,41 @@ def tmp_path_factory() -> Iterator[TmpPathFactory]:
         shutil.rmtree(str(factory._base), ignore_errors=True)
 
 
-class _TmpdirFactory:
+class TmpdirFactory:
     """The legacy `tmpdir_factory`: `tmp_path_factory` handing out `py.path.local` when one is
     importable, `TmpPath` otherwise (as `tmpdir` does)."""
 
     def __init__(self, inner: TmpPathFactory) -> None:
         self._inner = inner
 
-    @staticmethod
-    def _legacy(path: TmpPath) -> Any:
-        try:
-            from _pytest._py.path import LocalPath
-
-            return LocalPath(str(path))
-        except Exception:  # noqa: BLE001 — no vendored py.path
-            try:
-                from py.path import local as LocalPath
-
-                return LocalPath(str(path))
-            except Exception:  # noqa: BLE001
-                return path
-
     def getbasetemp(self) -> Any:
-        return self._legacy(self._inner.getbasetemp())
+        return _legacy_path(self._inner.getbasetemp())
 
     def mktemp(self, basename: str, numbered: bool = True) -> Any:
-        return self._legacy(self._inner.mktemp(basename, numbered))
+        return _legacy_path(self._inner.mktemp(basename, numbered))
 
 
-@tiderace.provides(scope="session")
-def tmpdir_factory(tmp_path_factory) -> _TmpdirFactory:
+_TmpdirFactory = TmpdirFactory  # the pre-TID-111 spelling
+
+
+@builtin(scope="session")
+def tmpdir_factory(tmp_path_factory) -> TmpdirFactory:
     """pytest's legacy `tmpdir_factory`, over `tmp_path_factory`."""
-    return _TmpdirFactory(tmp_path_factory)
+    return TmpdirFactory(tmp_path_factory)
 
 
-def providers() -> list:
-    """The builtin provider callables, for the shim to register globally (always-available)."""
-    return [monkeypatch, tmp_path, capsys, capfd, caplog, recwarn, tmpdir, tmp_path_factory,
-            tmpdir_factory, pytestconfig, pytester, testdir]
+@builtin
+def pytestconfig() -> RunConfig:
+    """Session-wide run configuration: declared options and the project root.
+
+    Native form: `config: RunConfig`. Values come from what the engine already knows — the project's
+    `addopts` and any `pytest_addoption` defaults a conftest declared (TID-14)."""
+    ctx = context()
+    return RunConfig(dict(ctx.options), ctx.rootdir)
+
+
+# Registered last, as they always were: they need pytest in the suite's interpreter, and they are
+# the two builtins defined in their own module (TID-105).
+from ._pytester import PytesterRef, TestdirRef, pytester, testdir  # noqa: E402
+
+__all__ = _TYPES + [p.__name__ for p in providers()] + ["builtin", "providers", "context", "set_context"]

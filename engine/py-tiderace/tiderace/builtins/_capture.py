@@ -31,6 +31,14 @@ class Capsys:
         self._err = io.StringIO()
         self._saved: tuple | None = None
 
+
+    def __enter__(self):
+        self._start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop()
+
     def _start(self) -> None:
         self._saved = (sys.stdout, sys.stderr)
         sys.stdout, sys.stderr = self._out, self._err
@@ -61,6 +69,14 @@ class Capfd:
         self._saved_err: int | None = None
         self._read_out = 0  # byte offsets already drained
         self._read_err = 0
+
+
+    def __enter__(self):
+        self._start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop()
 
     def _start(self) -> None:
         sys.stdout.flush()

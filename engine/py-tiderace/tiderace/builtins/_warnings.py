@@ -19,7 +19,14 @@ class Warnings:
         self._catcher: Any = None
         self._records: list = []
 
-    # ---- lifecycle (driven by the provider) ----
+    # ---- lifecycle: `with Warnings() as w:` ----
+    def __enter__(self):
+        self._start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop()
+
     def _start(self) -> None:
         self._catcher = warnings.catch_warnings(record=True)
         self._records = self._catcher.__enter__()
