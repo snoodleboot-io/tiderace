@@ -5,6 +5,8 @@
 name: bench-platforms
 
 on:
+  push:
+    branches: [bench/platforms]  # while the workflow is being proven; removed before merge
   workflow_dispatch:
     inputs:
       rounds:
@@ -58,14 +60,14 @@ jobs:
       - name: Time the platform
         shell: bash
         env:
-          ROUNDS: ${{ inputs.rounds }}
+          ROUNDS: ${{ inputs.rounds || '3' }}
           TIDERACE_PY_FX_CORPUS: python
           TIDERACE_PY_CLICK: python
           TIDERACE_PY_CACHETOOLS: python
         run: |
           PY=$(python -c "import sys; print(sys.executable)")
           export TIDERACE_PY_FX_CORPUS="$PY" TIDERACE_PY_CLICK="$PY" TIDERACE_PY_CACHETOOLS="$PY"
-          python benchmarks/harness/platform_bench.py ${{ inputs.corpora }}
+          python benchmarks/harness/platform_bench.py ${{ inputs.corpora || 'fx_corpus click cachetools' }}
       - name: Keep the numbers
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
