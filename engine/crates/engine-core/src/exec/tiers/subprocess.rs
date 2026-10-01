@@ -13,14 +13,13 @@
 //! scheduling concern — adding it is a pure extension).
 
 use std::path::{Path, PathBuf};
-use std::process::ChildStdin;
 use std::time::Duration;
 
 use crate::domain::{TestItem, TestResult};
 use crate::error::{EngineError, Result};
 use crate::exec::process::{ShimLaunch, ShimMode, ShimProcess, ShimTarget};
 use crate::exec::transport::{
-    run_batch_lost, BudgetedTransport, LostWorker, ShimTransport, LOST_WORKER_MARGIN_MS,
+    run_batch_lost, Live, LostWorker, PipeTransport, ShimTransport, LOST_WORKER_MARGIN_MS,
 };
 use crate::exec::worker::Worker;
 use crate::exec::worker_caps::WorkerCaps;
@@ -118,7 +117,7 @@ impl SubprocessWorker {
         // what CPython can interrupt; a test blocked in a C call is ended here, by the budget —
         // the only per-test deadline Windows has, where the shim cannot arm a timer signal.
         let budget = Duration::from_millis(deadline_ms.saturating_add(LOST_WORKER_MARGIN_MS));
-        let mut transport = BudgetedTransport::new(stdin, stdout, budget);
+        let mut transport = PipeTransport::new(stdin, stdout).with_budget(budget);
         transport.ready()?;
         Ok(NoForkProc { transport, process })
     }
@@ -161,7 +160,7 @@ impl Worker for SubprocessWorker {
 /// first (EOF → the shim runs its wider-scope finalizers once and exits), then the process,
 /// which kills it if it was lost — still inside the test that overran — and reaps it.
 struct NoForkProc {
-    transport: BudgetedTransport<ChildStdin>,
+    transport: Live,
     process: ShimProcess,
 }
 

@@ -28,7 +28,7 @@ use std::collections::HashSet;
 
 use crate::domain::{NodeId, TestItem, TestResult};
 use crate::error::{EngineError, Result};
-use crate::exec::process::{ShimLaunch, ShimMode, ShimProcess, ShimTarget};
+use crate::exec::process::{reap_lost, ShimLaunch, ShimMode, ShimProcess, ShimTarget};
 use crate::exec::transport::{PipeTransport, ShimTransport};
 use crate::exec::{Selection, Worker};
 
@@ -43,7 +43,7 @@ const IMPORT_DEADLINE: Duration = Duration::from_secs(300);
 const WORKER_DEADLINE: Duration = Duration::from_secs(30);
 
 /// A transport to one pooled worker.
-pub type PooledTransport = PipeTransport<UnixStream, BufReader<UnixStream>>;
+pub type PooledTransport = PipeTransport<UnixStream>;
 
 /// The parent process plus its accepted worker connections.
 pub struct WellspringPool {
@@ -403,7 +403,7 @@ impl Worker for PooledWorker {
         // — blocked inside a C call — leaves the worker silent. The read gives up a margin after
         // the deadline, the worker is killed, and the batch is reported rather than the run hung.
         let budget = Duration::from_millis(self.deadline_ms.saturating_add(LOST_WORKER_MARGIN_MS));
-        let _ = self.transport.set_read_timeout(Some(budget));
+        self.transport.set_budget(Some(budget));
         let (results, fault) = crate::exec::transport::run_batch_lost(
             &mut self.transport,
             items,
@@ -416,8 +416,7 @@ impl Worker for PooledWorker {
         if fault.is_some() {
             self.lost = true;
             if let Some(pid) = self.transport.peer_pid() {
-                // SAFETY: a plain kill(2) on a pid this pool's parent forked for this run.
-                unsafe { kill(pid as i32, 9) };
+                reap_lost(pid);
             }
             self.transport.close_input();
         }
@@ -436,7 +435,3 @@ impl Worker for PooledWorker {
 /// How long past the per-test deadline a silent worker is waited on before it is declared lost:
 /// the shim's own deadline fires first when it can, and reports; this is for when it cannot.
 use crate::exec::transport::LOST_WORKER_MARGIN_MS;
-
-unsafe extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
-}

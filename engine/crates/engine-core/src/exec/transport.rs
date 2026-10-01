@@ -14,16 +14,17 @@
 //! a future in-process / FFI backend (Rust-as-Python-extension, ADR ②) slots behind without touching
 //! any `Worker`.
 
-use std::io::{BufReader, Read, Write};
-use std::process::{ChildStdin, ChildStdout};
-use std::sync::mpsc;
+use std::io::{Read, Write};
+use std::process::ChildStdin;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::domain::{NodeId, Outcome, TestItem, TestResult};
+use crate::domain::{NodeId, TestItem, TestResult};
 use crate::error::{EngineError, Result};
-use crate::exec::shim_protocol::{read_frame, ready_info, write_frame, ExecRequest, ExecResponse};
+use crate::exec::process::BudgetedReader;
+use crate::exec::results::NotRun;
+use crate::exec::shim_protocol::{ready_info, write_frame, ExecRequest, ExecResponse};
 
 /// What a shim reports in its readiness handshake (the first frame it sends).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +44,13 @@ pub trait ShimTransport {
 
     /// Send one [`ExecRequest`] and block for its [`ExecResponse`].
     fn exchange(&mut self, req: &ExecRequest<'_>) -> Result<ExecResponse>;
+
+    /// Send a batch and block for every response, in request order. The default is one
+    /// exchange after another; a transport whose shim takes whole batches (the sub-interpreter
+    /// pool) answers them in one frame.
+    fn exchange_batch(&mut self, reqs: &[ExecRequest<'_>]) -> Result<Vec<ExecResponse>> {
+        reqs.iter().map(|req| self.exchange(req)).collect()
+    }
 }
 
 /// What a batch does when its worker stops answering mid-batch (TID-93).
@@ -113,246 +121,138 @@ pub(crate) fn run_batch_lost<T: ShimTransport + ?Sized>(
                 // The worker is gone — hung past its deadline, or dead. Say so per node rather
                 // than losing the batch (TID-93): this node names the fault, the rest name it.
                 let fault = format!("{e}");
-                let duration_ms = start.elapsed().as_millis() as u64;
-                results.push(TestResult::new(
+                results.push(TestResult::not_run(
                     item.node_id.clone(),
-                    Outcome::Error,
-                    duration_ms,
-                    fault.clone(),
+                    NotRun::WorkerFault {
+                        fault: fault.clone(),
+                    },
+                    start.elapsed(),
                 ));
                 for later in &items[index + 1..] {
-                    results.push(TestResult::new(
+                    results.push(TestResult::not_run(
                         later.node_id.clone(),
-                        Outcome::Error,
-                        0,
-                        format!("not run: the worker was lost at {} ({fault})", item.node_id),
+                        NotRun::AfterLostWorker {
+                            at: item.node_id.clone(),
+                            fault: fault.clone(),
+                        },
+                        Duration::ZERO,
                     ));
                 }
                 return Ok((results, Some(fault)));
             }
             Err(e) => return Err(e),
         };
-        let duration_ms = start.elapsed().as_millis() as u64;
-        results.extend(results_for(item, resp, duration_ms));
+        results.extend(resp.into_results(item, start.elapsed()));
     }
     Ok((results, None))
 }
 
-#[cfg(unix)]
-impl PipeTransport<std::os::unix::net::UnixStream, BufReader<std::os::unix::net::UnixStream>> {
-    /// How long a read on this socket waits before it fails (TID-93). The two halves are one
-    /// socket, so setting it on the write half covers the reads.
-    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
-        match self.stdin.as_ref() {
-            Some(sock) => sock.set_read_timeout(timeout),
-            None => Ok(()),
-        }
+/// The write half of a transport, and how it is closed. Dropping a pipe's write end is its
+/// EOF; a socket shared with the reader thread (the pool's workers) must be shut down for
+/// writing explicitly, or the worker never sees EOF while that thread still holds a clone.
+pub trait WriteHalf: Write {
+    /// Tell the peer no more will be written.
+    fn close(self)
+    where
+        Self: Sized,
+    {
     }
 }
 
-/// The production transport: length-prefixed JSON frames over a pair of byte streams — in practice a
-/// child process's `stdin`/`stdout` ([`Live`]), but generic over any `Write`/`Read` so an in-memory
-/// pipe can stand in for the process in a test (see this module's loopback test).
-pub struct PipeTransport<W: Write, R: Read> {
-    /// `Option` so [`close_input`](Self::close_input) can drop the write half (→ shim EOF/exit) *before*
-    /// the owner reaps the child — the ordering that avoids a deadlock on shutdown.
+impl WriteHalf for ChildStdin {}
+impl WriteHalf for std::io::PipeWriter {}
+#[cfg(unix)]
+impl WriteHalf for std::os::unix::net::UnixStream {
+    fn close(self) {
+        let _ = self.shutdown(std::net::Shutdown::Write);
+    }
+}
+
+/// The production transport: length-prefixed JSON frames over a write half and a read half —
+/// a child process's `stdin`/`stdout` ([`Live`]), a pooled worker's Unix socket, or an in-memory
+/// pipe in a test. The read half is drained by a [`BudgetedReader`] thread, so a reply can be
+/// waited for at most a [`budget`](Self::with_budget) (TID-98): the one per-test deadline that
+/// holds when the shim cannot interrupt its own test, and the only one Windows has.
+pub struct PipeTransport<W: WriteHalf> {
+    /// `Option` so [`close_input`](Self::close_input) can drop the write half (→ shim EOF/exit)
+    /// *before* the owner reaps the child — the ordering that avoids a deadlock on shutdown.
     stdin: Option<W>,
-    stdout: R,
-    /// The shim's pid as its ready frame reported it (`-1` before the handshake or when unknown):
-    /// what a worker that stops answering is killed by (TID-93).
+    frames: BudgetedReader,
+    /// How long a reply may take; `None` waits as long as it takes.
+    budget: Option<Duration>,
+    /// The shim's pid as its ready frame reported it: what a worker that stops answering is
+    /// killed by (TID-93).
     peer_pid: Option<u32>,
 }
 
-/// The concrete transport over a child process's pipes (what `Wellspring` holds).
-pub type Live = PipeTransport<ChildStdin, BufReader<ChildStdout>>;
+/// The concrete transport over a child process's pipes.
+pub type Live = PipeTransport<ChildStdin>;
 
 /// How long past the per-test deadline a worker may stay silent before it is given up on
 /// (TID-93): the deadline itself is the shim's to enforce; this is the engine's margin over it.
 pub(crate) const LOST_WORKER_MARGIN_MS: u64 = 10_000;
 
-/// [`PipeTransport`] with a read budget (TID-98): a thread drains the read half into a channel,
-/// so a reply that does not arrive within `budget` is an error — the one guarantee a worker
-/// blocked inside a C call cannot defeat from the inside, and the only deadline Windows has.
-/// A Unix socket takes a read timeout directly (the warm pool); a child's stdout pipe does not,
-/// on any platform.
-pub struct BudgetedTransport<W: Write> {
-    stdin: Option<W>,
-    frames: mpsc::Receiver<std::io::Result<Option<std::vec::Vec<u8>>>>,
-    budget: Duration,
-    peer_pid: Option<u32>,
-    lost: bool,
-}
-
-impl<W: Write> BudgetedTransport<W> {
-    pub fn new<R: Read + Send + 'static>(stdin: W, mut stdout: R, budget: Duration) -> Self {
-        let (tx, rx) = mpsc::channel();
-        // Blocks in `read` until the child writes or exits; a hung child holds it until the
-        // child is killed, which the owner does once a reply is overdue.
-        std::thread::Builder::new()
-            .name("tiderace-reader".into())
-            .spawn(move || loop {
-                let frame = read_raw_frame(&mut stdout);
-                let last = !matches!(frame, Ok(Some(_)));
-                if tx.send(frame).is_err() || last {
-                    break;
-                }
-            })
-            .expect("spawn the transport reader");
+impl<W: WriteHalf> PipeTransport<W> {
+    /// Wrap a write half and a read half. Does not perform the handshake; call
+    /// [`ready`](ShimTransport::ready) for that.
+    pub fn new<R: Read + Send + 'static>(stdin: W, stdout: R) -> Self {
         Self {
             stdin: Some(stdin),
-            frames: rx,
-            budget,
+            frames: BudgetedReader::spawn(stdout, "tiderace-reader"),
+            budget: None,
             peer_pid: None,
-            lost: false,
         }
+    }
+
+    /// Wait at most `budget` for each reply; past it the reply is an error and the transport
+    /// is [lost](Self::is_lost).
+    pub fn with_budget(mut self, budget: Duration) -> Self {
+        self.budget = Some(budget);
+        self
+    }
+
+    /// [`with_budget`](Self::with_budget), on a transport already in hand.
+    pub fn set_budget(&mut self, budget: Option<Duration>) {
+        self.budget = budget;
     }
 
     /// Whether a reply was overdue: the worker is to be killed, not waited for.
     pub fn is_lost(&self) -> bool {
-        self.lost
+        self.frames.is_lost()
     }
 
-    /// Close the write half (→ shim sees EOF and exits). Idempotent.
-    pub fn close_input(&mut self) {
-        self.stdin.take();
-    }
-
-    fn next_frame<T: serde::de::DeserializeOwned>(
-        &mut self,
-        wait: Option<Duration>,
-    ) -> Result<Option<T>> {
-        let received = match wait {
-            Some(d) => self.frames.recv_timeout(d).map_err(|e| match e {
-                mpsc::RecvTimeoutError::Timeout => Some(d),
-                mpsc::RecvTimeoutError::Disconnected => None,
-            }),
-            None => self.frames.recv().map_err(|_| None),
-        };
-        match received {
-            Ok(Ok(Some(bytes))) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|e| EngineError::Exec(e.to_string())),
-            Ok(Ok(None)) | Err(None) => Ok(None),
-            Ok(Err(e)) => Err(EngineError::Io(e)),
-            Err(Some(budget)) => {
-                self.lost = true;
-                Err(EngineError::Exec(format!(
-                    "no answer from the worker within {:.1}s — its test overran the deadline \
-                     and the in-process timeout could not interrupt it; the worker is killed \
-                     and reported lost (TID-98)",
-                    budget.as_secs_f64()
-                )))
-            }
-        }
-    }
-}
-
-impl<W: Write> ShimTransport for BudgetedTransport<W> {
-    fn ready(&mut self) -> Result<ReadyInfo> {
-        // The import of the suite happens before the ready frame: no budget on this one.
-        let frame: Value = self
-            .next_frame(None)?
-            .ok_or_else(|| EngineError::Exec("shim sent no ready frame".into()))?;
-        let info = ready_info(frame)?;
-        self.peer_pid = info.pid;
-        Ok(info)
-    }
-
-    fn exchange(&mut self, req: &ExecRequest<'_>) -> Result<ExecResponse> {
-        if self.lost {
-            return Err(EngineError::Exec("the worker was lost".into()));
-        }
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| EngineError::Exec("shim already shut down".into()))?;
-        write_frame(stdin, req)?;
-        self.next_frame(Some(self.budget))?
-            .ok_or_else(|| EngineError::Exec("shim closed mid-run".into()))
-    }
-}
-
-/// The results one shim response stands for: the node's own, or one per case when the node
-/// expanded (TID-25) — and none at all for an empty expansion, which is how a deselected node and
-/// a class that inherits nothing report themselves. Shared by every transport (TID-104): a tier
-/// that read a response as one outcome counted a deselected node as a pass.
-pub(crate) fn results_for(
-    item: &TestItem,
-    resp: ExecResponse,
-    duration_ms: u64,
-) -> Vec<TestResult> {
-    // A parametrized node reports one result per case (TID-25). The cases already ran and forked
-    // individually, so this reports what was executed rather than the worst of it.
-    if resp.expanded || !resp.variants.is_empty() {
-        return resp
-            .variants
-            .into_iter()
-            .map(|v| {
-                let touched = v.coverage.keys().cloned().collect();
-                TestResult::new(v.node_id, v.outcome, v.duration_ms, v.detail)
-                    .with_touched(touched)
-                    .with_pure(v.pure)
-                    .with_must_fork(v.must_fork)
-                    .with_keywords(v.keywords)
-                    // These ids did not come from the static collector — they were produced here, by
-                    // expanding a parametrized node or an inherited class (TID-55).
-                    .with_expanded(true)
-            })
-            .collect();
-    }
-    let touched = resp.coverage.keys().cloned().collect();
-    vec![
-        TestResult::new(item.node_id.clone(), resp.outcome, duration_ms, resp.detail)
-            .with_touched(touched)
-            .with_pure(resp.pure)
-            .with_must_fork(resp.must_fork)
-            .with_skip_origin(resp.skip_origin)
-            .with_keywords(resp.keywords),
-    ]
-}
-
-/// One frame's payload bytes, `None` at EOF — [`read_frame`] without the parse, for a reader
-/// thread that cannot know the type its owner wants.
-fn read_raw_frame<R: Read>(r: &mut R) -> std::io::Result<Option<std::vec::Vec<u8>>> {
-    let mut header = [0u8; 4];
-    if let Err(e) = r.read_exact(&mut header) {
-        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            return Ok(None);
-        }
-        return Err(e);
-    }
-    let len = u32::from_le_bytes(header) as usize;
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf)?;
-    Ok(Some(buf))
-}
-
-impl<W: Write, R: Read> PipeTransport<W, R> {
-    /// Wrap a write half and an (already-buffered) read half. Does not perform the handshake; call
-    /// [`ready`](ShimTransport::ready) for that.
-    pub fn new(stdin: W, stdout: R) -> Self {
-        Self {
-            stdin: Some(stdin),
-            stdout,
-            peer_pid: None,
-        }
-    }
-
-    /// The shim's pid from the ready frame, `-1` when unknown.
+    /// The shim's pid from the ready frame, when it reported one.
     pub fn peer_pid(&self) -> Option<u32> {
         self.peer_pid
     }
 
-    /// Close the write half (→ shim sees EOF and exits, running wider-scope finalizers once). Idempotent.
-    /// Owners call this from `Drop` *before* reaping the child.
+    /// Close the write half (→ shim sees EOF and exits, running wider-scope finalizers once).
+    /// Idempotent. Owners call this from `Drop` *before* reaping the child.
     pub fn close_input(&mut self) {
-        self.stdin.take();
+        if let Some(w) = self.stdin.take() {
+            w.close();
+        }
+    }
+
+    fn input(&mut self) -> Result<&mut W> {
+        self.stdin
+            .as_mut()
+            .ok_or_else(|| EngineError::Exec("shim already shut down".into()))
     }
 }
 
-impl<W: Write, R: Read> ShimTransport for PipeTransport<W, R> {
+impl<W: WriteHalf> Drop for PipeTransport<W> {
+    fn drop(&mut self) {
+        self.close_input();
+    }
+}
+
+impl<W: WriteHalf> ShimTransport for PipeTransport<W> {
     fn ready(&mut self) -> Result<ReadyInfo> {
-        let frame: Value = read_frame(&mut self.stdout)?
+        // The import of the suite happens before the ready frame: no budget on this one.
+        let frame: Value = self
+            .frames
+            .next(None)?
             .ok_or_else(|| EngineError::Exec("shim sent no ready frame".into()))?;
         let info = ready_info(frame)?;
         self.peer_pid = info.pid;
@@ -360,20 +260,23 @@ impl<W: Write, R: Read> ShimTransport for PipeTransport<W, R> {
     }
 
     fn exchange(&mut self, req: &ExecRequest<'_>) -> Result<ExecResponse> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| EngineError::Exec("shim already shut down".into()))?;
-        write_frame(stdin, req)?;
-        read_frame(&mut self.stdout)?.ok_or_else(|| EngineError::Exec("shim closed mid-run".into()))
+        if self.is_lost() {
+            return Err(EngineError::Exec("the worker was lost".into()));
+        }
+        write_frame(self.input()?, req)?;
+        self.frames
+            .next(self.budget)?
+            .ok_or_else(|| EngineError::Exec("shim closed mid-run".into()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{NodeId, ScopePath, TestStyle};
+    use crate::domain::{NodeId, Outcome, ScopePath, TestStyle};
+    use crate::exec::read_frame;
     use crate::testing::ScriptedShim;
+    use std::io::BufReader;
 
     fn item(node_id: &str) -> TestItem {
         TestItem::new(
