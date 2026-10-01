@@ -60,7 +60,9 @@ tiderace run tests/              # "tiderace: … via daemon"
 tiderace run -k test_login tests/
 ```
 
-A `-k` run of one test on a 5,600-test suite is **0.6s** through the daemon and 5s without. The
+A `-k` run of one test on a 5,600-test suite is **0.3s** through the daemon and 5s without: the
+daemon decides `-k` itself for every node whose recorded keywords and dependencies are unchanged,
+and sends the workers only what matches (TID-102). The
 daemon re-imports its image whenever a `.py` or pytest config file under the tree changes, so a
 stale module is never executed. `tiderace daemon status` says whether one is serving and whether
 its image is warm; `tiderace daemon stop` ends it. Set `TIDERACE_NO_DAEMON=1` for a run that must
