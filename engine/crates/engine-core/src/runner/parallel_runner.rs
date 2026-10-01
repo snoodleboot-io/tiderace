@@ -128,7 +128,7 @@ fn run_batched(
     notes: &mut RunNotes,
 ) -> Result<Vec<TestResult>> {
     #[cfg(not(unix))]
-    let _ = warm;
+    let _ = (warm, &notes); // the pool, and the notes its sizing writes, are Unix-only
     if items.is_empty() {
         return Ok(Vec::new());
     }
@@ -632,7 +632,7 @@ mod tests {
         )
         .expect_err("fork must be refused where it does not exist");
         assert!(
-            err.contains("fork"),
+            err.to_string().contains("fork"),
             "message must name the tier; got {err:?}"
         );
     }
