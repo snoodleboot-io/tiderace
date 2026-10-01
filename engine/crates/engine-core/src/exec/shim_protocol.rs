@@ -162,7 +162,9 @@ pub struct VariantResult {
 /// suite; anything else is a shim that did not warm, reported with the frame it sent instead.
 pub(crate) fn ready_info(frame: serde_json::Value) -> Result<crate::exec::transport::ReadyInfo> {
     if frame.get("ready").and_then(serde_json::Value::as_bool) != Some(true) {
-        return Err(EngineError::Exec(format!("shim failed to warm: {frame}")));
+        return Err(EngineError::Handshake {
+            frame: frame.to_string(),
+        });
     }
     let pid = frame
         .get("pid")
@@ -176,9 +178,9 @@ pub(crate) fn ready_info(frame: serde_json::Value) -> Result<crate::exec::transp
 /// The bincode-vs-msgpack decision (ADR-E002) is deferred; JSON framing is adequate at this scale
 /// and was validated in the Phase-1 spike.
 pub fn write_frame<W: Write, T: Serialize>(w: &mut W, msg: &T) -> Result<()> {
-    let bytes = serde_json::to_vec(msg).map_err(|e| EngineError::Exec(e.to_string()))?;
+    let bytes = serde_json::to_vec(msg)?;
     let len =
-        u32::try_from(bytes.len()).map_err(|_| EngineError::Exec("frame too large".into()))?;
+        u32::try_from(bytes.len()).map_err(|_| EngineError::Protocol("frame too large".into()))?;
     w.write_all(&len.to_le_bytes())?;
     w.write_all(&bytes)?;
     w.flush()?;
@@ -197,8 +199,7 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<Option<T>> 
     let len = u32::from_le_bytes(header) as usize;
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
-    let msg = serde_json::from_slice(&buf).map_err(|e| EngineError::Exec(e.to_string()))?;
-    Ok(Some(msg))
+    Ok(Some(serde_json::from_slice(&buf)?))
 }
 
 #[cfg(test)]

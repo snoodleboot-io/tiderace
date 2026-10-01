@@ -126,8 +126,8 @@ impl SubprocessWorker {
 impl Worker for SubprocessWorker {
     fn run(&mut self, items: &[TestItem]) -> Result<Vec<TestResult>> {
         if self.proc.is_none() {
-            let target = self.target.clone().ok_or_else(|| {
-                EngineError::Exec("SubprocessWorker has no target; call with_target".into())
+            let target = self.target.clone().ok_or(EngineError::NoTarget {
+                worker: "SubprocessWorker",
             })?;
             self.proc = Some(SubprocessWorker::launch(&target, self.deadline_ms)?);
         }

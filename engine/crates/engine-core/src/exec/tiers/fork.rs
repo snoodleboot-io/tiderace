@@ -33,6 +33,10 @@ impl ForkWorker {
         Self::launch_selected(python, shim, root, false, None)
     }
 
+    /// The per-test deadline a worker launched by the convenience constructors starts with:
+    /// the engine's one default, overridable by [`with_deadline_ms`](Self::with_deadline_ms).
+    const DEFAULT_DEADLINE_MS: u64 = crate::exec::limits::DEFAULT_DEADLINE_MS;
+
     /// Launch with snapshot/restore on AND the optimistic in-process ladder enabled.
     ///
     /// The two go together or not at all. `with_optimistic_no_fork(true)` on a plain
@@ -52,7 +56,12 @@ impl ForkWorker {
         optimistic: bool,
         modules: Option<&Path>,
     ) -> Result<Self> {
-        Self::launch_target(&ShimTarget::new(python, shim, root), optimistic, modules)
+        Self::launch_target(
+            &ShimTarget::new(python, shim, root),
+            optimistic,
+            modules,
+            Self::DEFAULT_DEADLINE_MS,
+        )
     }
 
     /// [`launch_selected`](Self::launch_selected) against a [`ShimTarget`]. `optimistic` launches
@@ -62,6 +71,7 @@ impl ForkWorker {
         target: &ShimTarget,
         optimistic: bool,
         modules: Option<&Path>,
+        deadline_ms: u64,
     ) -> Result<Self> {
         let mut process = ShimLaunch::new(
             target,
@@ -77,7 +87,7 @@ impl ForkWorker {
         Ok(Self {
             transport,
             process,
-            deadline_ms: 5_000,
+            deadline_ms,
             optimistic_no_fork: optimistic,
             trusted: HashSet::new(),
             must_fork: HashSet::new(),

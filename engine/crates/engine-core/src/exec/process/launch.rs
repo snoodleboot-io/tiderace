@@ -160,8 +160,9 @@ impl<'a> ShimLaunch<'a> {
         } else {
             cmd.stdin(Stdio::null());
         }
-        let child = cmd.spawn().map_err(|e| {
-            EngineError::Exec(format!("failed to launch the {}: {e}", self.mode.name()))
+        let child = cmd.spawn().map_err(|source| EngineError::Launch {
+            what: self.mode.name(),
+            source,
         })?;
         Ok(ShimProcess::new(child, self.mode))
     }

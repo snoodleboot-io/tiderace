@@ -188,9 +188,7 @@ pub struct PipeTransport<W: WriteHalf> {
 /// The concrete transport over a child process's pipes.
 pub type Live = PipeTransport<ChildStdin>;
 
-/// How long past the per-test deadline a worker may stay silent before it is given up on
-/// (TID-93): the deadline itself is the shim's to enforce; this is the engine's margin over it.
-pub(crate) const LOST_WORKER_MARGIN_MS: u64 = 10_000;
+pub(crate) use crate::exec::limits::LOST_WORKER_MARGIN_MS;
 
 impl<W: WriteHalf> PipeTransport<W> {
     /// Wrap a write half and a read half. Does not perform the handshake; call
@@ -237,7 +235,7 @@ impl<W: WriteHalf> PipeTransport<W> {
     fn input(&mut self) -> Result<&mut W> {
         self.stdin
             .as_mut()
-            .ok_or_else(|| EngineError::Exec("shim already shut down".into()))
+            .ok_or(EngineError::AlreadyShutDown { what: "shim" })
     }
 }
 
@@ -253,7 +251,7 @@ impl<W: WriteHalf> ShimTransport for PipeTransport<W> {
         let frame: Value = self
             .frames
             .next(None)?
-            .ok_or_else(|| EngineError::Exec("shim sent no ready frame".into()))?;
+            .ok_or(EngineError::NoReadyFrame { what: "shim" })?;
         let info = ready_info(frame)?;
         self.peer_pid = info.pid;
         Ok(info)
@@ -261,12 +259,12 @@ impl<W: WriteHalf> ShimTransport for PipeTransport<W> {
 
     fn exchange(&mut self, req: &ExecRequest<'_>) -> Result<ExecResponse> {
         if self.is_lost() {
-            return Err(EngineError::Exec("the worker was lost".into()));
+            return Err(EngineError::WorkerGone);
         }
         write_frame(self.input()?, req)?;
         self.frames
             .next(self.budget)?
-            .ok_or_else(|| EngineError::Exec("shim closed mid-run".into()))
+            .ok_or(EngineError::PeerClosed { what: "shim" })
     }
 }
 
@@ -339,7 +337,7 @@ mod tests {
             &std::collections::HashSet::new(),
         )
         .expect_err("a shim that closes mid-batch must error");
-        assert!(matches!(err, EngineError::Exec(_)));
+        assert!(matches!(err, EngineError::PeerClosed { .. }), "{err:?}");
     }
 
     /// The loopback tier: a real `std::io::pipe` + a Rust "fake shim" thread speaking the **actual**

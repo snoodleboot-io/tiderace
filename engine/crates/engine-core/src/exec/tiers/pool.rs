@@ -32,15 +32,7 @@ use crate::exec::process::{reap_lost, ShimLaunch, ShimMode, ShimProcess, ShimTar
 use crate::exec::transport::{PipeTransport, ShimTransport};
 use crate::exec::{Selection, Worker};
 
-/// How long the parent may spend importing the project before the first worker connects. Generous on
-/// purpose: a false timeout here would break a legitimate large project, while a dead parent is caught
-/// immediately by the liveness check and never has to wait this out.
-const IMPORT_DEADLINE: Duration = Duration::from_secs(300);
-
-/// How long the remaining workers may take once the first has connected. They are forks of an image
-/// that has already imported everything, so they arrive within milliseconds; this is slack, not a
-/// budget.
-const WORKER_DEADLINE: Duration = Duration::from_secs(30);
+use crate::exec::limits::{IMPORT_DEADLINE, POOL_POLL, WORKER_DEADLINE};
 
 /// A transport to one pooled worker.
 pub type PooledTransport = PipeTransport<UnixStream>;
@@ -197,7 +189,7 @@ impl WellspringPool {
                     limit.as_secs()
                 )));
             }
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(POOL_POLL);
         }
     }
 
@@ -255,7 +247,9 @@ impl WellspringPool {
             .map_err(|e| EngineError::Exec(format!("worker socket: {e}")))?;
         {
             let (stdin, stdout) = self.control.as_mut().ok_or_else(|| {
-                EngineError::Exec("spawn_workers on a one-shot pool: launch it persistent".into())
+                EngineError::Unavailable(
+                    "spawn_workers on a one-shot pool: launch it persistent".into(),
+                )
             })?;
             crate::exec::write_frame(
                 stdin,

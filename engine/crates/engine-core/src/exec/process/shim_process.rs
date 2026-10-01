@@ -49,44 +49,39 @@ impl ShimProcess {
     /// Take both pipes, for a transport to own. Available once: the second call is an error,
     /// as is a call on a process launched without pipes.
     pub fn take_pipes(&mut self) -> Result<(ChildStdin, BufReader<ChildStdout>)> {
-        let stdin = self
-            .stdin
-            .take()
-            .ok_or_else(|| EngineError::Exec(format!("{} stdin unavailable", self.mode.name())))?;
-        let stdout = self
-            .stdout
-            .take()
-            .ok_or_else(|| EngineError::Exec(format!("{} stdout unavailable", self.mode.name())))?;
+        let stdin = self.stdin.take().ok_or(EngineError::AlreadyShutDown {
+            what: self.mode.name(),
+        })?;
+        let stdout = self.stdout.take().ok_or(EngineError::AlreadyShutDown {
+            what: self.mode.name(),
+        })?;
         Ok((stdin, stdout))
     }
 
     /// The write half, while this process still holds it.
     pub fn stdin(&mut self) -> Result<&mut ChildStdin> {
-        self.stdin
-            .as_mut()
-            .ok_or_else(|| EngineError::Exec(format!("{} stdin unavailable", self.mode.name())))
+        self.stdin.as_mut().ok_or(EngineError::AlreadyShutDown {
+            what: self.mode.name(),
+        })
     }
 
     /// The read half, while this process still holds it.
     pub fn stdout(&mut self) -> Result<&mut BufReader<ChildStdout>> {
-        self.stdout
-            .as_mut()
-            .ok_or_else(|| EngineError::Exec(format!("{} stdout unavailable", self.mode.name())))
+        self.stdout.as_mut().ok_or(EngineError::AlreadyShutDown {
+            what: self.mode.name(),
+        })
     }
 
     /// Read the readiness frame — the first frame the shim sends, after it has imported the
     /// suite — on a process whose pipes this still holds. For a process whose pipes a
     /// transport took, the transport's `ready()` does the same.
     pub fn ready(&mut self) -> Result<ReadyInfo> {
-        let name = self.mode.name();
-        let frame: Option<Value> = read_frame(self.stdout()?)
-            .map_err(|e| EngineError::Exec(format!("{name} ready: {e}")))?;
+        let what = self.mode.name();
+        let frame: Option<Value> = read_frame(self.stdout()?)?;
         let Some(frame) = frame else {
             // Exited before it was ready: the Python traceback on stderr says why.
             let _ = self.child.wait();
-            return Err(EngineError::Exec(format!(
-                "the {name} exited before it was ready — the Python traceback above says why"
-            )));
+            return Err(EngineError::ExitedBeforeReady { what });
         };
         ready_info(frame)
     }

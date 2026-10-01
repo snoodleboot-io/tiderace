@@ -16,9 +16,7 @@ use std::process::ExitCode;
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, RunReport};
 use engine_core::reporter::{JsonReporter, Reporter};
-use engine_core::runner::{
-    record_durations, run_parallel, RunPlan, SchedulerKind, VerdictStore, WorkerStrategy,
-};
+use engine_core::runner::{record_durations, RunPlan, SchedulerKind, VerdictStore, WorkerStrategy};
 
 const USAGE: &str = "\
 usage: tiderace <command> [options] <path>
@@ -358,7 +356,10 @@ impl Options {
     /// would run a different tier than asked for and report the result as though nothing happened —
     /// the precise failure mode TID-17 exists to end.
     fn parse(args: &[String]) -> Result<Self, String> {
-        let mut plan = RunPlan::default();
+        let mut plan = RunPlan {
+            memory_limit_mb: engine_core::runner::memory_limit_mb_from_env(),
+            ..RunPlan::default()
+        };
         // The daemon has honoured `TIDERACE_FORCE_FORK=1` since before the ladder was a default;
         // read it here too so one setting covers both front ends. Applied before the flags, so an
         // explicit `--optimistic` on the command line still wins over it.
@@ -599,8 +600,15 @@ fn cmd_run(
             // `&effective`, not `plan`: the header and the run must describe the same thing. They
             // did not, so the worker clamp shown in the header was never the clamp applied — and
             // the verdicts read above would have been reported and then dropped on the floor.
-            let results = match run_parallel(&python, &shim, root, items, &effective) {
-                Ok(r) => r,
+            let results = match engine_core::runner::run_parallel_with_notes(
+                &python, &shim, root, items, &effective,
+            ) {
+                Ok(outcome) => {
+                    for line in &outcome.notes.lines {
+                        eprintln!("tiderace: {line}");
+                    }
+                    outcome.results
+                }
                 Err(e) => {
                     eprintln!("error: {e}");
                     return ExitCode::FAILURE;
