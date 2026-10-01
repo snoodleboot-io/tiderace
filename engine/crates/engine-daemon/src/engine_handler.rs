@@ -5,8 +5,8 @@ use engine_core::cache::{Cache, CacheKey, CacheKeyBuilder, CachedOutcome, DirCac
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{NodeId, Outcome, TestItem, TestResult};
 use engine_core::exec::{ForkWorker, KeywordExpr, SubInterpWorker, Worker};
-use engine_core::runner::PhaseTimer;
 use engine_core::runner::DEFAULT_DEADLINE_MS;
+use engine_core::runner::{PhaseTimer, RecordedOutcome};
 
 use crate::persist::{changed_files, plan, PersistedState, TestRecord, STATE_FILE};
 use crate::rpc_method::{RpcRequest, RpcResponse, RpcResult};
@@ -219,10 +219,10 @@ impl EngineHandler {
     }
 
     /// The warm image's parent pid, when one is held.
-    fn warm_pid(&self) -> Option<i64> {
+    fn warm_pid(&self) -> Option<u32> {
         #[cfg(unix)]
         {
-            self.warm.as_ref().map(|p| i64::from(p.pid()))
+            self.warm.as_ref().map(|p| p.pid())
         }
         #[cfg(not(unix))]
         {
@@ -250,9 +250,9 @@ impl EngineHandler {
     fn run_items_parallel(
         &mut self,
         requested: &[String],
-        trusted: &HashSet<String>,
-        must_fork: &HashSet<String>,
-        durations: &HashMap<String, u64>,
+        trusted: &HashSet<NodeId>,
+        must_fork: &HashSet<NodeId>,
+        durations: &HashMap<NodeId, u64>,
         full_run: bool,
         collected: Option<Vec<TestItem>>,
     ) -> Result<Vec<TestResult>, String> {
@@ -350,22 +350,22 @@ impl EngineHandler {
         let current = self.hash_known_files(&state);
         let changed = changed_files(&state, &current);
         phase.mark("hash known files");
-        let trusted: HashSet<String> = state
+        let trusted: HashSet<NodeId> = state
             .tests
             .iter()
             .filter(|(_, rec)| {
                 rec.pure == Some(true) && !rec.deps.iter().any(|d| changed.contains(d))
             })
-            .map(|(node, _)| node.clone())
+            .map(|(node, _)| NodeId::new(node.clone()))
             .collect();
         // TID-33: recorded state-disturbers are forked from the start. Separate from `trusted` and
         // its inverse: most impure tests are impure in ways restore handles completely, and forking
         // those would cost the ladder nearly everything it buys.
-        let must_fork: HashSet<String> = state
+        let must_fork: HashSet<NodeId> = state
             .tests
             .iter()
             .filter(|(_, rec)| rec.must_fork)
-            .map(|(node, _)| node.clone())
+            .map(|(node, _)| NodeId::new(node.clone()))
             .collect();
         let durations = recorded_durations(&state);
         phase.mark("trusted / must-fork / durations");
@@ -535,7 +535,7 @@ impl EngineHandler {
                 && state
                     .tests
                     .get(cand)
-                    .is_some_and(|rec| rec.outcome == DESELECTED)
+                    .is_some_and(|rec| rec.outcome.is_deselected())
             {
                 state.tests.remove(cand);
                 changed = true;
@@ -547,23 +547,12 @@ impl EngineHandler {
         for cand in deselected {
             let mut deps = vec![NodeId::file_of(&cand).to_string()];
             deps.extend(config_deps.iter().cloned());
-            state.tests.insert(
-                cand,
-                TestRecord {
-                    outcome: DESELECTED.to_string(),
-                    detail: String::new(),
-                    deps,
-                    pure: None,
-                    must_fork: false,
-                    keywords: Vec::new(),
-                    skip_origin: String::new(),
-                },
-            );
+            state.tests.insert(cand, TestRecord::deselected(deps));
         }
         for r in results {
             let prior = state.tests.get(r.node_id.as_str());
             let record = TestRecord {
-                outcome: outcome_token(r.outcome).to_string(),
+                outcome: RecordedOutcome::Ran(r.outcome),
                 detail: r.detail.clone(),
                 // An empty footprint means capture was off, not that the test depends on
                 // nothing — every test touches at least its own file. Overwriting a real
@@ -573,12 +562,12 @@ impl EngineHandler {
                     r.touched_files.clone()
                 } else if let Some(p) = prior.filter(|p| !p.deps.is_empty()) {
                     p.deps.clone()
-                } else if r.skip_origin.is_empty() {
-                    Vec::new()
-                } else {
+                } else if let Some(origin) = &r.skip_origin {
                     // A module-import skip touches nothing but its module: that is what the
                     // replay of the skip hangs off (TID-102).
-                    vec![r.skip_origin.clone()]
+                    vec![origin.clone()]
+                } else {
+                    Vec::new()
                 },
                 // Sticky for the same reason `must_fork` is, and missing it made the bare
                 // no-fork tier erase the verdict that grants it. `pure: None` means *this run
@@ -651,10 +640,10 @@ impl EngineHandler {
                 state
                     .tests
                     .get(node)
-                    .filter(|rec| rec.outcome != DESELECTED)
-                    .map(|rec| RpcResult {
+                    .and_then(|rec| rec.outcome.ran())
+                    .map(|outcome| RpcResult {
                         node_id: node.clone(),
-                        outcome: rec.outcome.clone(),
+                        outcome,
                         duration_ms: 0,
                     })
             })
@@ -691,22 +680,18 @@ impl EngineHandler {
             for (node, outcome, deps) in hits {
                 results.push(RpcResult {
                     node_id: node.clone(),
-                    outcome: outcome_token(outcome.outcome()).to_string(),
+                    outcome: outcome.outcome(),
                     duration_ms: 0,
                 });
                 let was_disturber = state.tests.get(&node).is_some_and(|p| p.must_fork);
                 state.tests.insert(
                     node,
                     TestRecord {
-                        outcome: outcome_token(outcome.outcome()).to_string(),
-                        detail: outcome.detail().to_string(),
-                        deps,
                         pure: Some(true),
                         // A cache hit re-serves a previously *pure* result; it says nothing new
                         // about state disturbance, so preserve whatever was recorded.
                         must_fork: was_disturber,
-                        keywords: Vec::new(),
-                        skip_origin: String::new(),
+                        ..TestRecord::ran(outcome.outcome(), outcome.detail(), deps)
                     },
                 );
             }
@@ -714,11 +699,11 @@ impl EngineHandler {
             // Run the cache misses (stale purity ⇒ no trusted-pure; restore re-measures the verdict).
             if !to_execute.is_empty() {
                 executed = to_execute.len();
-                let disturbers: HashSet<String> = state
+                let disturbers: HashSet<NodeId> = state
                     .tests
                     .iter()
                     .filter(|(_, rec)| rec.must_fork)
-                    .map(|(node, _)| node.clone())
+                    .map(|(node, _)| NodeId::new(node.clone()))
                     .collect();
                 let durations = recorded_durations(&state);
                 let fresh = self.run_items_parallel(
@@ -866,11 +851,6 @@ fn subinterp_enabled() -> bool {
     std::env::var("TIDERACE_SUBINTERP").as_deref() == Ok("1")
 }
 
-/// The module rel-path of a node id (`pkg/test_x.py::C::t` -> `pkg/test_x.py`).
-/// The outcome recorded for a candidate the project's own `addopts` deselects or ignores (TID-73).
-/// A verdict, not a result: the planner judges it like any test, and nothing is ever served for it.
-const DESELECTED: &str = "deselected";
-
 /// Whether `id` is `cand` itself or one of its runtime expansions — a parametrize case
 /// (`cand[…]`) or an inherited method (`cand::…`) — and not a sibling sharing a prefix.
 /// The candidates a `-k` run still sends to the workers (TID-102): every one the daemon cannot
@@ -931,9 +911,11 @@ fn keyword_prefilter(
     };
     let module_skip = |recs: &[(&str, &TestRecord)]| {
         !recs.is_empty()
-            && recs
-                .iter()
-                .all(|(_, r)| !r.skip_origin.is_empty() && r.outcome == "skipped" && unchanged(r))
+            && recs.iter().all(|(_, r)| {
+                r.skip_origin.is_some()
+                    && r.outcome == RecordedOutcome::Ran(Outcome::Skipped)
+                    && unchanged(r)
+            })
     };
     let mut keep = Vec::new();
     let mut replayed = Vec::new();
@@ -981,28 +963,10 @@ fn deselected_candidates(executed: &[String], results: &[TestResult]) -> Vec<Str
         .collect()
 }
 
-fn to_rpc_full(r: TestResult) -> crate::rpc_method::RpcFullResult {
-    crate::rpc_method::RpcFullResult {
-        node_id: r.node_id.to_string(),
-        outcome: outcome_token(r.outcome).to_string(),
-        duration_ms: r.duration_ms,
-        detail: r.detail,
-        touched_files: r.touched_files,
-        pure: r.pure,
-        must_fork: r.must_fork,
-        skip_origin: r.skip_origin,
-        expanded: r.expanded,
-        worker: r.worker,
-        unit: r.unit,
-        unit_started_ms: r.unit_started_ms,
-        unit_ended_ms: r.unit_ended_ms,
-    }
-}
-
 fn to_rpc(r: TestResult) -> RpcResult {
     RpcResult {
         node_id: r.node_id.to_string(),
-        outcome: outcome_token(r.outcome).to_string(),
+        outcome: r.outcome,
         duration_ms: r.duration_ms,
     }
 }
@@ -1033,9 +997,7 @@ impl RpcHandler for EngineHandler {
                 let out = self.run_full_results();
                 self.selection = None;
                 match out {
-                    Ok(results) => RpcResponse::RanFull {
-                        results: results.into_iter().map(to_rpc_full).collect(),
-                    },
+                    Ok(results) => RpcResponse::RanFull { results },
                     Err(message) => RpcResponse::Error { message },
                 }
             }
@@ -1051,9 +1013,9 @@ impl RpcHandler for EngineHandler {
                 pid: self
                     .worker
                     .as_ref()
-                    .map(ForkWorker::wellspring_pid)
+                    .and_then(ForkWorker::wellspring_pid)
                     .or_else(|| self.warm_pid())
-                    .unwrap_or_else(|| i64::from(std::process::id())),
+                    .unwrap_or_else(std::process::id),
                 warm: self.worker.is_some() || self.is_warm(),
             },
             RpcRequest::Shutdown => RpcResponse::ShuttingDown,
@@ -1114,24 +1076,13 @@ impl Drop for SelectionEnv {
     }
 }
 
-fn outcome_token(outcome: Outcome) -> &'static str {
-    match outcome {
-        Outcome::Passed => "passed",
-        Outcome::Failed => "failed",
-        Outcome::Skipped => "skipped",
-        Outcome::XFail => "xfail",
-        Outcome::XPass => "xpass",
-        Outcome::Error => "error",
-    }
-}
-
 /// The last run's per-node cost, as the scheduler's weights (TID-62). Kept as a `HashMap` for the
 /// `RunPlan`; the state stores a `BTreeMap` so the file is stable across saves.
-fn recorded_durations(state: &PersistedState) -> HashMap<String, u64> {
+fn recorded_durations(state: &PersistedState) -> HashMap<NodeId, u64> {
     state
         .durations
         .iter()
-        .map(|(k, v)| (k.clone(), *v))
+        .map(|(k, v)| (NodeId::new(k.clone()), *v))
         .collect()
 }
 
@@ -1143,16 +1094,18 @@ mod tests {
     fn the_keyword_prefilter_keeps_the_unvouched_and_the_matching() {
         use super::keyword_prefilter;
         use crate::persist::{PersistedState, TestRecord};
+        use engine_core::domain::Outcome;
         use engine_core::exec::KeywordExpr;
+        use engine_core::runner::RecordedOutcome;
         use std::collections::{BTreeMap, BTreeSet};
         let rec = |kw: &[&str], deps: &[&str]| TestRecord {
-            outcome: "passed".into(),
+            outcome: RecordedOutcome::Ran(Outcome::Passed),
             detail: String::new(),
             deps: deps.iter().map(|d| (*d).to_string()).collect(),
             pure: None,
             must_fork: false,
             keywords: kw.iter().map(|k| (*k).to_string()).collect(),
-            skip_origin: String::new(),
+            skip_origin: None,
         };
         let mut state = PersistedState::default();
         let t = |id: &str, r: TestRecord| (id.to_string(), r);
@@ -1174,13 +1127,13 @@ mod tests {
             t(
                 "w.py::never",
                 TestRecord {
-                    outcome: "skipped".into(),
+                    outcome: RecordedOutcome::Ran(Outcome::Skipped),
                     detail: "could not import 'nope'".into(),
                     deps: vec!["w.py".into()],
                     pure: None,
                     must_fork: false,
                     keywords: Vec::new(),
-                    skip_origin: "w.py".into(),
+                    skip_origin: Some("w.py".into()),
                 },
             ),
         ]);
@@ -1216,7 +1169,7 @@ mod tests {
         let (_, replayed) = decide("zzz");
         assert_eq!(replayed.len(), 1);
         assert_eq!(replayed[0].node_id.as_str(), "w.py::never");
-        assert_eq!(replayed[0].skip_origin, "w.py");
+        assert_eq!(replayed[0].skip_origin.as_deref(), Some("w.py"));
         assert_eq!(replayed[0].detail, "could not import 'nope'");
         // The four the daemon cannot vouch for come through whatever the expression says.
         let always = [

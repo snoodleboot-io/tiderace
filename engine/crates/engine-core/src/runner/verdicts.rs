@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::hashing::hash_file_or_missing;
-use crate::domain::TestResult;
+use crate::domain::{NodeId, Outcome, TestResult};
 use crate::exec::SafeModule;
 
 /// The state file, written by the daemon and read by both front ends.
@@ -60,10 +60,63 @@ pub struct PersistedState {
     pub durations: BTreeMap<String, u64>,
 }
 
+/// What a record says happened to its test: it ran and this was the outcome, or the project's
+/// own selection (`addopts`) deselected it, which is a verdict of its own kind (TID-73) — not an
+/// outcome, so it is never a report line, but remembered so the next run can skip asking.
+///
+/// On disk the two share one string field: the outcome's token, or `deselected`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordedOutcome {
+    Ran(Outcome),
+    Deselected,
+}
+
+impl RecordedOutcome {
+    const DESELECTED: &'static str = "deselected";
+
+    pub fn is_deselected(self) -> bool {
+        matches!(self, RecordedOutcome::Deselected)
+    }
+
+    /// The outcome, for a record that ran.
+    pub fn ran(self) -> Option<Outcome> {
+        match self {
+            RecordedOutcome::Ran(o) => Some(o),
+            RecordedOutcome::Deselected => None,
+        }
+    }
+}
+
+impl From<Outcome> for RecordedOutcome {
+    fn from(o: Outcome) -> Self {
+        RecordedOutcome::Ran(o)
+    }
+}
+
+impl Serialize for RecordedOutcome {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            RecordedOutcome::Ran(o) => s.serialize_str(o.token()),
+            RecordedOutcome::Deselected => s.serialize_str(Self::DESELECTED),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RecordedOutcome {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        if s == Self::DESELECTED {
+            return Ok(RecordedOutcome::Deselected);
+        }
+        let o = Outcome::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(&s))?;
+        Ok(RecordedOutcome::Ran(o))
+    }
+}
+
 /// One test's persisted result + dependency footprint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestRecord {
-    pub outcome: String,
+    pub outcome: RecordedOutcome,
     pub detail: String,
     pub deps: Vec<String>,
     /// Purity verdict (TID-1): `Some(true)` measured pure. A pure test whose deps are all unchanged
@@ -83,9 +136,37 @@ pub struct TestRecord {
     pub keywords: Vec<String>,
     /// The module whose import skipped this test (TID-55), kept so the daemon can replay the skip
     /// for an unchanged module instead of sending the node to a worker to import it again
-    /// (TID-102). Empty for everything but a module-import skip.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub skip_origin: String,
+    /// (TID-102). Absent for everything but a module-import skip (old files spell that `""`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::domain::empty_as_none"
+    )]
+    pub skip_origin: Option<String>,
+}
+
+impl TestRecord {
+    /// A record of a test that ran, with the dependencies its footprint names.
+    pub fn ran(outcome: Outcome, detail: impl Into<String>, deps: Vec<String>) -> Self {
+        Self {
+            outcome: RecordedOutcome::Ran(outcome),
+            detail: detail.into(),
+            deps,
+            pure: None,
+            must_fork: false,
+            keywords: Vec::new(),
+            skip_origin: None,
+        }
+    }
+
+    /// A record of a node the project's own selection deselected, depending on its file and
+    /// the config files that selection came from.
+    pub fn deselected(deps: Vec<String>) -> Self {
+        Self {
+            outcome: RecordedOutcome::Deselected,
+            ..Self::ran(Outcome::Passed, "", deps)
+        }
+    }
 }
 
 impl PersistedState {
@@ -186,7 +267,7 @@ impl VerdictStore {
     /// change to the very code they exercise — and this tier skips isolation entirely. The daemon
     /// has the same exposure; the difference is that its state is minutes old, while a file on disk
     /// can be arbitrarily stale. Kept here, tested, and connected once TID-40 lands.
-    pub fn trusted_pure(&self) -> HashSet<String> {
+    pub fn trusted_pure(&self) -> HashSet<NodeId> {
         let current: BTreeMap<String, String> = self
             .state
             .files
@@ -202,7 +283,7 @@ impl VerdictStore {
                     && !rec.deps.is_empty()
                     && !rec.deps.iter().any(|d| changed.contains(d))
             })
-            .map(|(node, _)| node.clone())
+            .map(|(node, _)| NodeId::new(node.clone()))
             .collect()
     }
 
@@ -212,11 +293,11 @@ impl VerdictStore {
     /// only orders work. A stale one costs a little balance and cannot produce a wrong answer, so it
     /// is safe to take from a file nobody re-verified. A node that no longer exists is simply never
     /// looked up.
-    pub fn durations(&self) -> HashMap<String, u64> {
+    pub fn durations(&self) -> HashMap<NodeId, u64> {
         self.state
             .durations
             .iter()
-            .map(|(k, v)| (k.clone(), *v))
+            .map(|(k, v)| (NodeId::new(k.clone()), *v))
             .collect()
     }
 
@@ -226,12 +307,46 @@ impl VerdictStore {
     /// a stale one forks a test that no longer needed it, which costs a little time and cannot
     /// produce a wrong answer. That asymmetry is the whole reason it can be trusted from a file
     /// nobody re-verified, while [`trusted_pure`](Self::trusted_pure) cannot.
-    pub fn must_fork(&self) -> HashSet<String> {
+    pub fn must_fork(&self) -> HashSet<NodeId> {
         self.state
             .tests
             .iter()
             .filter(|(_, rec)| rec.must_fork)
-            .map(|(node, _)| node.clone())
+            .map(|(node, _)| NodeId::new(node.clone()))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RecordedOutcome, TestRecord};
+    use crate::domain::Outcome;
+
+    /// The on-disk spelling is unchanged by the typed record (TID-109): an outcome token or
+    /// `deselected` in one string field, and a module-import skip's origin as a string that old
+    /// files leave empty.
+    #[test]
+    fn a_record_reads_and_writes_the_state_files_spelling() {
+        let ran = TestRecord::ran(Outcome::XFail, "expected", vec!["t.py".into()]);
+        let json = serde_json::to_string(&ran).unwrap();
+        assert!(json.contains("\"outcome\":\"xfail\""), "{json}");
+        assert!(!json.contains("skip_origin"), "absent, not empty: {json}");
+        assert_eq!(serde_json::from_str::<TestRecord>(&json).unwrap(), ran);
+
+        let deselected = TestRecord::deselected(vec!["t.py".into(), "pytest.ini".into()]);
+        let json = serde_json::to_string(&deselected).unwrap();
+        assert!(json.contains("\"outcome\":\"deselected\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<TestRecord>(&json).unwrap(),
+            deselected
+        );
+
+        let old_file = r#"{"outcome":"skipped","detail":"","deps":["w.py"],"skip_origin":""}"#;
+        let rec: TestRecord = serde_json::from_str(old_file).unwrap();
+        assert_eq!(rec.outcome, RecordedOutcome::Ran(Outcome::Skipped));
+        assert_eq!(rec.skip_origin, None);
+        let old_file = r#"{"outcome":"skipped","detail":"","deps":["w.py"],"skip_origin":"w.py"}"#;
+        let rec: TestRecord = serde_json::from_str(old_file).unwrap();
+        assert_eq!(rec.skip_origin.as_deref(), Some("w.py"));
     }
 }

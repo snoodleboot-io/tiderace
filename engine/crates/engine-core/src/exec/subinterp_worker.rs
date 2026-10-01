@@ -127,7 +127,7 @@ impl Worker for SubInterpWorker {
             .map(|it| {
                 json!({
                     "node_id": it.node_id.as_str(),
-                    "style": it.style.wire(),
+                    "style": it.style,
                     "deadline_ms": self.deadline_ms,
                 })
             })
@@ -187,7 +187,7 @@ impl Worker for SubInterpWorker {
         let mut by_node: HashMap<String, ExecResponse> = HashMap::new();
         for r in results {
             if let Ok(resp) = serde_json::from_value::<ExecResponse>(r.clone()) {
-                by_node.insert(resp.node_id.clone(), resp);
+                by_node.insert(resp.node_id.to_string(), resp);
             }
         }
         Ok(items

@@ -7,6 +7,7 @@
 
 #![cfg(unix)]
 
+use engine_core::domain::Outcome;
 use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use engine_daemon::{EngineHandler, RpcHandler, RpcRequest, RpcResponse};
 
@@ -74,7 +75,7 @@ fn a_keyword_run_that_selects_nothing_does_not_turn_the_suite_deselected() {
     }) {
         RpcResponse::RanFull { results } => {
             assert_eq!(results.len(), 1, "{results:?}");
-            assert!(results[0].node_id.ends_with("test_three"));
+            assert!(results[0].node_id.as_str().ends_with("test_three"));
         }
         other => panic!("expected RanFull, got {other:?}"),
     }
@@ -107,8 +108,8 @@ fn a_keyword_run_that_selects_nothing_does_not_turn_the_suite_deselected() {
     let three = after_edit
         .results
         .iter()
-        .find(|r| r.node_id.ends_with("test_three"))
+        .find(|r| r.node_id.as_str().ends_with("test_three"))
         .expect("test_three reported");
-    assert_eq!(three.outcome, "failed", "{:?}", after_edit.results);
+    assert_eq!(three.outcome, Outcome::Failed, "{:?}", after_edit.results);
     let _ = std::fs::remove_dir_all(&dir);
 }

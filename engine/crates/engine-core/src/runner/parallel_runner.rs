@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::domain::{TestItem, TestResult};
+use crate::domain::{NodeId, TestItem, TestResult};
 #[cfg(unix)]
 use crate::exec::{ForkWorker, PooledWorker, WellspringPool};
 use crate::exec::{SafeSetCache, SubInterpWorker, SubprocessWorker, Worker};
@@ -205,8 +205,8 @@ fn run_batched(
     // The whole run's sets, not one unit's slice: a thread now runs many units and cannot know in
     // advance which node ids it will see. Membership is what both are used for, so a larger set
     // costs a hash lookup and nothing else.
-    let trusted: HashSet<String> = plan.trusted_pure.clone();
-    let must_fork: HashSet<String> = plan.must_fork.clone();
+    let trusted: HashSet<NodeId> = plan.trusted_pure.clone();
+    let must_fork: HashSet<NodeId> = plan.must_fork.clone();
 
     // The run's clock for the schedule stamps (TID-78): every unit's start and end is measured
     // from here, so a report can be drawn as one lane per worker.
@@ -394,8 +394,8 @@ fn new_worker(
     sh: &Path,
     rt: &Path,
     modules: &Path,
-    trusted: HashSet<String>,
-    must_fork: HashSet<String>,
+    trusted: HashSet<NodeId>,
+    must_fork: HashSet<NodeId>,
 ) -> Result<Box<dyn Worker>, String> {
     let BatchExec {
         strategy,
@@ -459,7 +459,7 @@ struct RecordedWeights<'a> {
 }
 
 impl<'a> RecordedWeights<'a> {
-    fn new(durations: &'a HashMap<String, u64>) -> Self {
+    fn new(durations: &'a HashMap<NodeId, u64>) -> Self {
         Self {
             by_id: durations.iter().map(|(k, v)| (k.as_str(), *v)).collect(),
         }
@@ -518,6 +518,7 @@ impl Drop for ModulesFile {
 #[cfg(test)]
 mod tests {
     use super::{run_parallel, RecordedWeights};
+    use crate::domain::NodeId;
     use crate::runner::RunPlan;
     #[cfg(not(unix))]
     use crate::runner::WorkerStrategy;
@@ -526,7 +527,7 @@ mod tests {
 
     #[test]
     fn a_collected_item_is_charged_for_every_node_it_expanded_into() {
-        let durations: HashMap<String, u64> = [
+        let durations: HashMap<NodeId, u64> = [
             ("m.py::test_a", 5),
             ("m.py::test_a[1]", 100),
             ("m.py::test_a[2]", 200),
@@ -535,7 +536,7 @@ mod tests {
             ("m.py::Klass::test_y", 60),
         ]
         .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
+        .map(|(k, v)| (NodeId::new(k), v))
         .collect();
         let w = RecordedWeights::new(&durations);
         assert_eq!(w.weight_of("m.py::test_a"), 305, "own time plus both cases");
@@ -554,7 +555,7 @@ mod tests {
 
     #[test]
     fn a_zero_recording_still_weighs_one() {
-        let durations: HashMap<String, u64> = [("m.py::t".to_string(), 0)].into_iter().collect();
+        let durations: HashMap<NodeId, u64> = [(NodeId::new("m.py::t"), 0)].into_iter().collect();
         assert_eq!(RecordedWeights::new(&durations).weight_of("m.py::t"), 1);
     }
 

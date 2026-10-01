@@ -124,7 +124,7 @@ mod tests {
                 results: (0..self.running)
                     .map(|i| RpcResult {
                         node_id: format!("n{i}"),
-                        outcome: "passed".into(),
+                        outcome: engine_core::domain::Outcome::Passed,
                         duration_ms: 1,
                     })
                     .collect(),

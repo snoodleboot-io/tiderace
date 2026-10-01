@@ -26,7 +26,7 @@
 //! `test_g` below pins the honest boundary rather than papering over it.
 
 use engine_core::collection::{Collector, RegexCollector};
-use engine_core::domain::{Outcome, TestResult};
+use engine_core::domain::{NodeId, Outcome, TestResult};
 use engine_core::exec::{SubprocessWorker, Worker};
 use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
@@ -325,12 +325,12 @@ fn a_recorded_offender_is_forked_from_the_start() {
     );
 
     // Second run, told what the first learned. Same result, reached without the in-process attempt.
-    let learned: HashSet<String> = first
+    let learned: HashSet<NodeId> = first
         .iter()
         .filter(|r| r.must_fork)
-        .map(|r| r.node_id.to_string())
+        .map(|r| r.node_id.clone())
         .collect();
-    assert!(learned.contains(&node));
+    assert!(learned.contains(node.as_str()));
 
     let second = ForkWorker::launch_optimistic(&python, &shim(), &dir)
         .expect("wellspring with restore")

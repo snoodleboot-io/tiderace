@@ -65,7 +65,7 @@ fn keyword_run(handler: &mut EngineHandler, expr: &str) -> BTreeSet<(String, Str
     }) {
         RpcResponse::RanFull { results } => results
             .into_iter()
-            .map(|r| (r.node_id, r.outcome))
+            .map(|r| (r.node_id.to_string(), r.outcome.to_string()))
             .collect(),
         other => panic!("expected RanFull, got {other:?}"),
     }

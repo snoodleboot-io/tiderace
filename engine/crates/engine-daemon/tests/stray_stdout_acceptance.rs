@@ -11,6 +11,7 @@
 #![cfg(unix)]
 
 use engine_core::collection::Collector;
+use engine_core::domain::Outcome;
 use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use engine_daemon::{EngineHandler, RpcHandler, RpcRequest, RpcResponse};
 use std::sync::mpsc;
@@ -85,7 +86,7 @@ fn stray_stdout_does_not_hang_the_warm_image_or_the_one_shot_worker() {
         .expect("TID-103: the run after a test printed to stdout must not hang the daemon");
     assert_eq!(full.len(), 5, "{full:?}");
     assert!(
-        full.iter().all(|r| r.outcome == "passed"),
+        full.iter().all(|r| r.outcome == Outcome::Passed),
         "a print is not a failure: {full:?}"
     );
     let mut ids: Vec<&str> = again.iter().map(|r| r.node_id.as_str()).collect();

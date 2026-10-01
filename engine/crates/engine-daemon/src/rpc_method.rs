@@ -1,3 +1,4 @@
+use engine_core::domain::{Outcome, TestResult};
 use serde::{Deserialize, Serialize};
 
 /// A request from a thin client (CLI or IDE) to the warm daemon (design 08, ADR-E007). JSON over the
@@ -47,50 +48,34 @@ impl RpcRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RpcResult {
     pub node_id: String,
-    pub outcome: String,
+    pub outcome: Outcome,
     pub duration_ms: u64,
-}
-
-/// One node of a [`RpcRequest::RunFull`] answer: the `TestResult` the CLI would have produced
-/// itself, so its report, exit code and schedule timeline are the same either way (TID-84).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct RpcFullResult {
-    pub node_id: String,
-    pub outcome: String,
-    pub duration_ms: u64,
-    #[serde(default)]
-    pub detail: String,
-    #[serde(default)]
-    pub touched_files: Vec<String>,
-    #[serde(default)]
-    pub pure: Option<bool>,
-    #[serde(default)]
-    pub must_fork: bool,
-    #[serde(default)]
-    pub skip_origin: String,
-    #[serde(default)]
-    pub expanded: bool,
-    #[serde(default)]
-    pub worker: Option<usize>,
-    #[serde(default)]
-    pub unit: Option<usize>,
-    #[serde(default)]
-    pub unit_started_ms: Option<u64>,
-    #[serde(default)]
-    pub unit_ended_ms: Option<u64>,
 }
 
 /// The daemon's reply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum RpcResponse {
-    Discovered { node_ids: Vec<String> },
-    Ran { results: Vec<RpcResult> },
-    RanFull { results: Vec<RpcFullResult> },
+    Discovered {
+        node_ids: Vec<String>,
+    },
+    Ran {
+        results: Vec<RpcResult>,
+    },
+    /// The `TestResult`s the CLI would have produced itself, so its report, exit code and
+    /// schedule timeline are the same either way (TID-84).
+    RanFull {
+        results: Vec<TestResult>,
+    },
     Watching,
-    Healthy { pid: i64, warm: bool },
+    Healthy {
+        pid: u32,
+        warm: bool,
+    },
     ShuttingDown,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -125,7 +110,7 @@ mod tests {
         let resp = RpcResponse::Ran {
             results: vec![RpcResult {
                 node_id: "t.py::a".into(),
-                outcome: "passed".into(),
+                outcome: Outcome::Passed,
                 duration_ms: 3,
             }],
         };

@@ -198,6 +198,7 @@ pub fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+use crate::domain::Outcome;
 use crate::error::{EngineError, Result};
 use crate::exec::{ExecRequest, ExecResponse, ReadyInfo, ShimTransport};
 
@@ -205,7 +206,7 @@ use crate::exec::{ExecRequest, ExecResponse, ReadyInfo, ShimTransport};
 /// run loop (request build → exchange → `TestResult` assembly) end to end, offline. Public so
 /// every worker's loop can be tested this way, not only `run_batch`.
 pub struct ScriptedShim {
-    pid: i64,
+    pid: Option<u32>,
     /// node_id → (outcome wire token, detail).
     script: std::collections::HashMap<String, (String, String)>,
     /// Outcome for any node_id not in `script`.
@@ -231,7 +232,7 @@ impl ScriptedShim {
 
     pub fn new() -> Self {
         Self {
-            pid: 0,
+            pid: None,
             script: std::collections::HashMap::new(),
             default_outcome: "passed".into(),
             seen: Vec::new(),
@@ -265,17 +266,20 @@ impl ShimTransport for ScriptedShim {
         self.seen.push(req.node_id.to_string());
         let (outcome, detail) = self
             .script
-            .get(req.node_id)
+            .get(req.node_id.as_str())
             .cloned()
             .unwrap_or((self.default_outcome.clone(), String::new()));
+        // Through serde, as the wire does: a token the engine does not know reads as `Error`.
+        let outcome: Outcome =
+            serde_json::from_value(serde_json::Value::String(outcome)).unwrap_or(Outcome::Error);
         Ok(ExecResponse {
             must_fork: false,
-            node_id: req.node_id.to_string(),
+            node_id: req.node_id.clone(),
             outcome,
             detail,
             coverage: Default::default(),
             pure: None,
-            skip_origin: String::new(),
+            skip_origin: None,
             keywords: Vec::new(),
             variants: Vec::new(),
             expanded: false,

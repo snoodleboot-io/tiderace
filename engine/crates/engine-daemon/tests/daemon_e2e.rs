@@ -5,6 +5,7 @@
 //! Gated on the Phase-3 venv + shim being present (the same guard engine-core's live tests use), so it
 //! runs here and skips cleanly in environments without Python.
 
+use engine_core::domain::Outcome;
 use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::io::{self, Cursor, Read, Write};
 
@@ -103,10 +104,10 @@ fn daemon_discovers_runs_and_stays_warm_over_a_real_wellspring() {
                 results
                     .iter()
                     .find(|r| r.node_id.ends_with(n))
-                    .map(|r| r.outcome.as_str())
+                    .map(|r| r.outcome)
             };
-            assert_eq!(outcome("test_pass"), Some("passed"));
-            assert_eq!(outcome("test_fail"), Some("failed"));
+            assert_eq!(outcome("test_pass"), Some(Outcome::Passed));
+            assert_eq!(outcome("test_fail"), Some(Outcome::Failed));
         }
         other => panic!("expected Ran, got {other:?}"),
     }
@@ -124,7 +125,7 @@ fn daemon_discovers_runs_and_stays_warm_over_a_real_wellspring() {
     match &resps[3] {
         RpcResponse::Ran { results } => {
             assert_eq!(results.len(), 1);
-            assert_eq!(results[0].outcome, "passed");
+            assert_eq!(results[0].outcome, Outcome::Passed);
         }
         other => panic!("expected Ran, got {other:?}"),
     }

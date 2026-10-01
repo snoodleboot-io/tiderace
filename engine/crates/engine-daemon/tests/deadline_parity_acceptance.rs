@@ -8,6 +8,7 @@
 
 #![cfg(unix)]
 
+use engine_core::domain::Outcome;
 use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use engine_daemon::{EngineHandler, RpcHandler, RpcRequest, RpcResponse};
 
@@ -29,7 +30,7 @@ fn a_six_second_test_passes_through_the_daemon_as_it_does_through_the_cli() {
 
     let full = handler.run_full_parallel().expect("full run");
     assert_eq!(full.len(), 1, "{full:?}");
-    assert_eq!(full[0].outcome, "passed", "full run: {full:?}");
+    assert_eq!(full[0].outcome, Outcome::Passed, "full run: {full:?}");
 
     // The warm single-worker path (`Run`) launches its own wellspring with its own deadline.
     match handler.handle(RpcRequest::Run {
@@ -37,7 +38,7 @@ fn a_six_second_test_passes_through_the_daemon_as_it_does_through_the_cli() {
     }) {
         RpcResponse::Ran { results } => {
             assert_eq!(results.len(), 1);
-            assert_eq!(results[0].outcome, "passed", "warm Run: {results:?}");
+            assert_eq!(results[0].outcome, Outcome::Passed, "warm Run: {results:?}");
         }
         other => panic!("expected Ran, got {other:?}"),
     }

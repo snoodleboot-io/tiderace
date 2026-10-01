@@ -7,6 +7,7 @@
 
 #![cfg(unix)]
 
+use engine_core::domain::{Outcome, TestResult};
 use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use engine_daemon::{EngineHandler, RpcHandler, RpcRequest, RpcResponse};
 use std::path::{Path, PathBuf};
@@ -33,7 +34,7 @@ fn imports(dir: &Path) -> usize {
         .unwrap_or(0)
 }
 
-fn run_full(handler: &mut EngineHandler) -> Vec<engine_daemon::RpcFullResult> {
+fn run_full(handler: &mut EngineHandler) -> Vec<TestResult> {
     match handler.handle(RpcRequest::run_full_all()) {
         RpcResponse::RanFull { results } => results,
         other => panic!("expected RanFull, got {other:?}"),
@@ -59,13 +60,13 @@ fn run_full_reuses_the_warm_image_until_the_tree_changes() {
 
     let first = run_full(&mut handler);
     assert_eq!(first.len(), 2, "{first:?}");
-    let outcome = |rs: &[engine_daemon::RpcFullResult], leaf: &str| {
+    let outcome = |rs: &[TestResult], leaf: &str| {
         rs.iter()
-            .find(|r| r.node_id.ends_with(leaf))
-            .map(|r| r.outcome.clone())
+            .find(|r| r.node_id.as_str().ends_with(leaf))
+            .map(|r| r.outcome)
     };
-    assert_eq!(outcome(&first, "test_one"), Some("passed".into()));
-    assert_eq!(outcome(&first, "test_two"), Some("failed".into()));
+    assert_eq!(outcome(&first, "test_one"), Some(Outcome::Passed));
+    assert_eq!(outcome(&first, "test_two"), Some(Outcome::Failed));
     assert_eq!(imports(&dir), 1, "the first run imported the suite");
     assert!(warm(&mut handler), "the image is held after the first run");
     assert!(
@@ -75,7 +76,7 @@ fn run_full_reuses_the_warm_image_until_the_tree_changes() {
 
     let second = run_full(&mut handler);
     assert_eq!(second.len(), 2);
-    assert_eq!(outcome(&second, "test_two"), Some("failed".into()));
+    assert_eq!(outcome(&second, "test_two"), Some(Outcome::Failed));
     assert_eq!(
         imports(&dir),
         1,
@@ -90,7 +91,7 @@ fn run_full_reuses_the_warm_image_until_the_tree_changes() {
     .unwrap();
     let third = run_full(&mut handler);
     assert_eq!(third.len(), 3, "{third:?}");
-    assert_eq!(outcome(&third, "test_three"), Some("passed".into()));
+    assert_eq!(outcome(&third, "test_three"), Some(Outcome::Passed));
     assert_eq!(imports(&dir), 2, "the relaunch imported the suite again");
     assert!(warm(&mut handler));
 

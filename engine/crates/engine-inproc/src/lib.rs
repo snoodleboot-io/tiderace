@@ -17,6 +17,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use engine_core::domain::{NodeId, Outcome};
 use engine_core::error::{EngineError, Result};
 use engine_core::exec::{ExecRequest, ExecResponse, ReadyInfo, ShimTransport};
 use pyo3::prelude::*;
@@ -128,7 +129,9 @@ impl ShimTransport for InProcessTransport {
         if self.engine.is_none() {
             self.boot()?;
         }
-        Ok(ReadyInfo { pid: self.pid })
+        Ok(ReadyInfo {
+            pid: u32::try_from(self.pid).ok(),
+        })
     }
 
     fn exchange(&mut self, req: &ExecRequest<'_>) -> Result<ExecResponse> {
@@ -139,9 +142,13 @@ impl ShimTransport for InProcessTransport {
         Python::attach(|py| -> PyResult<ExecResponse> {
             let res = engine
                 .bind(py)
-                .call_method1("run", (req.node_id, req.style, req.deadline_ms))?;
+                .call_method1(
+                    "run",
+                    (req.node_id.as_str(), req.style.token(), req.deadline_ms),
+                )?;
             let node_id: String = res.get_item("node_id")?.extract()?;
             let outcome: String = res.get_item("outcome")?.extract()?;
+            let outcome = Outcome::parse(&outcome);
             let detail: String = res
                 .get_item("detail")
                 .ok()
@@ -157,7 +164,7 @@ impl ShimTransport for InProcessTransport {
                 .ok()
                 .and_then(|p| p.extract::<bool>().ok());
             Ok(ExecResponse {
-                node_id,
+                node_id: NodeId::new(node_id),
                 outcome,
                 detail,
                 coverage,
@@ -169,7 +176,7 @@ impl ShimTransport for InProcessTransport {
                     .unwrap_or(false),
                 // Nothing here skips a whole module: this transport is handed one node at a time
                 // and the shim only sets `skip_origin` on an import-time skip (TID-55).
-                skip_origin: String::new(),
+                skip_origin: None,
                 // Nor does it report keywords: the daemon's `-k` prefilter (TID-102) reads the
                 // records the pool transports produce, not this one's.
                 keywords: Vec::new(),

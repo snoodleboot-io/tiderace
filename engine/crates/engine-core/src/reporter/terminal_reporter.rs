@@ -1,5 +1,4 @@
 use crate::domain::{Outcome, RunReport};
-use crate::reporter::reporter::outcome_token;
 use crate::reporter::Reporter;
 
 /// The default human reporter: a one-line tally plus the detail of every failing/erroring test.
@@ -14,7 +13,7 @@ impl Reporter for TerminalReporter {
             if matches!(r.outcome, Outcome::Failed | Outcome::Error) {
                 out.push_str(&format!(
                     "{} {}\n{}\n",
-                    outcome_token(r.outcome).to_uppercase(),
+                    r.outcome.token().to_uppercase(),
                     r.node_id,
                     indent(&r.detail)
                 ));
@@ -26,20 +25,13 @@ impl Reporter for TerminalReporter {
 }
 
 fn summary_line(report: &RunReport) -> String {
-    let parts = [
-        Outcome::Passed,
-        Outcome::Failed,
-        Outcome::Error,
-        Outcome::Skipped,
-        Outcome::XFail,
-        Outcome::XPass,
-    ]
-    .into_iter()
-    .filter_map(|o| {
-        let n = report.tally(o);
-        (n > 0).then(|| format!("{n} {}", outcome_token(o)))
-    })
-    .collect::<Vec<_>>();
+    let parts = Outcome::ALL
+        .into_iter()
+        .filter_map(|o| {
+            let n = report.tally(o);
+            (n > 0).then(|| format!("{n} {o}"))
+        })
+        .collect::<Vec<_>>();
     let body = if parts.is_empty() {
         "no tests".to_string()
     } else {

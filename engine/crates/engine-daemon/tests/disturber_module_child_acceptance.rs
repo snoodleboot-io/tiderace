@@ -8,6 +8,7 @@
 
 #![cfg(unix)]
 
+use engine_core::domain::Outcome;
 use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use engine_daemon::EngineHandler;
 use std::path::Path;
@@ -54,7 +55,10 @@ fn a_recorded_disturbers_class_setup_runs_once_per_module_child() {
     // Run 1: the first test leaves the server thread behind; the class is recorded as a disturber.
     let first = handler.run_full_parallel().expect("first run");
     assert_eq!(first.len(), 3, "{first:?}");
-    assert!(first.iter().all(|r| r.outcome == "passed"), "{first:?}");
+    assert!(
+        first.iter().all(|r| r.outcome == Outcome::Passed),
+        "{first:?}"
+    );
     let after_first = setup_calls(&dir);
     assert!(after_first >= 1, "setUpClass ran in run 1");
     let state: serde_json::Value =
@@ -75,7 +79,10 @@ fn a_recorded_disturbers_class_setup_runs_once_per_module_child() {
     let _ = std::fs::remove_file(dir.join("setup_calls.txt"));
     let second = handler.run_full_parallel().expect("second run");
     assert_eq!(second.len(), 3, "{second:?}");
-    assert!(second.iter().all(|r| r.outcome == "passed"), "{second:?}");
+    assert!(
+        second.iter().all(|r| r.outcome == Outcome::Passed),
+        "{second:?}"
+    );
     assert_eq!(
         setup_calls(&dir),
         1,

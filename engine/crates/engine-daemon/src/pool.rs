@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use engine_core::domain::{TestItem, TestResult};
+use engine_core::domain::{NodeId, TestItem, TestResult};
 #[cfg(unix)]
 use engine_core::exec::WellspringPool;
 #[cfg(unix)]
@@ -26,9 +26,9 @@ pub fn run_parallel(
     workers: usize,
     deadline_ms: u64,
     optimistic_no_fork: bool,
-    trusted: &HashSet<String>,
-    must_fork: &HashSet<String>,
-    durations: &HashMap<String, u64>,
+    trusted: &HashSet<NodeId>,
+    must_fork: &HashSet<NodeId>,
+    durations: &HashMap<NodeId, u64>,
     #[cfg(unix)] warm: Option<&mut WellspringPool>,
     #[cfg(not(unix))] warm: Option<()>,
 ) -> Result<Vec<TestResult>, String> {

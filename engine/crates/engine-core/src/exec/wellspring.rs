@@ -13,7 +13,7 @@ pub struct Wellspring {
     /// The framed pipe to the shim. Its write half is closed on [`Drop`] (→ shim EOF/exit) *before*
     /// the child is reaped, avoiding a shutdown deadlock.
     transport: Live,
-    pid: i64,
+    pid: Option<u32>,
 }
 
 impl Wellspring {
@@ -86,7 +86,7 @@ impl Wellspring {
     }
 
     /// The Wellspring process id (parent of all per-test forks).
-    pub fn pid(&self) -> i64 {
+    pub fn pid(&self) -> Option<u32> {
         self.pid
     }
 

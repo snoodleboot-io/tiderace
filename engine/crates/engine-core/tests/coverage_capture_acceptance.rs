@@ -19,7 +19,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use engine_core::collection::{Collector, RegexCollector};
-use engine_core::domain::Outcome;
+use engine_core::domain::{NodeId, Outcome, TestStyle};
 use engine_core::exec::{ExecRequest, PipeTransport, ShimTransport, SubprocessWorker, Worker};
 use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 
@@ -118,7 +118,11 @@ fn exchange_one(
     let mut transport = PipeTransport::new(stdin, stdout);
     transport.ready().expect("handshake");
     let resp = transport
-        .exchange(&ExecRequest::bare(node_id, "function", 30_000))
+        .exchange(&ExecRequest::bare(
+            &NodeId::new(node_id),
+            TestStyle::Function,
+            30_000,
+        ))
         .expect("exchange");
     transport.close_input();
     let _ = child.wait();
@@ -159,7 +163,7 @@ fn default_capture_reports_files_without_lines() {
         &["--coverage"],
         "tests/test_plain.py::test_triple",
     );
-    assert_eq!(resp.outcome, "passed", "{}", resp.detail);
+    assert_eq!(resp.outcome, Outcome::Passed, "{}", resp.detail);
     let thing = resp
         .coverage
         .get("src/thing.py")
@@ -190,7 +194,7 @@ fn coverage_lines_is_an_opt_in() {
         &["--coverage", "--coverage-lines"],
         "tests/test_plain.py::test_triple",
     );
-    assert_eq!(resp.outcome, "passed", "{}", resp.detail);
+    assert_eq!(resp.outcome, Outcome::Passed, "{}", resp.detail);
     let thing = resp
         .coverage
         .get("src/thing.py")

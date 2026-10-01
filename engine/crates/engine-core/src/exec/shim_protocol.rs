@@ -3,6 +3,7 @@ use std::io::{self, Read, Write};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::domain::{NodeId, Outcome, TestStyle};
 use crate::error::{EngineError, Result};
 use crate::fixtures::{FixtureArgs, FixtureInstance};
 
@@ -16,9 +17,9 @@ use crate::fixtures::{FixtureArgs, FixtureInstance};
 /// the Phase 2 frame — the length-prefixed JSON framing itself is unchanged (Phase 2 CONTRACT §3).
 #[derive(Debug, Serialize)]
 pub struct ExecRequest<'a> {
-    pub node_id: &'a str,
-    /// Wire token for the test style (`function` / `class_method` / `unittest_method`).
-    pub style: &'a str,
+    pub node_id: &'a NodeId,
+    /// The test style; its serde form is the token the shim dispatches on.
+    pub style: TestStyle,
     pub deadline_ms: u64,
     /// Function-scope fixture instances to set up in the forked child, topo order (design 05 §5.2).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -53,7 +54,7 @@ pub struct ExecRequest<'a> {
 impl<'a> ExecRequest<'a> {
     /// A Phase-2-shaped (fixtureless) request: the three wire fields, empty fixture fields. Keeps
     /// existing call sites concise and the frame byte-identical to Phase 2.
-    pub fn bare(node_id: &'a str, style: &'a str, deadline_ms: u64) -> Self {
+    pub fn bare(node_id: &'a NodeId, style: TestStyle, deadline_ms: u64) -> Self {
         Self {
             node_id,
             style,
@@ -83,9 +84,9 @@ impl<'a> ExecRequest<'a> {
 /// [`crate::coverage::CoverageReport::from_wire`].
 #[derive(Debug, Deserialize)]
 pub struct ExecResponse {
-    pub node_id: String,
-    /// Wire outcome token; parse with [`crate::domain::Outcome::from_wire`].
-    pub outcome: String,
+    pub node_id: NodeId,
+    /// The outcome; a token the engine does not know reads as [`Outcome::Error`].
+    pub outcome: Outcome,
     #[serde(default)]
     pub detail: String,
     /// Per-test touched source: `relative_path -> sorted line numbers` (empty unless capture is on).
@@ -117,9 +118,10 @@ pub struct ExecResponse {
     /// A `pytest.importorskip` in a module or in the conftest above it skips every test it holds.
     /// pytest reports that as one skip; tiderace reports one per test, which is the more useful
     /// number and looks like a defect beside pytest's. Carrying the origin lets the summary say
-    /// both — `578 skipped (12 modules skipped at import)`. Empty for a per-test skip.
-    #[serde(default)]
-    pub skip_origin: String,
+    /// both — `578 skipped (12 modules skipped at import)`. Absent for a per-test skip (the
+    /// shim spells that as `""`).
+    #[serde(default, deserialize_with = "crate::domain::empty_as_none")]
+    pub skip_origin: Option<String>,
     /// What `-k` matched this node against — path names, `::` segments, mark names — as the
     /// shim computed them (TID-102). Recorded by the daemon so it can take the verdict itself
     /// for a node whose dependencies are unchanged. Empty when the shim never reached the
@@ -138,9 +140,8 @@ pub struct ExecResponse {
 /// One parametrization case's result — a pytest-style `node_id[params]` and its own outcome.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VariantResult {
-    pub node_id: String,
-    /// Wire outcome token; parse with [`crate::domain::Outcome::from_wire`].
-    pub outcome: String,
+    pub node_id: NodeId,
+    pub outcome: Outcome,
     #[serde(default)]
     pub detail: String,
     #[serde(default)]
@@ -193,7 +194,8 @@ mod tests {
 
     #[test]
     fn frame_roundtrips_request_to_response_shape() {
-        let req = ExecRequest::bare("m.py::t", "function", 5000);
+        let node = NodeId::new("m.py::t");
+        let req = ExecRequest::bare(&node, TestStyle::Function, 5000);
         let mut buf = Vec::new();
         write_frame(&mut buf, &req).unwrap();
         // Header is the LE length of the JSON payload.
@@ -206,8 +208,9 @@ mod tests {
         write_frame(&mut out, &resp).unwrap();
         let mut cursor = io::Cursor::new(out);
         let back: ExecResponse = read_frame(&mut cursor).unwrap().unwrap();
-        assert_eq!(back.node_id, "m.py::t");
-        assert_eq!(back.outcome, "passed");
+        assert_eq!(back.node_id.as_str(), "m.py::t");
+        assert_eq!(back.outcome, Outcome::Passed);
+        assert_eq!(back.skip_origin, None);
     }
 
     #[test]

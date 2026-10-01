@@ -1,3 +1,4 @@
+use crate::domain::NodeId;
 use std::collections::{HashMap, HashSet};
 
 use crate::runner::{SchedulerKind, WorkerStrategy};
@@ -86,7 +87,7 @@ pub struct RunPlan {
     /// hides, 69s of CPU against fork-per-test's 140s for the same work.
     pub optimistic_no_fork: bool,
     /// Node ids recorded pure, eligible for the bare no-fork tier (TID-1).
-    pub trusted_pure: HashSet<String>,
+    pub trusted_pure: HashSet<NodeId>,
     /// Import the project **once** and fork the workers from that image, instead of running N
     /// independent wellsprings that each import it (TID-4).
     ///
@@ -115,14 +116,14 @@ pub struct RunPlan {
     /// The shim detects a first offence on its own and re-runs it forked, so correctness does not
     /// depend on this set being populated. What it buys is not paying for that discovery — a wasted
     /// in-process run plus a fork — on every subsequent run.
-    pub must_fork: HashSet<String>,
+    pub must_fork: HashSet<NodeId>,
     /// Recorded wall-clock ms per reported node id, from earlier runs (TID-62, ADR-E016).
     ///
     /// The scheduler's weights. Empty on a cold run, where every collected item weighs 1 and the
     /// queue's order is by test count — which on a suite whose per-test cost spans four orders of
     /// magnitude is barely better than no order at all. With these, the heaviest module goes out
     /// first, which is what keeps it off the tail of the run.
-    pub durations: HashMap<String, u64>,
+    pub durations: HashMap<NodeId, u64>,
 }
 
 impl Default for RunPlan {
