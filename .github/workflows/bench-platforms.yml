@@ -1,0 +1,73 @@
+# Cold timings on Windows and macOS (TID-13): pytest, pytest -n auto, and tiderace in each tier the
+# platform has, on the corpora that need no private snapshot. Manual: the numbers go into the
+# benchmarks guide by hand, with the runner named — a hosted runner's load is nobody's to control,
+# so every measurement carries its own round-to-round spread.
+name: bench-platforms
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: measured rounds per tool (plus one warm-up)
+        default: "3"
+      corpora:
+        description: corpora, space-separated (fx_corpus click cachetools)
+        default: "fx_corpus click cachetools"
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: bench · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+      - name: Cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine/target
+          key: ${{ runner.os }}-bench-cargo-${{ hashFiles('engine/Cargo.lock') }}
+      - name: Release build
+        working-directory: engine
+        run: cargo build --release -p engine-cli -p engine-daemon
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Python dependencies and the public corpora at their pinned versions
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pytest-xdist numpy
+          mkdir -p conformance/vendor
+          git clone -q --depth 1 --branch 8.1.7 https://github.com/pallets/click conformance/vendor/click
+          git clone -q --depth 1 --branch v6.1.0 https://github.com/tkem/cachetools conformance/vendor/cachetools
+          python -m pip install -e conformance/vendor/click -e conformance/vendor/cachetools
+      - name: Time the platform
+        shell: bash
+        env:
+          ROUNDS: ${{ inputs.rounds }}
+          TIDERACE_PY_FX_CORPUS: python
+          TIDERACE_PY_CLICK: python
+          TIDERACE_PY_CACHETOOLS: python
+        run: |
+          PY=$(python -c "import sys; print(sys.executable)")
+          export TIDERACE_PY_FX_CORPUS="$PY" TIDERACE_PY_CLICK="$PY" TIDERACE_PY_CACHETOOLS="$PY"
+          python benchmarks/harness/platform_bench.py ${{ inputs.corpora }}
+      - name: Keep the numbers
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: platform-timings-${{ matrix.os }}
+          path: benchmarks/harness/platform-*.json

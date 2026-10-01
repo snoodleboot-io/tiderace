@@ -19,9 +19,16 @@ VENVS = os.environ.get("TIDERACE_BENCH_VENVS", os.path.join(R, ".tiderace-bench-
 PIRN = os.environ.get("PIRN_SNAPSHOT")
 
 
+def _venv_python(venv: str) -> str:
+    """The interpreter of a venv, where this platform keeps it."""
+    if os.name == "nt":
+        return os.path.join(venv, "Scripts", "python.exe")
+    return os.path.join(venv, "bin", "python")
+
+
 def _python(name: str) -> str:
-    return os.environ.get(f"TIDERACE_PY_{name.upper().replace('-', '_')}") or os.path.join(
-        VENVS, name, "bin", "python"
+    return os.environ.get(f"TIDERACE_PY_{name.upper().replace('-', '_')}") or _venv_python(
+        os.path.join(VENVS, name)
     )
 
 
@@ -46,7 +53,7 @@ def _internal(pkg: str):
 CORPORA = [
     (
         "fx_corpus", "internal", os.path.join(R, "benchmarks", "fixtures", "fx_corpus"),
-        os.environ.get("TIDERACE_PY_FX_CORPUS") or os.path.join(R, ".tiderace-fx-venv", "bin", "python"),
+        os.environ.get("TIDERACE_PY_FX_CORPUS") or _venv_python(os.path.join(R, ".tiderace-fx-venv")),
         "tests", os.path.join(R, "benchmarks", "fixtures", "fx_corpus", "tests"), "",
     ),
     *([_internal("pirn-data"), _internal("pirn-agents"), _internal("pirn-core")] if PIRN else []),
@@ -58,7 +65,8 @@ CORPORA = [
 
 # `TIDERACE_BIN` lets a pass point at a binary built from a branch without touching the tree the
 # other pass is using — the A/B between two builds has to be able to run them side by side.
-TIDERACE = os.environ.get("TIDERACE_BIN", os.path.join(R, "engine", "target", "release", "tiderace"))
+TIDERACE = os.environ.get("TIDERACE_BIN", os.path.join(
+    R, "engine", "target", "release", "tiderace.exe" if os.name == "nt" else "tiderace"))
 # `TIDERACE_SHIM` / `TIDERACE_PY_TIDERACE` point a pass at a branch's shim and package the same way
 # `TIDERACE_BIN` points it at a branch's binary (read here, before `clean_env` strips them).
 SHIM = os.environ.get("TIDERACE_SHIM") or os.path.join(R, "engine", "py-shim", "shim.py")
@@ -70,8 +78,12 @@ def by_name(name: str):
 
 
 def load() -> float:
-    """The one-minute load average — recorded with every measurement, never assumed."""
-    return float(open("/proc/loadavg").read().split()[0])
+    """The one-minute load average — recorded with every measurement, never assumed. Zero where
+    the platform has none to report (Windows)."""
+    try:
+        return os.getloadavg()[0]
+    except (AttributeError, OSError):
+        return 0.0
 
 
 def clean_env() -> dict:
