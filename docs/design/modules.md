@@ -104,9 +104,11 @@ The `inproc-probe` binary (`main.rs`) and `InProcessTransport`: one embedded CPy
 FFI — no subprocess, no pipe — proving the `ShimTransport` seam (ADR-E011/E013). A research path toward
 import-once + parallel fork; not the production path.
 
-## `py-shim/shim.py` — the execution substrate
+## `py-shim/` — the execution substrate
 
-The only logic that runs inside CPython. Imports user code, invokes test bodies, and implements the
+`shim.py` is a thin entry file; the shim is the package beside it, `tiderace_shim/` (`_shim.py`,
+with `main()` as the argv dispatch — TID-116). The engine launches the entry, `TIDERACE_SHIM` points
+at it, and the wheel stages both into `tiderace/_shim/`. The only logic that runs inside CPython. Imports user code, invokes test bodies, and implements the
 **isolation ladder**: `static_impurity` (AST pre-filter), `_restorable` (can this module be snapshot
 + restored?), `_restore_shared` (snapshot/undo of module globals + `os.environ`), and `Engine.run`
 (picks bare no-fork / no-fork + restore / `os.fork()`). It also captures coverage via `sys.monitoring`
