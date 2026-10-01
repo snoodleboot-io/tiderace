@@ -32,7 +32,12 @@ Commands:
   daemon stop <path>      shut it down
 
 Options for `run`:
-  -n, --workers <N>       parallel workers (default: CPU count; 1 = sequential)
+  -n, --workers <N>       parallel workers (default: the CPU count, capped by what memory allows
+                          once the imported image's size is known; a count given here is used
+                          as given)
+      --memory-limit <MB> what the workers may occupy together, in megabytes: caps the pool
+                          whatever the count. Also TIDERACE_MEMORY_LIMIT_MB, which the daemon
+                          honours too
       --strategy <TIER>   isolation tier: fork | subinterp | subprocess
                           (default: fork on Unix, subprocess elsewhere)
       --scheduler <KIND>  batch packing: locality | round-robin (default: locality)
@@ -64,6 +69,8 @@ Environment:
   TIDERACE_SHIM           path to shim.py (required if no bundled shim is installed)
   TIDERACE_PYTHON         interpreter to drive (default: python3 / python)
   TIDERACE_FORCE_FORK=1   same as --no-optimistic (the daemon already honours this)
+  TIDERACE_MEMORY_LIMIT_MB what the workers may occupy together, as --memory-limit; the one the
+                          daemon reads, since a run through it carries no flags
   TIDERACE_NO_SHARED_IMPORT=1  same as --no-shared-import
 
 Notes:
@@ -415,6 +422,17 @@ impl Options {
                         return Err("--workers must be at least 1".into());
                     }
                     plan.workers = n;
+                    plan.workers_explicit = true;
+                }
+                "--memory-limit" => {
+                    let raw = value("--memory-limit")?;
+                    let mb: u64 = raw
+                        .parse()
+                        .map_err(|_| format!("--memory-limit expects megabytes, got {raw:?}"))?;
+                    if mb == 0 {
+                        return Err("--memory-limit must be at least 1 MB".into());
+                    }
+                    plan.memory_limit_mb = Some(mb);
                 }
                 "--strategy" => {
                     let raw = value("--strategy")?;
@@ -674,6 +692,26 @@ fn cmd_run(
         report.tally(Outcome::Skipped),
         report.total(),
     );
+    // Each worker's peak resident size, where the platform reports it (TID-106): the number to
+    // know before running a suite on a smaller box, and the one `--memory-limit` acts on.
+    {
+        let mut peaks: std::collections::BTreeMap<usize, u64> = Default::default();
+        for r in &report.results {
+            if let (Some(w), Some(mb)) = (r.worker, r.worker_peak_rss_mb) {
+                let e = peaks.entry(w).or_insert(0);
+                *e = (*e).max(mb);
+            }
+        }
+        if !peaks.is_empty() {
+            let total: u64 = peaks.values().sum();
+            let max = peaks.values().copied().max().unwrap_or(0);
+            eprintln!(
+                "tiderace: memory: {} worker{}, peak {max} MB each at most, {total} MB together",
+                peaks.len(),
+                if peaks.len() == 1 { "" } else { "s" }
+            );
+        }
+    }
     if let Some(path) = report_path {
         // Written after the summary so a failure to write is the last thing on the terminal, and
         // non-fatal: the run's own verdict is what the exit code is for, and losing the report file

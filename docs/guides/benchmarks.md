@@ -108,6 +108,14 @@ against xdist's 1.9 on pirn-core, 3.9 against 2.7 on pirn-agents, and 6.5 GB on 
 tests start a Spark JVM in each worker that touches them — eight JVMs where serial pytest starts
 one. The suite's shape, not a leak; the number to know before running it on a small box.
 
+Since TID-106 the number is knowable and the default accounts for it: the default worker count
+is capped by what memory allows once the imported image is up (a share of what is available,
+less the image, at half the image's size per worker — the growth measured above), a count given
+with `--workers` is used as given, `--memory-limit <MB>` (or `TIDERACE_MEMORY_LIMIT_MB`, which the
+daemon reads too) caps the pool whatever the count, and every run reports each worker's peak
+resident size — on the terminal as one line and in `--report` as a `workers` table. Linux only:
+that is where the kernel reports both numbers.
+
 **Worker scaling**, pirn-core cold, median of two rounds: `--workers 1` 83.2 s, `2` 45.0 s, `4`
 28.6 s, `8` 27.7 s — linear to the four physical cores, flat across the hyper-threads. Serial
 tiderace at 83 s is pytest's 78 s plus the restore bookkeeping; the parallelism is the whole of

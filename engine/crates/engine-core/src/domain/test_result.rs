@@ -55,6 +55,11 @@ pub struct TestResult {
     pub unit: Option<usize>,
     pub unit_started_ms: Option<u64>,
     pub unit_ended_ms: Option<u64>,
+    /// The peak resident size, in MB, of the worker process that ran this test, over the whole
+    /// run (TID-106) — sampled after every unit, so a suite like pirn-data, where each worker
+    /// starts a JVM, can be seen for what it is. Absent where the platform cannot say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_peak_rss_mb: Option<u64>,
 }
 
 impl TestResult {
@@ -79,10 +84,17 @@ impl TestResult {
             unit: None,
             unit_started_ms: None,
             unit_ended_ms: None,
+            worker_peak_rss_mb: None,
         }
     }
 
     /// Stamp the schedule slot this result ran in (TID-78).
+    /// Record the running worker's peak resident size (builder style, TID-106).
+    pub fn with_worker_peak_rss_mb(mut self, mb: Option<u64>) -> Self {
+        self.worker_peak_rss_mb = mb;
+        self
+    }
+
     pub fn with_schedule(
         mut self,
         worker: usize,

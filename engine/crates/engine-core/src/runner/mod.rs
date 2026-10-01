@@ -13,12 +13,14 @@
 //!
 //! One type per file (ADR-E005).
 
+mod memory;
 mod parallel_runner;
 mod run_plan;
 mod scheduler_kind;
 mod verdicts;
 mod worker_strategy;
 
+pub use memory::{available_memory_bytes, process_rss_bytes, workers_by_memory, MemorySizing};
 #[cfg(unix)]
 pub use parallel_runner::run_parallel_with_pool;
 pub use parallel_runner::{locality_key, run_parallel};

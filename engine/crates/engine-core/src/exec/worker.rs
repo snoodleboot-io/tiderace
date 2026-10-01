@@ -12,4 +12,10 @@ pub trait Worker {
     fn is_lost(&self) -> bool {
         false
     }
+
+    /// The worker process's pid, when it is a process of its own: what its memory is read from
+    /// (TID-106). `None` for a tier that runs in the engine's own process.
+    fn pid(&self) -> Option<u32> {
+        None
+    }
 }

@@ -176,6 +176,10 @@ impl Worker for SubprocessWorker {
         }
         Ok(results)
     }
+
+    fn pid(&self) -> Option<u32> {
+        self.proc.as_ref().map(|p| p.child.id())
+    }
 }
 
 /// A live no-fork wellspring process + its framed pipe (mirrors `Wellspring`, minus the fork).

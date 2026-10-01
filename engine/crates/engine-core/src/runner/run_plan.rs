@@ -42,6 +42,12 @@ pub struct RunPlan {
     pub scheduler: SchedulerKind,
     /// How many workers to run in parallel. Clamped to at least 1, and never more than the test count.
     pub workers: usize,
+    /// `workers` was the user's own (`--workers`), and is honoured as given; a default count is
+    /// capped by what memory allows once the imported image's size is known (TID-106).
+    pub workers_explicit: bool,
+    /// An explicit total for the workers' memory, in megabytes (`--memory-limit`,
+    /// `TIDERACE_MEMORY_LIMIT_MB`): caps the pool whatever the count (TID-106).
+    pub memory_limit_mb: Option<u64>,
     /// Per-test deadline in milliseconds.
     pub deadline_ms: u64,
     /// Split a module heavier than one perfect bin across workers (TID-52). Off by default since
@@ -125,6 +131,11 @@ impl Default for RunPlan {
             strategy: WorkerStrategy::platform_default(),
             scheduler: SchedulerKind::default(),
             workers: default_workers(),
+            workers_explicit: false,
+            memory_limit_mb: std::env::var("TIDERACE_MEMORY_LIMIT_MB")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .filter(|mb| *mb > 0),
             deadline_ms: DEFAULT_DEADLINE_MS,
             shard_modules: false,
             optimistic_no_fork: true,

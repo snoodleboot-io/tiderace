@@ -26,7 +26,16 @@ struct JsonRun<'a> {
     /// Distinct modules that skipped at import — the other dimension of `skipped` (TID-55).
     skipped_modules: usize,
     exit_code: i32,
+    /// Each worker's peak resident size over the run, MB (TID-106); empty where unknown.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    workers: Vec<JsonWorker>,
     tests: Vec<JsonTest<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonWorker {
+    worker: usize,
+    peak_rss_mb: u64,
 }
 
 #[derive(Serialize)]
@@ -72,6 +81,22 @@ impl Reporter for JsonReporter {
             xpassed: report.tally(Outcome::XPass),
             skipped_modules: report.skipped_modules(),
             exit_code: report.exit_code(),
+            workers: {
+                let mut peaks: std::collections::BTreeMap<usize, u64> = Default::default();
+                for r in &report.results {
+                    if let (Some(w), Some(mb)) = (r.worker, r.worker_peak_rss_mb) {
+                        let e = peaks.entry(w).or_insert(0);
+                        *e = (*e).max(mb);
+                    }
+                }
+                peaks
+                    .into_iter()
+                    .map(|(worker, peak_rss_mb)| JsonWorker {
+                        worker,
+                        peak_rss_mb,
+                    })
+                    .collect()
+            },
             tests: report.results.iter().map(json_test).collect(),
         };
         serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
