@@ -60,6 +60,107 @@ comparison — is in that directory's README. `second_run.py` is the benchmark t
 do not cover: a warm run with nothing edited, one edit to a leaf module, one to a hub module, and an
 edit that must produce a failure (the stale-pass check). Its numbers are in the section below.
 
+### The eight-suite pass, 1 October 2026
+
+`bench_pass.sh` again on main at `794153e` (after TID-96 … TID-103): parity, node diff, cold
+timings with peak memory, the second run, warm vs xdist, worker scaling. Same machine, one-minute
+load 3–11 recorded with every sample; three interleaved rounds after a discarded warm-up, medians.
+Parity is the 29 September result unchanged: eight suites, 0 outcome differences on seven, anyio's
+8 tiderace-only failures all `pytester`.
+
+**Cold timings**, median wall clock in seconds.
+
+| suite | pytest | pytest -n auto | tiderace | vs pytest | vs xdist |
+| -- | --: | --: | --: | --: | --: |
+| pirn-core | 78.0 | 39.9 | **27.2** | 2.86× | 1.47× |
+| pirn-agents | 104.7 | 47.9 | **32.4** | 3.23× | 1.48× |
+| pirn-data | 30.6 | exit 3 | **14.6** | 2.09× | — |
+| anyio | 48.4 | 15.0 | **9.6** | 5.06× | 1.57× (partial parity) |
+| cachetools | 0.70 | 1.64 | **0.47** | 1.49× | 3.5× |
+| click | 1.38 | 1.92 | **0.69** | 2.0× | 2.8× |
+| flask | 2.09 | 2.54 | **1.21** | 1.73× | 2.1× |
+| fx_corpus | 0.92 | 2.21 | 0.93 (**0.56** with `--shard-modules`) | 0.99× | 2.4× |
+
+`warm_vs_xdist.py`, the dedicated head-to-head at the same load: pirn-agents **xdist 47.0 s,
+tiderace warm 32.1 s, 1.46×**; pirn-core **40.9 s against 26.4 s, 1.55×**.
+
+**Memory**, peak proportional set size of each runner's whole process tree in MB, sampled every
+200 ms, one run each. PSS charges a page the fork pool's workers share with their image once,
+divided among them; summed RSS charged it to every process that maps it and read nine gigabytes
+for pirn-data where there are 6.5.
+
+| suite | pytest | pytest -n auto | tiderace |
+| -- | --: | --: | --: |
+| pirn-data | 831 | 1,436 (exit 3) | 6,516 |
+| pirn-agents | 1,099 | 2,721 | 3,863 |
+| pirn-core | 470 | 1,930 | 2,426 |
+| anyio | 213 | 455 | **292** |
+| flask | 61 | 358 | **179** |
+| click | 53 | 279 | **69** |
+| fx_corpus | 49 | 313 | **79** |
+| cachetools | 39 | 268 | **45** |
+
+On the small suites tiderace holds well under xdist — eight forked workers share the imported
+image where xdist's eight are eight interpreters. On the monorepo suites it holds more: 2.4 GB
+against xdist's 1.9 on pirn-core, 3.9 against 2.7 on pirn-agents, and 6.5 GB on pirn-data, whose
+tests start a Spark JVM in each worker that touches them — eight JVMs where serial pytest starts
+one. The suite's shape, not a leak; the number to know before running it on a small box.
+
+**Worker scaling**, pirn-core cold, median of two rounds: `--workers 1` 83.2 s, `2` 45.0 s, `4`
+28.6 s, `8` 27.7 s — linear to the four physical cores, flat across the hyper-threads. Serial
+tiderace at 83 s is pytest's 78 s plus the restore bookkeeping; the parallelism is the whole of
+the win on a full run.
+
+**Suite size.** Synthetic suites from `scale_corpus.py` — fifty trivial tests a module, one
+parametrized and one marked per module, a session fixture half the tests take — so the tests cost
+nothing and the runner's own cost is what grows. Median of three.
+
+| run | 2,000 tests · 40 modules | 20,000 tests · 400 modules |
+| -- | --: | --: |
+| pytest | 1.87 s | 16.4 s |
+| pytest -n auto | 3.02 s | 19.6 s |
+| tiderace, cold | **0.71 s** | **4.24 s** |
+| tiderace, warm daemon | 0.26 s | 5.51 s |
+| pytest -k one test | 0.65 s | 4.43 s |
+| tiderace -k one test, no daemon | 0.43 s | 1.22 s |
+| tiderace -k one test, warm daemon | **0.10 s** | **0.81 s** |
+
+The cold run scales as it should (2.6× pytest, then 3.9×) and xdist is slower than serial pytest
+at both sizes on tests that cost nothing. One test by name through the daemon is 6.5× and 5.5×
+faster than pytest's own `-k`. Two honest readings: the daemon's *full* run on 20,000 trivial
+tests is slower than a cold run (5.5 s against 4.2) — with nothing to import, the image saves
+nothing and the bookkeeping of 20,000 records (footprints, keywords, durations) is what remains;
+the daemon is for suites with an import graph, and for `-k`. And `-k` through the daemon grows
+from 0.10 s to 0.81 s across the tenfold, most of it the state file's load and the hash of every
+known file, which grow with the suite where TID-102's decision itself stays small.
+
+**Windows and macOS** (TID-13), by the `bench-platforms` workflow on hosted runners: a release
+build, Python 3.14.7, the corpora that need no private snapshot, three rounds after a warm-up.
+
+| platform · suite | pytest | pytest -n auto | tiderace | `--workers 1` | `--strategy subinterp` |
+| -- | --: | --: | --: | --: | --: |
+| windows-latest · fx_corpus | 0.66 | 1.37 | 0.80 | 0.66 | 0.90, exit 1 |
+| windows-latest · cachetools | 0.47 | 1.10 | 0.49 | 0.42 | 0.56, exit 1 |
+| macos-14 · fx_corpus | 0.42 | 0.79 | 0.52 | 0.53 | — |
+| macos-14 · cachetools | 0.29 | 0.61 | 0.23 | 0.30 | — |
+
+On suites this small every parallel tier pays more in start-up than it earns, on every platform,
+xdist most of all. Windows has no fork, so tiderace's default there is the no-fork subprocess
+worker; the sub-interpreter tier runs both suites but exits 1 on each — tests pass in the
+subprocess tier that fail in a sub-interpreter — and hung for an hour on click's suite
+(TID-104). It is not a tier to select by default. click 8.1.7's own suite does not collect under
+pytest on 3.14, so it is not a baseline on these runners. The monorepo suites, where the parallel
+tiers earn their keep, have no Windows measurement: their snapshots are private and the machine
+is Linux.
+
+**The second run**, 1 October (29 September in brackets): pirn-core — pytest 78.1 s, cold
+`run --all` 27.4 s [30.7], nothing edited **0.18 s** [0.16], a leaf edited **1.93 s** [1.38], the
+hub edited 25.7 s [25.9], a failing edit reported in 1.70 s [1.09]; pirn-agents — pytest 105.9 s,
+cold 41.1 s [40.3], nothing edited **0.17 s** [0.13], a leaf **3.42 s** [1.79], the hub 15.5 s
+[13.9], a failing edit 2.72 s [1.49]. The leaf and failing-edit rows are slower than in September
+by a second or two: the daemon now records keywords for every node and re-baselines the hashes of
+more files (TID-102, TID-101), and both are paid on the run after an edit.
+
 ### The eight-suite pass, 29 September 2026
 
 `bench_pass.sh` — parity, node diff, cold timings, the second run, warm vs xdist — on main at
