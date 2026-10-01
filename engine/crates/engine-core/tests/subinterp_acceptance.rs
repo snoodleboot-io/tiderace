@@ -4,34 +4,19 @@
 //! — the §8 boundary-3 invariant that makes the tier safe. Needs CPython 3.14 (`concurrent.interpreters`),
 //! so it gates on the fx venv (which is 3.14); self-skips otherwise.
 
-use engine_core::testing::skip_live;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubInterpWorker, Worker};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-/// The fx venv is CPython 3.14 (has `concurrent.interpreters`); used by the fork-identity check (Unix).
-fn venv_python() -> Option<String> {
-    let p = repo_root().join(".tiderace-fx-venv/bin/python");
-    p.exists().then(|| p.to_string_lossy().into_owned())
-}
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 
 /// Any interpreter with `concurrent.interpreters` (CPython 3.14+): the fx venv, else a `python3`/`python`
 /// on `PATH` that actually has the module. Lets the correctness check run on **Windows CI** too (where
 /// `setup-python` provisions 3.14) — the platform the tier exists for. `None` ⇒ skip.
 fn subinterp_python() -> Option<String> {
-    if let Some(v) = venv_python() {
+    if let Some(v) = python(PythonNeeds::FxVenv) {
         return Some(v);
     }
     for cand in ["python3", "python"] {
@@ -137,7 +122,7 @@ fn subinterp_pool_runs_safe_tests_correctly() {
 fn subinterp_is_result_identical_to_fork() {
     use engine_core::exec::ForkWorker;
 
-    let Some(python) = venv_python() else {
+    let Some(python) = python(PythonNeeds::FxVenv) else {
         skip_live("`.tiderace-fx-venv` (CPython 3.14) not present");
         return;
     };

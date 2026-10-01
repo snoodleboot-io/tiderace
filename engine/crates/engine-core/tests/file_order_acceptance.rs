@@ -105,41 +105,11 @@ mod live {
     use engine_core::collection::{Collector, RegexCollector};
     use engine_core::domain::Outcome;
     use engine_core::runner::{run_parallel, RunPlan, SchedulerKind, WorkerStrategy};
-    use engine_core::testing::skip_live;
-    use std::path::PathBuf;
-
-    fn repo_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../..")
-            .canonicalize()
-            .expect("repo root")
-    }
-
-    fn shim() -> PathBuf {
-        repo_root().join("engine/py-shim/shim.py")
-    }
-
-    fn any_python() -> Option<String> {
-        let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-        if venv.exists() {
-            return Some(venv.to_string_lossy().into_owned());
-        }
-        for cand in ["python3", "python"] {
-            let ok = std::process::Command::new(cand)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if ok {
-                return Some(cand.to_string());
-            }
-        }
-        None
-    }
+    use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 
     #[test]
     fn a_modules_tests_run_in_file_order_in_one_process_with_more_workers_than_tests() {
-        let Some(python) = any_python() else {
+        let Some(python) = python(PythonNeeds::Any) else {
             skip_live("no Python interpreter available");
             return;
         };
@@ -173,7 +143,7 @@ mod live {
     /// next on the same worker starts from what the worker found before the first.
     #[test]
     fn a_files_own_globals_carry_between_its_tests_and_not_into_the_next_module() {
-        let Some(python) = any_python() else {
+        let Some(python) = python(PythonNeeds::Any) else {
             skip_live("no Python interpreter available");
             return;
         };

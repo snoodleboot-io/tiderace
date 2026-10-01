@@ -8,38 +8,9 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{PooledWorker, WellspringPool, Worker};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    for cand in ["python3", "python"] {
-        let ok = std::process::Command::new(cand)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(cand.to_string());
-        }
-    }
-    None
-}
 
 /// A module whose import is *observable*: it stamps the importing process's pid into a global. If
 /// the pool works, every worker inherits the same stamp, because the import happened once in their
@@ -80,7 +51,7 @@ fn write_corpus(tag: &str, modules: usize) -> PathBuf {
 /// The pool runs a corpus to the same answers as any other tier.
 #[test]
 fn a_pooled_run_produces_the_same_results() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -119,7 +90,7 @@ fn a_pooled_run_produces_the_same_results() {
 /// not their own. N independent wellsprings could not produce that.
 #[test]
 fn the_project_is_imported_once_for_the_whole_pool() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -176,7 +147,7 @@ fn the_project_is_imported_once_for_the_whole_pool() {
 /// than hang CI along with it.
 #[test]
 fn a_pool_whose_parent_dies_before_workers_connect_fails_fast() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

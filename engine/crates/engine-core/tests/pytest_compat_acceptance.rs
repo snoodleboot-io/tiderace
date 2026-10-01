@@ -25,61 +25,8 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-/// These corpora define real pytest fixtures, so they need an interpreter that has pytest. Prefer
-/// the fx venv, which CI provisions for exactly this.
-fn python_with_pytest() -> Option<String> {
-    python_that_imports("import pytest")
-}
-
-/// pytest *and* the tiderace builtins — the `monkeypatch` test needs both. Resolved through the
-/// spawned interpreter's own import path, exactly as `builtins_acceptance` does, so it runs wherever
-/// CI puts `engine/py-tiderace` on `PYTHONPATH` and skips (loudly) where nothing does.
-fn python_with_pytest_and_builtins() -> Option<String> {
-    python_that_imports("import pytest, tiderace.builtins")
-}
-
-fn python_that_imports(statement: &str) -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    let candidates: Vec<String> = if venv.exists() {
-        vec![venv.to_string_lossy().into_owned()]
-    } else {
-        vec!["python3".into(), "python".into()]
-    };
-    candidates.into_iter().find(|p| {
-        std::process::Command::new(p)
-            .args(["-c", statement])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-}
-
-fn scratch(tag: &str) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "tiderace_t44_{tag}_{}_{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use engine_core::testing::{python, scratch, shim, skip_live, PythonNeeds};
+use std::path::Path;
 
 fn run_all(dir: &Path, python: String) -> Vec<engine_core::domain::TestResult> {
     let items = RegexCollector::new().collect(dir).expect("collection");
@@ -107,7 +54,7 @@ fn assert_all_passed(results: &[engine_core::domain::TestResult], why: &str) {
 /// than pass by accident.
 #[test]
 fn a_fixture_in_the_pre_8_4_layout_is_recognised() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no interpreter with pytest available");
         return;
     };
@@ -171,7 +118,7 @@ runner = _decorated_runner
 /// finalizers newest first, because pytest registers the yield teardown after the body returns.
 #[test]
 fn addfinalizer_runs_at_the_fixtures_own_teardown_in_pytest_order() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no interpreter with pytest available");
         return;
     };
@@ -251,7 +198,7 @@ def test_b(session_thing, ordered):
 /// exist" sentinel, and that sentinel changed name and type between pytest 8 and 9.
 #[test]
 fn pytest_format_setitem_records_are_undone() {
-    let Some(python) = python_with_pytest_and_builtins() else {
+    let Some(python) = python(PythonNeeds::PytestAndTiderace) else {
         skip_live(
             "no interpreter can import both pytest and `tiderace` — put engine/py-tiderace on \
              PYTHONPATH (CI does)",

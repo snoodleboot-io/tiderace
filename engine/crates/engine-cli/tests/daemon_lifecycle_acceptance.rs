@@ -7,37 +7,10 @@
 
 #![cfg(unix)]
 
+use engine_core::testing::{python, shim, PythonNeeds};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    ["python3", "python"]
-        .into_iter()
-        .find(|cand| {
-            Command::new(cand)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-        .map(str::to_string)
-}
 
 fn write_project(tag: &str) -> PathBuf {
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -72,7 +45,7 @@ fn text(out: &std::process::Output) -> (String, String) {
 
 #[test]
 fn status_and_stop_without_a_daemon_say_so_and_fail() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         eprintln!("skipping: no Python interpreter available");
         return;
     };
@@ -105,7 +78,7 @@ fn status_and_stop_without_a_daemon_say_so_and_fail() {
 /// proven without depending on a second binary being built.
 #[test]
 fn run_goes_through_a_serving_daemon_and_stop_ends_it() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         eprintln!("skipping: no Python interpreter available");
         return;
     };
@@ -263,7 +236,7 @@ fn run_goes_through_a_serving_daemon_and_stop_ends_it() {
 /// this binary (a workspace `cargo test` does that); otherwise the scenario is skipped.
 #[test]
 fn start_spawns_the_daemon_binary_and_waits_for_it() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         eprintln!("skipping: no Python interpreter available");
         return;
     };

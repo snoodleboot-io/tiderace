@@ -16,36 +16,9 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestResult};
 use engine_core::runner::{run_parallel, RunPlan, SchedulerKind, WorkerStrategy};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-/// Any interpreter on `PATH`. The fx venv is deliberately NOT preferred here: it is provisioned only
-/// on some machines, and this corpus needs nothing beyond the stdlib.
-fn any_python() -> Option<String> {
-    for cand in ["python3", "python"] {
-        let ok = std::process::Command::new(cand)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(cand.to_string());
-        }
-    }
-    None
-}
 
 /// Spans outcome types and both styles, across two modules so the scheduler has something to pack.
 const MODULE_A: &str = "\
@@ -109,7 +82,7 @@ fn fingerprint(results: &[TestResult]) -> Vec<(String, Outcome)> {
 
 #[test]
 fn every_available_tier_runs_the_corpus_and_agrees() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -170,7 +143,7 @@ fn every_available_tier_runs_the_corpus_and_agrees() {
 /// The scheduler must not change results either — it only decides who runs what, in what order.
 #[test]
 fn both_schedulers_agree_on_the_same_corpus() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -199,7 +172,7 @@ fn both_schedulers_agree_on_the_same_corpus() {
 /// Worker count is a throughput knob, not a semantic one — and 1 worker must still run everything.
 #[test]
 fn worker_count_does_not_change_results() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

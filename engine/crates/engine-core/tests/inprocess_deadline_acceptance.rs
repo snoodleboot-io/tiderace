@@ -13,36 +13,8 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestResult};
 use engine_core::runner::{run_parallel, RunPlan, SchedulerKind, WorkerStrategy};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    ["python3", "python"]
-        .into_iter()
-        .find(|cand| {
-            std::process::Command::new(cand)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-        .map(str::to_string)
-}
 
 fn get<'a>(results: &'a [TestResult], leaf: &str) -> &'a TestResult {
     results
@@ -74,7 +46,7 @@ fn plan() -> RunPlan {
 /// test in the same file runs.
 #[test]
 fn a_blocking_lock_on_the_in_process_tier_is_a_timeout_and_the_worker_goes_on() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -117,7 +89,7 @@ fn a_blocking_lock_on_the_in_process_tier_is_a_timeout_and_the_worker_goes_on() 
 /// read gives up a margin past the deadline, kills the worker, and reports the batch.
 #[test]
 fn a_worker_that_cannot_be_interrupted_is_killed_and_its_batch_reported() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

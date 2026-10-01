@@ -14,47 +14,12 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubInterpWorker, Worker};
-use engine_core::testing::skip_live;
-use std::path::PathBuf;
+use engine_core::testing::{python, scratch, shim, skip_live, PythonNeeds};
 use std::time::Instant;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn python_with_subinterpreters() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    let mut cands: Vec<String> = Vec::new();
-    if venv.exists() {
-        cands.push(venv.to_string_lossy().into_owned());
-    }
-    cands.extend(["python3".to_string(), "python".to_string()]);
-    cands.into_iter().find(|p| {
-        std::process::Command::new(p)
-            .args(["-c", "import pytest, concurrent.interpreters"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-}
-
-fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tiderace_t104_{tag}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 #[test]
 fn responses_read_as_on_every_other_tier() {
-    let Some(python) = python_with_subinterpreters() else {
+    let Some(python) = python(PythonNeeds::SubInterpreters) else {
         skip_live("no interpreter with pytest and concurrent.interpreters");
         return;
     };
@@ -104,7 +69,7 @@ fn responses_read_as_on_every_other_tier() {
 
 #[test]
 fn a_test_that_blocks_in_a_sub_interpreter_ends_the_batch_inside_the_budget() {
-    let Some(python) = python_with_subinterpreters() else {
+    let Some(python) = python(PythonNeeds::SubInterpreters) else {
         skip_live("no interpreter with pytest and concurrent.interpreters");
         return;
     };

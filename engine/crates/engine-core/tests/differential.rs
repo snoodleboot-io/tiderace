@@ -25,7 +25,7 @@ use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
 use engine_core::runner::DEFAULT_DEADLINE_MS;
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 
 /// Outcomes tiderace is knowingly expected to spell differently from pytest, as
 /// `(node id suffix, tiderace, pytest)`.
@@ -40,40 +40,12 @@ use engine_core::testing::skip_live;
 /// fails while a stale entry remains, so a fixed divergence cannot be left recorded as expected.
 const KNOWN_DIVERGENCES: &[(&str, &str, &str)] = &[];
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim_path() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
 /// The corpus package root; `tests/` beneath it is the run root, so `conftest.py` is an ancestor.
 fn corpus_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/differential_corpus")
         .canonicalize()
         .expect("differential corpus")
-}
-
-/// An interpreter with pytest — the oracle. Without one there is nothing to differ against.
-fn python_with_pytest() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    let mut candidates: Vec<String> = Vec::new();
-    if venv.exists() {
-        candidates.push(venv.to_string_lossy().into_owned());
-    }
-    candidates.extend(["python3".to_string(), "python".to_string()]);
-    candidates.into_iter().find(|cand| {
-        Command::new(cand)
-            .args(["-c", "import pytest"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
 }
 
 /// pytest's ids are relative to the package root (`tests/x.py::t`); tiderace's are relative to the
@@ -200,7 +172,7 @@ fn diff(label: &str, a: &[String], b: &[String]) -> String {
 
 #[test]
 fn tiderace_collects_and_reports_exactly_what_pytest_does() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no interpreter with pytest — the differential has no oracle without one");
         return;
     };
@@ -219,7 +191,7 @@ fn tiderace_collects_and_reports_exactly_what_pytest_does() {
     let items = RegexCollector::new().collect(&run_root).expect("collect");
     let mut worker = SubprocessWorker::new(DEFAULT_DEADLINE_MS, 1).with_target(
         python.clone(),
-        &shim_path(),
+        &shim(),
         &run_root,
     );
     let results = worker.run(&items).expect("run corpus");

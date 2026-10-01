@@ -16,50 +16,9 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    for cand in ["python3", "python"] {
-        let ok = std::process::Command::new(cand)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(cand.to_string());
-        }
-    }
-    None
-}
-
-/// An interpreter that can actually `import pytest`. Windows CI runs a bare `actions/setup-python`
-/// with no pytest, so a corpus that declares fixtures has to self-skip there rather than fail.
-fn python_with_pytest() -> Option<String> {
-    let python = any_python()?;
-    let ok = std::process::Command::new(&python)
-        .args(["-c", "import pytest"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    ok.then_some(python)
-}
 
 /// A fresh `<pkg>/tests/` layout. Returns `(pkg, run_root)`; `pkg` is one level above the run root.
 ///
@@ -89,7 +48,7 @@ fn new_pkg(tag: &str) -> (PathBuf, PathBuf) {
 /// Deliberately free of any `pytest` import so a bare interpreter runs it.
 #[test]
 fn ancestor_conftest_side_effect_applies_before_test_modules_import() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -141,7 +100,7 @@ fn ancestor_conftest_side_effect_applies_before_test_modules_import() {
 /// test above is what carries the coverage there.
 #[test]
 fn ancestor_conftest_fixtures_are_visible_and_still_overridable() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no interpreter with pytest available");
         return;
     };
@@ -210,7 +169,7 @@ fn ancestor_conftest_fixtures_are_visible_and_still_overridable() {
 /// anywhere the conftest above must simply not be seen, and the run must still work.
 #[test]
 fn collection_stops_at_rootdir() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

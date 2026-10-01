@@ -13,49 +13,9 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::Outcome;
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    for cand in ["python3", "python"] {
-        let ok = std::process::Command::new(cand)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(cand.to_string());
-        }
-    }
-    None
-}
-
-/// An interpreter that can `import pytest`. Windows CI's bare `actions/setup-python` cannot.
-fn python_with_pytest() -> Option<String> {
-    let python = any_python()?;
-    let ok = std::process::Command::new(&python)
-        .args(["-c", "import pytest"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    ok.then_some(python)
-}
 
 /// Both `TestCase` flavours, both skip idioms, a skip from `setUp`, and — the guard that matters —
 /// a genuine error and a genuine failure that must NOT be swallowed into "skipped".
@@ -129,7 +89,7 @@ fn write_corpus(tag: &str) -> PathBuf {
 
 #[test]
 fn pytest_skips_inside_a_testcase_are_skips_not_errors() {
-    let Some(python) = python_with_pytest() else {
+    let Some(python) = python(PythonNeeds::Pytest) else {
         skip_live("no interpreter with pytest available");
         return;
     };

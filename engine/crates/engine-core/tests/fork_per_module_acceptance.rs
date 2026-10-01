@@ -13,38 +13,9 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestResult};
 use engine_core::exec::{ForkWorker, SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn any_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    if venv.exists() {
-        return Some(venv.to_string_lossy().into_owned());
-    }
-    for cand in ["python3", "python"] {
-        let ok = std::process::Command::new(cand)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(cand.to_string());
-        }
-    }
-    None
-}
 
 /// A module-level lock cannot be deep-copied, so the module is opaque and takes the fork tier.
 /// Its tests hand each other state through a module-scoped fixture, and one of them leaks into
@@ -167,7 +138,7 @@ fn check(results: &[TestResult], tier: &str) {
 /// `--no-fork` + restore: the opaque modules take the fork tier from the no-fork worker.
 #[test]
 fn an_opaque_modules_tests_share_one_child_on_the_no_fork_worker() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };
@@ -182,7 +153,7 @@ fn an_opaque_modules_tests_share_one_child_on_the_no_fork_worker() {
 /// The optimistic ladder — the default tier — routes the same way.
 #[test]
 fn an_opaque_modules_tests_share_one_child_on_the_optimistic_ladder() {
-    let Some(python) = any_python() else {
+    let Some(python) = python(PythonNeeds::Any) else {
         skip_live("no Python interpreter available");
         return;
     };

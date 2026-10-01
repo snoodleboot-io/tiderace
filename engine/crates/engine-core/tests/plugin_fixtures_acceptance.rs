@@ -18,25 +18,8 @@
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::{Outcome, TestResult};
 use engine_core::exec::{SubprocessWorker, Worker};
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use std::path::{Path, PathBuf};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-/// The fixture venv: pytest is needed, since the plugin is written against `pytest.fixture`.
-fn venv_python() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    venv.exists().then(|| venv.to_string_lossy().into_owned())
-}
 
 /// A distribution on `sys.path` that declares a `pytest11` entry point — what `pip install` of a
 /// plugin leaves behind, minus pip: a module and a `dist-info` with `entry_points.txt`.
@@ -110,7 +93,7 @@ fn outcome<'a>(results: &'a [TestResult], leaf: &str) -> &'a TestResult {
 
 #[test]
 fn a_plugins_fixtures_resolve_and_a_conftest_of_the_same_name_wins() {
-    let Some(python) = venv_python() else {
+    let Some(python) = python(PythonNeeds::FxVenv) else {
         skip_live("`.tiderace-fx-venv` not present");
         return;
     };
@@ -125,7 +108,7 @@ fn a_plugins_fixtures_resolve_and_a_conftest_of_the_same_name_wins() {
 
 #[test]
 fn p_no_name_in_addopts_leaves_the_plugin_out() {
-    let Some(python) = venv_python() else {
+    let Some(python) = python(PythonNeeds::FxVenv) else {
         skip_live("`.tiderace-fx-venv` not present");
         return;
     };
@@ -146,7 +129,7 @@ fn p_no_name_in_addopts_leaves_the_plugin_out() {
 /// inherit one process environment).
 #[test]
 fn an_empty_plugins_list_in_the_project_config_turns_every_plugin_off() {
-    let Some(python) = venv_python() else {
+    let Some(python) = python(PythonNeeds::FxVenv) else {
         skip_live("`.tiderace-fx-venv` not present");
         return;
     };
@@ -160,7 +143,7 @@ fn an_empty_plugins_list_in_the_project_config_turns_every_plugin_off() {
 /// An allow-list keeps only the named plugins.
 #[test]
 fn a_plugins_allow_list_keeps_only_the_named_ones() {
-    let Some(python) = venv_python() else {
+    let Some(python) = python(PythonNeeds::FxVenv) else {
         skip_live("`.tiderace-fx-venv` not present");
         return;
     };

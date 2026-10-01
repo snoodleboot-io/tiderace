@@ -73,6 +73,216 @@ pub fn skip_live(reason: &str) {
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// Paths, interpreters and scratch directories for the acceptance tests (TID-107).
+//
+// Before this every acceptance test re-declared its own `repo_root()`, `shim()`, a Python finder
+// and a `scratch()` — 80, 77, 49 and 32 copies, the finders in four diverging bodies and the
+// scratch helpers in thirty-one. This is the one spelling of each.
+// ---------------------------------------------------------------------------------------------
+
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// The checkout's root — three up from this crate's manifest.
+pub fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repo root")
+}
+
+/// The canonical shim, `engine/py-shim/shim.py` — what `TIDERACE_SHIM` points at in a checkout.
+pub fn shim() -> PathBuf {
+    repo_root().join("engine/py-shim/shim.py")
+}
+
+/// Where the fx venv's interpreter lives, relative to the repo root: CPython 3.14 with pytest,
+/// numpy, `concurrent.interpreters` and `engine/py-tiderace` importable. CI provisions it; a
+/// fresh clone has none.
+pub const FX_VENV_PYTHON: &str = ".tiderace-fx-venv/bin/python";
+
+/// The fx venv's interpreter, when present.
+pub fn fx_venv_python() -> Option<String> {
+    let p = repo_root().join(FX_VENV_PYTHON);
+    p.exists().then(|| p.to_string_lossy().into_owned())
+}
+
+/// What a live scenario needs from its interpreter. The finder probes each candidate for it, so
+/// a test skips with the reason named rather than failing on an `ImportError` three layers down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PythonNeeds {
+    /// Any interpreter that starts.
+    Any,
+    /// `import pytest` works.
+    Pytest,
+    /// `import tiderace.builtins` works (the `engine/py-tiderace` package).
+    Tiderace,
+    /// Both of the above — the builtins providers under a pytest-style suite.
+    PytestAndTiderace,
+    /// pytest and `concurrent.interpreters` (CPython 3.14+): the sub-interpreter tier.
+    SubInterpreters,
+    /// The fx venv itself, and nothing else: scenarios pinned to its exact package set.
+    FxVenv,
+}
+
+impl PythonNeeds {
+    fn probe(self) -> &'static str {
+        match self {
+            PythonNeeds::Any | PythonNeeds::FxVenv => "import sys",
+            PythonNeeds::Pytest => "import pytest",
+            PythonNeeds::Tiderace => "import tiderace.builtins",
+            PythonNeeds::PytestAndTiderace => "import pytest, tiderace.builtins",
+            PythonNeeds::SubInterpreters => "import pytest, concurrent.interpreters",
+        }
+    }
+
+    /// The need, as a skip message names it.
+    pub fn describe(self) -> &'static str {
+        match self {
+            PythonNeeds::Any => "a Python interpreter",
+            PythonNeeds::Pytest => "an interpreter with pytest",
+            PythonNeeds::Tiderace => "an interpreter with tiderace importable",
+            PythonNeeds::PytestAndTiderace => "an interpreter with pytest and tiderace importable",
+            PythonNeeds::SubInterpreters => {
+                "an interpreter with pytest and concurrent.interpreters (3.14+)"
+            }
+            PythonNeeds::FxVenv => "`.tiderace-fx-venv` (CPython 3.14)",
+        }
+    }
+}
+
+fn can_import(python: &str, statement: &str) -> bool {
+    Command::new(python)
+        .args(["-c", statement])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// An interpreter that satisfies `needs`: the fx venv first, then `python3`, then `python`.
+/// `None` when nothing on this machine does — pair with [`skip_live`], or use
+/// [`require_python`], which does that for you.
+pub fn python(needs: PythonNeeds) -> Option<String> {
+    if needs == PythonNeeds::FxVenv {
+        return fx_venv_python();
+    }
+    let mut cands: Vec<String> = fx_venv_python().into_iter().collect();
+    cands.extend(["python3".to_string(), "python".to_string()]);
+    cands.into_iter().find(|p| can_import(p, needs.probe()))
+}
+
+/// [`python`], and on `None` the [`skip_live`] call with the need named — so a live test is
+/// `let Some(python) = require_python(PythonNeeds::Pytest) else { return };`.
+pub fn require_python(needs: PythonNeeds) -> Option<String> {
+    let found = python(needs);
+    if found.is_none() {
+        skip_live(&format!("no interpreter found: needs {}", needs.describe()));
+    }
+    found
+}
+
+/// A fresh, empty directory under the system temp dir, unique per call within and across test
+/// processes: `tiderace_<tag>_<pid>_<n>`. The caller removes it when done (or leaves it for a
+/// post-mortem — nothing here depends on cleanup).
+pub fn scratch(tag: &str) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "tiderace_{tag}_{}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir
+}
+
+use crate::error::{EngineError, Result};
+use crate::exec::{ExecRequest, ExecResponse, ReadyInfo, ShimTransport};
+
+/// A pure-Rust shim that answers from a script — **no process, no pipe, no syscall**. Proves a
+/// run loop (request build → exchange → `TestResult` assembly) end to end, offline. Public so
+/// every worker's loop can be tested this way, not only `run_batch`.
+pub struct ScriptedShim {
+    pid: i64,
+    /// node_id → (outcome wire token, detail).
+    script: std::collections::HashMap<String, (String, String)>,
+    /// Outcome for any node_id not in `script`.
+    default_outcome: String,
+    /// node_ids in the order they were asked — lets a test assert on dispatch order.
+    seen: std::vec::Vec<String>,
+    /// If set, the Nth (0-based) exchange and every one after fails as if the shim closed mid-run.
+    close_after: Option<usize>,
+    calls: usize,
+}
+
+impl Default for ScriptedShim {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScriptedShim {
+    /// The node ids asked so far, in order.
+    pub fn seen(&self) -> &[String] {
+        &self.seen
+    }
+
+    pub fn new() -> Self {
+        Self {
+            pid: 0,
+            script: std::collections::HashMap::new(),
+            default_outcome: "passed".into(),
+            seen: Vec::new(),
+            close_after: None,
+            calls: 0,
+        }
+    }
+
+    pub fn answer(mut self, node_id: &str, outcome: &str, detail: &str) -> Self {
+        self.script
+            .insert(node_id.into(), (outcome.into(), detail.into()));
+        self
+    }
+
+    pub fn closes_after(mut self, n: usize) -> Self {
+        self.close_after = Some(n);
+        self
+    }
+}
+
+impl ShimTransport for ScriptedShim {
+    fn ready(&mut self) -> Result<ReadyInfo> {
+        Ok(ReadyInfo { pid: self.pid })
+    }
+
+    fn exchange(&mut self, req: &ExecRequest<'_>) -> Result<ExecResponse> {
+        if matches!(self.close_after, Some(n) if self.calls >= n) {
+            return Err(EngineError::Exec("shim closed mid-run".into()));
+        }
+        self.calls += 1;
+        self.seen.push(req.node_id.to_string());
+        let (outcome, detail) = self
+            .script
+            .get(req.node_id)
+            .cloned()
+            .unwrap_or((self.default_outcome.clone(), String::new()));
+        Ok(ExecResponse {
+            must_fork: false,
+            node_id: req.node_id.to_string(),
+            outcome,
+            detail,
+            coverage: Default::default(),
+            pure: None,
+            skip_origin: String::new(),
+            keywords: Vec::new(),
+            variants: Vec::new(),
+            expanded: false,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +333,28 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn scratch_dirs_are_unique_and_empty() {
+        let a = scratch("t107");
+        let b = scratch("t107");
+        assert_ne!(a, b);
+        assert!(a.is_dir() && b.is_dir());
+        assert_eq!(std::fs::read_dir(&a).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn repo_root_holds_the_shim() {
+        assert!(shim().is_file(), "{}", shim().display());
+        assert!(repo_root().join("engine/crates").is_dir());
+    }
+
+    #[test]
+    fn an_impossible_need_is_none_not_a_panic() {
+        // A probe nothing satisfies: the finder returns None and the caller skips.
+        assert!(!can_import("definitely-not-a-python-xyz", "import sys"));
     }
 }

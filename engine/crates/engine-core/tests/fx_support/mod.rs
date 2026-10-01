@@ -33,36 +33,11 @@ pub fn live_guard() -> MutexGuard<'static, ()> {
 
 use engine_core::domain::{NodeId, Scope, ScopePath};
 use engine_core::fixtures::{Fixture, ParamValue};
-
-/// The repository root (three levels up from this crate's manifest dir).
-pub fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-/// The path to the Python shim the wellspring drives.
-pub fn shim_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../py-shim/shim.py")
-        .canonicalize()
-        .expect("shim path")
-}
+use engine_core::testing::repo_root;
 
 /// The fixture-heavy conformance corpus root (511 pytest tests).
 pub fn fx_corpus_root() -> PathBuf {
     repo_root().join("benchmarks/fixtures/fx_corpus")
-}
-
-/// The Phase-3 venv interpreter, or `None` if Lane 0 has not provisioned it yet.
-///
-/// Live scenarios call this and skip cleanly (returning early) when it is absent —
-/// the same venv-presence guard `differential.rs` uses — but they DO run when the
-/// venv is present.
-pub fn fx_venv_python() -> Option<PathBuf> {
-    let p = repo_root().join(".tiderace-fx-venv/bin/python");
-    p.exists().then_some(p)
 }
 
 /// One ordered probe event: a setup or teardown of a named fixture body.

@@ -7,36 +7,9 @@
 //! have been the hash pass alone. It is now recorded as `deselected`, with its module and the
 //! config that deselected it as deps, so it is judged like any test and never served as one.
 
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use engine_daemon::EngineHandler;
-use std::path::{Path, PathBuf};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-fn python_with_tiderace() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    let mut cands: Vec<String> = Vec::new();
-    if venv.exists() {
-        cands.push(venv.to_string_lossy().into_owned());
-    }
-    cands.extend(["python3".to_string(), "python".to_string()]);
-    cands.into_iter().find(|p| {
-        std::process::Command::new(p)
-            .args(["-c", "import tiderace"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-}
+use std::path::Path;
 
 fn write_config(dir: &Path, addopts: &str) {
     std::fs::write(
@@ -48,7 +21,7 @@ fn write_config(dir: &Path, addopts: &str) {
 
 #[test]
 fn a_deselected_test_is_recorded_and_never_runs_again_until_the_config_changes() {
-    let Some(python) = python_with_tiderace() else {
+    let Some(python) = python(PythonNeeds::Tiderace) else {
         skip_live("no interpreter that can import tiderace");
         return;
     };

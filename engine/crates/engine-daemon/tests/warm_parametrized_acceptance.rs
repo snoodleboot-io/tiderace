@@ -6,41 +6,12 @@
 //! the tally did not add up (`1 ran, 508 cached, 511 total`). It is now judged by its cases and the
 //! cases are what is served from cache.
 
-use engine_core::testing::skip_live;
+use engine_core::testing::{python, shim, skip_live, PythonNeeds};
 use engine_daemon::EngineHandler;
-use std::path::PathBuf;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-fn shim() -> PathBuf {
-    repo_root().join("engine/py-shim/shim.py")
-}
-
-/// A Python that can `import tiderace` — the fx venv, or whatever `PYTHONPATH` makes work.
-fn python_with_tiderace() -> Option<String> {
-    let venv = repo_root().join(".tiderace-fx-venv/bin/python");
-    let mut cands: Vec<String> = Vec::new();
-    if venv.exists() {
-        cands.push(venv.to_string_lossy().into_owned());
-    }
-    cands.extend(["python3".to_string(), "python".to_string()]);
-    cands.into_iter().find(|p| {
-        std::process::Command::new(p)
-            .args(["-c", "import tiderace"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-}
 
 #[test]
 fn a_warm_run_with_nothing_edited_reruns_nothing() {
-    let Some(python) = python_with_tiderace() else {
+    let Some(python) = python(PythonNeeds::Tiderace) else {
         skip_live("no interpreter that can import tiderace");
         return;
     };
