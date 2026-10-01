@@ -24,6 +24,23 @@ sys.path.insert(0, os.path.join(_HERE, os.pardir, "py-shim"))  # `shim`
 
 import shim  # noqa: E402
 
+# TID-111: a builtin is registered by its decorator alone — `providers()` and `__all__` follow.
+import tiderace.builtins as _builtins  # noqa: E402
+
+_BEFORE = [p.__name__ for p in _builtins.providers()]
+assert _BEFORE == ["monkeypatch", "tmp_path", "capsys", "capfd", "caplog", "recwarn", "tmpdir",
+                   "tmp_path_factory", "tmpdir_factory", "pytestconfig", "pytester", "testdir"], _BEFORE
+assert all(name in _builtins.__all__ for name in _BEFORE), "every provider is exported"
+
+
+@_builtins.builtin
+def _extra_builtin() -> int:
+    return 1
+
+
+assert _extra_builtin in _builtins.providers(), "a decorated provider shows up in providers()"
+_builtins._registry._PROVIDERS.remove(_extra_builtin)  # not part of the proof corpus below
+
 CORPUS = textwrap.dedent(
     '''
     import os

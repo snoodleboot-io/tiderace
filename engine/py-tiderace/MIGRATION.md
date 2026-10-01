@@ -36,7 +36,7 @@ Because tiderace wires by **type** and pytest fixtures rarely carry types, these
 3. **Parametrized fixture** (`@pytest.fixture(params=[...])`) — provider-level params aren't in tiderace yet; convert to `@tiderace.cases` on the tests, or split the resource.
 4. **`request`** (incl. `request.getfixturevalue` / `request.addfinalizer`) — dynamic; port to typed deps + yield teardown.
 5. **`@pytest.mark.usefixtures("x")`** — a string name carries no type; request it as a typed param, or mark the provider `autouse=True`.
-6. **pytest builtins** (`tmp_path`, `monkeypatch`, `capsys`, …) — no tiderace equivalent yet; provide your own resource.
+6. **pytest builtins** — `tmp_path`, `monkeypatch`, `capsys`, `capfd`, `caplog`, `recwarn`, `tmpdir`, `tmp_path_factory`, `tmpdir_factory`, `pytestconfig`, `pytester` and `testdir` are provided by `tiderace.builtins` and map automatically to typed params (the table is derived from the builtin registry, so a new builtin maps the day it is added). `request`, `cache` and `doctest_namespace` have no equivalent; provide your own resource.
 7. **`pytest_*` hooks / `from pytest import …`** — tiderace gets its own hook host later; port manually.
 
 ## After migrating
