@@ -5,8 +5,6 @@
 name: bench-platforms
 
 on:
-  push:
-    branches: [bench/platforms]  # while the workflow is being proven; removed before merge
   workflow_dispatch:
     inputs:
       rounds:
