@@ -8,6 +8,7 @@ entry file beside this package (`py-shim/shim.py`; `tiderace/_shim/shim.py` once
 The foundations the rest builds on (TID-121): `results.py` (the result frames, spelled once),
 `nodes.py` (what a node id names, resolved once into a `Target`; the module-name rule) and
 `config.py` (the project's pytest configuration, loaded once), and `protocol.py` (the frames,
-the one request loop, and the children the shim forks — TID-122). Phases 6d–6e carry on
-splitting `_shim.py` by concern.
+the one request loop, and the children the shim forks — TID-122), `pytest_compat.py` (both mark
+dialects as one `Mark`, folded once; the marker API `request.node` and a hook item share —
+TID-123). Phases 6d–6e carry on splitting `_shim.py` by concern.
 """

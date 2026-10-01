@@ -54,6 +54,8 @@ import unittest
 import warnings
 
 from .config import NOTSET as _NOTSET, ProjectConfig, load_project_config, option as _argv_option
+from .pytest_compat import (MarkerBearer, fold as _fold_marks, normalise_all as _normalise_marks,
+                            skip_reason as _mark_skip_reason)
 from .protocol import (EXIT_UNREPORTABLE as _EXIT_UNREPORTABLE, Transport, end_child,
                        exit_text as _exit_text, read_frame as _read_frame,
                        read_frame_by as _read_frame_by, reap, run_child, spawn,
@@ -328,7 +330,7 @@ def _node_for(node_id: str, func=None, instance=None):
     return _CURRENT_NODE
 
 
-class _Node:
+class _Node(MarkerBearer):
     """`request.node` — what pytest calls the item under test.
 
     Fixtures reach for it to name the thing they are building for (`request.node.name` in a temp-file
@@ -347,22 +349,6 @@ class _Node:
         self.function = func
         self.own_markers: list = []
 
-    def add_marker(self, marker) -> None:
-        """Attach a marker mid-run, as pytest allows from a fixture or a test body.
-
-        Recorded here and folded into the outcome by the executor below, because a marker added at
-        runtime is usually an `xfail` the author expects to be honoured — ignoring it would turn a
-        tolerated failure into a reported one."""
-        self.own_markers.append(marker)
-
-    def iter_markers(self, name: str | None = None):
-        for m in self.own_markers:
-            if name is None or getattr(m, "name", None) == name:
-                yield m
-
-    def get_closest_marker(self, name: str, default=None):
-        return next(self.iter_markers(name), default)
-
     def __repr__(self) -> str:
         return f"<Node {self.nodeid}>"
 
@@ -374,37 +360,7 @@ def _runtime_outcome(node, outcome: str, detail: str) -> tuple:
     the process that ran the test."""
     if node is None or not node.own_markers:
         return outcome, detail
-    return _fold_pytest_marks(node.own_markers, outcome, detail)
-
-
-def _fold_pytest_marks(markers, outcome: str, detail: str) -> tuple:
-    """Fold pytest-style `xfail` / `skip` markers into an outcome.
-
-    Shared by the static path and the runtime one, because `@pytest.mark.xfail` written above a test
-    and `request.node.add_marker(pytest.mark.xfail(...))` added during it mean exactly the same thing
-    and must land on the same outcome. Reporting a plain failure for either turns a failure the
-    author expected into one the run complains about (TID-63)."""
-    for m in markers:
-        name = getattr(m, "name", "")
-        kwargs = getattr(m, "kwargs", None) or {}
-        reason = kwargs.get("reason") or ""
-        if name == "skip":
-            return "skipped", reason or "skipped at runtime"
-        if name == "xfail":
-            # `@pytest.mark.xfail(sys.platform == "win32", reason=...)` puts the condition first
-            # positionally; the bare form has none and always applies. A string condition is left
-            # unevaluated and treated as applying, matching `_marker_skip_reason`'s caution in the
-            # other direction: an xfail that does not fire only ever reports a real failure.
-            args = getattr(m, "args", ()) or ()
-            condition = args[0] if args and not isinstance(args[0], str) else kwargs.get("condition", True)
-            if condition is False:
-                continue
-            if outcome in ("failed", "error"):
-                return "xfail", reason or detail
-            if outcome == "passed":
-                return ("failed", f"[xpass strict] {reason}".strip()) if kwargs.get("strict") \
-                    else ("xpass", reason)
-    return outcome, detail
+    return _fold_marks(_normalise_marks(node.iter_markers()), outcome, detail, runtime=True)
 
 
 class _Request:
@@ -567,7 +523,7 @@ def _own_markers(*owners) -> list:
     return out
 
 
-class _HookItem:
+class _HookItem(MarkerBearer):
     """The `item` a `pytest_collection_modifyitems` hook is handed (TID-20).
 
     Only the surface real conftests use: `nodeid` / `name` to identify it, `keywords` and
@@ -593,43 +549,11 @@ class _HookItem:
         self.keywords[nodeid] = True
 
     def add_marker(self, marker, append: bool = True) -> None:
-        if append:
-            self.own_markers.append(marker)
-        else:
-            self.own_markers.insert(0, marker)
+        super().add_marker(marker, append)
         self.keywords[getattr(marker, "name", str(marker))] = marker
-
-    def iter_markers(self, name: str | None = None):
-        for m in reversed(self.own_markers):
-            if name is None or getattr(m, "name", None) == name:
-                yield m
-
-    def get_closest_marker(self, name: str, default=None):
-        return next(self.iter_markers(name), default)
 
     def __repr__(self) -> str:  # a hook that logs its items should print something useful
         return f"<Item {self.nodeid}>"
-
-
-def _marker_skip_reason(markers: list):
-    """The skip reason implied by a pytest marker set, or None.
-
-    `skipif`'s condition may be a bool or a string expression; only the bool form is evaluated. A
-    string condition is treated as *not* skipping, because guessing at an unevaluated expression
-    could silently skip a test that should have run — the failure that cannot be seen."""
-    for m in reversed(markers):
-        name = getattr(m, "name", None)
-        if name not in ("skip", "skipif"):
-            continue
-        kwargs = getattr(m, "kwargs", {}) or {}
-        args = getattr(m, "args", ()) or ()
-        if name == "skipif":
-            condition = args[0] if args else kwargs.get("condition")
-            if not isinstance(condition, bool) or not condition:
-                continue
-            return kwargs.get("reason") or "skipif"
-        return kwargs.get("reason") or (args[0] if args and isinstance(args[0], str) else "skip")
-    return None
 
 
 def _enumerate_items(test_modules: list) -> list:
@@ -694,7 +618,7 @@ def _run_collection_hooks(conftests: list, test_modules: list) -> None:
             _warn_hook_failed(module, exc)
 
     for item in items:
-        reason = _marker_skip_reason(item.own_markers)
+        reason = _mark_skip_reason(_normalise_marks(item.iter_markers()))
         if reason is not None:
             _MARKER_SKIPS[item.nodeid] = reason
 
@@ -3111,7 +3035,7 @@ class Engine:
         # Native marks first, then anything a `@pytest.mark.skip` or a collection hook decided
         # (TID-20). Both short-circuit BEFORE any fixture setup — a test skipped for a missing
         # backend must not pay to build one.
-        skip_reason = _skip_decision(marks) or _MARKER_SKIPS.get(node_id)
+        skip_reason = _mark_skip_reason(_normalise_marks(marks)) or _MARKER_SKIPS.get(node_id)
         # Applied once the case ids exist, below: pytest collects a skip-marked parametrized test
         # as one variant per case and skips each, so `test_lchmod[asyncio]`, `[trio]`, … are what
         # the tally holds — not one un-expanded `test_lchmod` (TID-88). Nothing is set up on the
@@ -3368,11 +3292,12 @@ class Engine:
                     if impurity is None:
                         impurity = purity
         outcome, detail = _aggregate(outcomes)
-        outcome, detail = _apply_xfail(marks, outcome, detail)
-        # pytest's own `@pytest.mark.xfail` / `skip`, which `_apply_xfail` above does not see: it
-        # reads tiderace's native marks. Without this a test the author marked as expected-to-fail
-        # was reported as a failure — one of click's two remaining divergences (TID-63).
-        outcome, detail = _fold_pytest_marks(_pytest_markers(node), outcome, detail)
+        # The native marks first, then pytest's own `@pytest.mark.xfail` / `skip`, closest first
+        # — both through one fold (TID-123). Without the second a test the author marked as
+        # expected-to-fail was reported as a failure — one of click's two remaining divergences
+        # (TID-63).
+        outcome, detail = _fold_marks(_normalise_marks(marks), outcome, detail)
+        outcome, detail = _fold_marks(_normalise_marks(reversed(_pytest_markers(node))), outcome, detail)
         resp = response(node_id, outcome, detail=detail, keywords=_keyword_names(node_id, names))
         # Additive and omitted for an unparametrized node, so its frame stays byte-identical.
         if variants:
@@ -4295,29 +4220,6 @@ def _registered_marks(project: ProjectConfig) -> tuple:
     if _env_flag("TIDERACE_STRICT_MARKERS"):
         strict = True
     return frozenset(names), strict
-
-
-def _skip_decision(marks: list):
-    """The skip reason if any `skip` / active `skip_if` mark applies, else None."""
-    for m in marks:
-        if m.kind == "skip" or (m.kind == "skip_if" and m.condition):
-            return m.reason or m.kind
-    return None
-
-
-def _apply_xfail(marks: list, outcome: str, detail: str):
-    """Fold an `xfail` mark into the outcome: a fail/error becomes `xfail`; a pass becomes `xpass`
-    (or `failed` when the mark is `strict`). No xfail mark ⇒ unchanged."""
-    xf = next((m for m in marks if m.kind == "xfail"), None)
-    if xf is None:
-        return outcome, detail
-    if outcome in ("failed", "error"):
-        return "xfail", xf.reason or detail
-    if outcome == "passed":
-        if xf.strict:
-            return "failed", f"[xpass strict] {xf.reason}".strip()
-        return "xpass", xf.reason
-    return outcome, detail  # skipped stays skipped
 
 
 def _invoke(node_id: str, style: str, args: dict) -> tuple[str, str]:
