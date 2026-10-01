@@ -23,7 +23,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::exec::probe_modules;
-use crate::fixtures::ClosureHasher;
 
 /// The cache file, alongside the daemon's `.tiderace-state.json` and gitignored with it.
 const CACHE_FILE: &str = ".tiderace-subinterp.json";
@@ -147,21 +146,12 @@ impl SafeSetCache {
 /// when `_probe_module_safe` learns a new reason to say no (TID-104: process-global state).
 const PROBE_RULES: &str = "2";
 
-/// Hex content hash of `<root>/rel` under the current probe rules; a sentinel for a missing or
-/// unreadable file, which therefore always counts as changed and re-probes.
+/// The content hash of `<root>/rel` under the current probe rules — `<hex>#<PROBE_RULES>` — or
+/// the missing sentinel, which never matches a record and so re-probes.
 fn hash_file(root: &Path, rel: &str) -> String {
-    match std::fs::read(root.join(rel)) {
-        Ok(bytes) => {
-            let digest = ClosureHasher::new().feed(&bytes).finish();
-            let mut s = String::with_capacity(72);
-            for b in digest.as_bytes() {
-                s.push_str(&format!("{b:02x}"));
-            }
-            s.push('#');
-            s.push_str(PROBE_RULES);
-            s
-        }
-        Err(_) => "missing".to_string(),
+    match crate::runner::hash_file(root, rel) {
+        Some(h) => format!("{h}#{PROBE_RULES}"),
+        None => crate::runner::MISSING.to_string(),
     }
 }
 

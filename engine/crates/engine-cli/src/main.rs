@@ -575,35 +575,22 @@ fn cmd_run(
     report_path: Option<&Path>,
     daemon: Option<engine_core::exec::Selection>,
 ) -> ExitCode {
-    let t_start = std::time::Instant::now();
-    let python = std::env::var("TIDERACE_PYTHON").unwrap_or_else(|_| engine_core::default_python());
-    let shim = match std::env::var("TIDERACE_SHIM") {
-        Ok(s) => PathBuf::from(s),
-        Err(_) => match engine_core::default_shim(&python) {
-            Some(p) => p, // shim shipped inside the installed `tiderace` package
-            None => {
-                eprintln!(
-                    "error: TIDERACE_SHIM not set and no bundled shim found — \
-                     `pip install tiderace` into this interpreter, or point TIDERACE_SHIM at py-shim/shim.py"
-                );
-                return ExitCode::FAILURE;
-            }
-        },
+    let mut timing = engine_core::runner::PhaseTimer::start("tiderace", "cli");
+    let engine_core::Target { python, shim } = match engine_core::resolve_target() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
     };
 
     // A daemon serving this root runs it from its warm image (TID-84): the same results, reported
     // here the same way, and the daemon persists durations and verdicts itself. Asked first, so a
     // run it serves never walks the tree here (TID-94). No daemon, or one that refuses, and the
     // run happens in this process as before.
-    let t_daemon = std::time::Instant::now();
+    timing.mark("before daemon");
     let via_daemon = daemon.and_then(|selection| daemon_run(root, selection));
-    if std::env::var_os("TIDERACE_TIMING").is_some() {
-        eprintln!(
-            "tiderace: timing: cli: before daemon {}ms, daemon round trip {}ms",
-            t_daemon.duration_since(t_start).as_millis(),
-            t_daemon.elapsed().as_millis()
-        );
-    }
+    timing.mark("daemon round trip");
     let results = match via_daemon {
         Some(Ok(results)) => {
             let (effective, learned) = effective_plan(plan, results.len(), root);
@@ -891,7 +878,7 @@ mod tests {
         let mut state = PersistedState::default();
         state.files.insert(
             "src.py".into(),
-            engine_core::runner::hash_file(&dir, "src.py"),
+            engine_core::runner::hash_file_or_missing(&dir, "src.py"),
         );
         state.tests.insert(
             "t.py::disturber".into(),

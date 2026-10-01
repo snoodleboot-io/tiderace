@@ -59,7 +59,12 @@ fn seed(dir: &Path, tests: &[(&str, TestRecord)], sources: &[(&str, &str)]) {
     let mut state = PersistedState {
         files: sources
             .iter()
-            .map(|(p, _)| ((*p).to_string(), engine_core::runner::hash_file(dir, p)))
+            .map(|(p, _)| {
+                (
+                    (*p).to_string(),
+                    engine_core::runner::hash_file_or_missing(dir, p),
+                )
+            })
             .collect::<BTreeMap<_, _>>(),
         ..PersistedState::default()
     };

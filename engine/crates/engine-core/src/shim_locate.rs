@@ -105,3 +105,26 @@ mod tests {
         }
     }
 }
+
+/// The interpreter and shim a run drives: `TIDERACE_PYTHON` / `TIDERACE_SHIM` when set, else
+/// [`default_python`] and the shim bundled in the installed `tiderace` package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub python: String,
+    pub shim: PathBuf,
+}
+
+/// Resolve the [`Target`] from the environment, or the one message every binary prints when a
+/// shim is nowhere to be found.
+pub fn resolve_target() -> std::result::Result<Target, String> {
+    let python = std::env::var("TIDERACE_PYTHON").unwrap_or_else(|_| default_python());
+    let shim = match std::env::var("TIDERACE_SHIM") {
+        Ok(s) => PathBuf::from(s),
+        Err(_) => default_shim(&python).ok_or_else(|| {
+            "TIDERACE_SHIM not set and no bundled shim found — `pip install tiderace` into this \
+             interpreter, or point TIDERACE_SHIM at py-shim/shim.py"
+                .to_string()
+        })?,
+    };
+    Ok(Target { python, shim })
+}

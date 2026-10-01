@@ -23,6 +23,6 @@ pub mod scheduler;
 pub mod shim_locate;
 pub mod testing;
 
-pub use shim_locate::{default_python, default_shim};
+pub use shim_locate::{default_python, default_shim, resolve_target, Target};
 
 pub use error::EngineError;

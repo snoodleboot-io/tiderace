@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 
 use engine_core::cache::{Cache, CacheKey, CacheKeyBuilder, CachedOutcome, DirCache};
 use engine_core::collection::{Collector, RegexCollector};
-use engine_core::domain::{Outcome, TestItem, TestResult};
+use engine_core::domain::{NodeId, Outcome, TestItem, TestResult};
 use engine_core::exec::{ForkWorker, KeywordExpr, SubInterpWorker, Worker};
+use engine_core::runner::PhaseTimer;
 use engine_core::runner::DEFAULT_DEADLINE_MS;
 
 use crate::persist::{changed_files, plan, PersistedState, TestRecord, STATE_FILE};
@@ -169,10 +170,7 @@ impl EngineHandler {
                         walk(&path, root, h);
                     }
                 } else if name.ends_with(".py")
-                    || matches!(
-                        name.as_ref(),
-                        "pytest.ini" | "pyproject.toml" | "tox.ini" | "setup.cfg"
-                    )
+                    || engine_core::collection::CONFIG_FILES.contains(&name.as_ref())
                 {
                     if let Ok(meta) = entry.metadata() {
                         path.strip_prefix(root).unwrap_or(&path).hash(h);
@@ -258,7 +256,7 @@ impl EngineHandler {
         full_run: bool,
         collected: Option<Vec<TestItem>>,
     ) -> Result<Vec<TestResult>, String> {
-        let mut phase = PhaseTimer::start("run_items");
+        let mut phase = PhaseTimer::start("tiderace-daemon", "run_items");
         // A caller that already collected the tree hands it over (TID-94): a full run collected
         // it for its candidates a moment ago, and collection is a walk of every test file.
         let all = match collected {
@@ -343,7 +341,7 @@ impl EngineHandler {
 
     /// The same run, as the engine's own `TestResult`s — what a report is built from (TID-84).
     pub fn run_full_results(&mut self) -> Result<Vec<TestResult>, String> {
-        let mut phase = PhaseTimer::start("run_full");
+        let mut phase = PhaseTimer::start("tiderace-daemon", "run_full");
         let state_path = self.root.join(STATE_FILE);
         let mut state = PersistedState::load(&state_path);
         phase.mark("load state");
@@ -406,7 +404,10 @@ impl EngineHandler {
         let fresh = if subinterp_enabled() {
             let items = collected;
             let modules: Vec<String> = {
-                let mut m: Vec<String> = items.iter().map(|it| module_of(&it.node_id)).collect();
+                let mut m: Vec<String> = items
+                    .iter()
+                    .map(|it| it.node_id.file().to_string())
+                    .collect();
                 m.sort();
                 m.dedup();
                 m
@@ -414,7 +415,7 @@ impl EngineHandler {
             let safe = self.safe_set(&mut state, &modules)?;
             let (si_items, fork_items): (Vec<TestItem>, Vec<TestItem>) = items
                 .into_iter()
-                .partition(|it| safe.contains(&module_of(&it.node_id)));
+                .partition(|it| safe.contains(it.node_id.file()));
 
             let mut fresh = Vec::new();
             if !si_items.is_empty() {
@@ -544,7 +545,7 @@ impl EngineHandler {
             changed = true;
         }
         for cand in deselected {
-            let mut deps = vec![engine_core::runner::locality_key(&cand)];
+            let mut deps = vec![NodeId::file_of(&cand).to_string()];
             deps.extend(config_deps.iter().cloned());
             state.tests.insert(
                 cand,
@@ -790,19 +791,16 @@ impl EngineHandler {
     /// The config files at the root that can deselect a test (`addopts`, `markers`) — the deps a
     /// `deselected` verdict carries, so a change to the config re-evaluates it (TID-73).
     fn config_deps(&self) -> Vec<String> {
-        ["pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini"]
-            .into_iter()
+        engine_core::collection::CONFIG_FILES
+            .iter()
             .filter(|name| self.root.join(name).exists())
-            .map(str::to_string)
+            .map(|name| name.to_string())
             .collect()
     }
 
-    /// Hex content hash of `<root>/rel`; a sentinel for a missing/unreadable file (⇒ counts as changed).
+    /// Hex content hash of `<root>/rel`; the sentinel for a missing file (⇒ counts as changed).
     fn hash_file(&self, rel: &str) -> String {
-        match std::fs::read(self.root.join(rel)) {
-            Ok(bytes) => hex(&content_hash(&bytes)),
-            Err(_) => "missing".to_string(),
-        }
+        engine_core::runner::hash_file_or_missing(&self.root, rel)
     }
 
     /// The platform term for the cache key — partitions the cache across OS/arch so a result never
@@ -869,10 +867,6 @@ fn subinterp_enabled() -> bool {
 }
 
 /// The module rel-path of a node id (`pkg/test_x.py::C::t` -> `pkg/test_x.py`).
-fn module_of(node: &engine_core::domain::NodeId) -> String {
-    node.as_str().split("::").next().unwrap_or("").to_string()
-}
-
 /// The outcome recorded for a candidate the project's own `addopts` deselects or ignores (TID-73).
 /// A verdict, not a result: the planner judges it like any test, and nothing is ever served for it.
 const DESELECTED: &str = "deselected";
@@ -910,15 +904,11 @@ fn keyword_prefilter(
         if wanted.contains(id) {
             return Some(id.to_string());
         }
-        let segment_at = id.rfind("::").map_or(0, |i| i + 2);
-        let bare = match id[segment_at..].find('[') {
-            Some(b) => &id[..segment_at + b],
-            None => id,
-        };
+        let bare = NodeId::bare_of(id);
         if wanted.contains(bare) {
             return Some(bare.to_string());
         }
-        let class = bare.rfind("::").map(|i| &bare[..i])?;
+        let class = NodeId::parent_of(bare)?;
         wanted.contains(class).then(|| class.to_string())
     };
     let mut records: HashMap<String, Vec<(&str, &TestRecord)>> = HashMap::new();
@@ -956,14 +946,9 @@ fn keyword_prefilter(
             }
             Some(recs) if module_skip(recs) => {
                 replayed.extend(recs.iter().map(|(id, r)| {
-                    TestResult::new(
-                        engine_core::domain::NodeId::new(*id),
-                        Outcome::Skipped,
-                        0,
-                        r.detail.clone(),
-                    )
-                    .with_skip_origin(r.skip_origin.clone())
-                    .with_expanded(*id != cand.as_str())
+                    TestResult::new(NodeId::new(*id), Outcome::Skipped, 0, r.detail.clone())
+                        .with_skip_origin(r.skip_origin.clone())
+                        .with_expanded(*id != cand.as_str())
                 }));
             }
             _ => keep.push(cand.clone()),
@@ -973,9 +958,7 @@ fn keyword_prefilter(
 }
 
 fn expands(cand: &str, id: &str) -> bool {
-    id == cand
-        || (id.starts_with(cand)
-            && (id.as_bytes()[cand.len()] == b'[' || id[cand.len()..].starts_with("::")))
+    id == cand || NodeId::expands(id, cand)
 }
 
 /// The executed candidates that produced no result at all: the shim answered each with an empty
@@ -1022,14 +1005,6 @@ fn to_rpc(r: TestResult) -> RpcResult {
         outcome: outcome_token(r.outcome).to_string(),
         duration_ms: r.duration_ms,
     }
-}
-
-fn hex(bytes: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(64);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
 }
 
 impl RpcHandler for EngineHandler {
@@ -1083,41 +1058,6 @@ impl RpcHandler for EngineHandler {
             },
             RpcRequest::Shutdown => RpcResponse::ShuttingDown,
         }
-    }
-}
-
-/// Where a daemon-served run's time goes, phase by phase, on stderr when `TIDERACE_TIMING=1` —
-/// the daemon's counterpart of the shim's start-up timer (TID-91). Silent otherwise.
-struct PhaseTimer {
-    on: bool,
-    name: &'static str,
-    started: std::time::Instant,
-    last: std::time::Instant,
-}
-
-impl PhaseTimer {
-    fn start(name: &'static str) -> Self {
-        let now = std::time::Instant::now();
-        Self {
-            on: std::env::var_os("TIDERACE_TIMING").is_some(),
-            name,
-            started: now,
-            last: now,
-        }
-    }
-
-    fn mark(&mut self, label: &str) {
-        if !self.on {
-            return;
-        }
-        let now = std::time::Instant::now();
-        eprintln!(
-            "tiderace-daemon: timing: {}: {label} {}ms (at {}ms)",
-            self.name,
-            now.duration_since(self.last).as_millis(),
-            now.duration_since(self.started).as_millis()
-        );
-        self.last = now;
     }
 }
 

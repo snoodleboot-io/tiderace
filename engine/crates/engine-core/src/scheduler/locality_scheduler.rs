@@ -39,11 +39,12 @@ struct Group {
     total_ms: u64,
 }
 
-impl Scheduler for LocalityScheduler {
-    fn plan(&self, input: &ScheduleInput) -> Vec<WorkerBatch> {
-        let n = input.workers();
-
-        // 1. Group by locality key (BTreeMap keeps grouping deterministic).
+impl LocalityScheduler {
+    /// The locality groups of `input`, heaviest first (ties broken on key, so the order is
+    /// deterministic), and the total estimated duration. The first two steps of both
+    /// [`Scheduler::plan`] and [`Scheduler::units`]; they differ only in what is done with the
+    /// groups.
+    fn groups(input: &ScheduleInput) -> (Vec<(&str, Group)>, u64) {
         let mut groups_by_key: BTreeMap<&str, Group> = BTreeMap::new();
         let mut total_ms: u64 = 0;
         for t in input.tests() {
@@ -55,10 +56,18 @@ impl Scheduler for LocalityScheduler {
             g.items.push((t.node_id().clone(), t.duration_ms()));
             g.total_ms += t.duration_ms();
         }
-
-        // 2. Order groups LPT (heaviest first); tie-break on key for determinism.
         let mut groups: Vec<(&str, Group)> = groups_by_key.into_iter().collect();
         groups.sort_by(|(ka, a), (kb, b)| b.total_ms.cmp(&a.total_ms).then(ka.cmp(kb)));
+        (groups, total_ms)
+    }
+}
+
+impl Scheduler for LocalityScheduler {
+    fn plan(&self, input: &ScheduleInput) -> Vec<WorkerBatch> {
+        let n = input.workers();
+
+        // 1–2. Group by locality key, heaviest first.
+        let (groups, total_ms) = Self::groups(input);
 
         // 3. Greedy assignment onto the least-loaded worker, splitting only oversized groups.
         let avg_bin = (total_ms as f64) / (n as f64);
@@ -103,19 +112,7 @@ impl Scheduler for LocalityScheduler {
     /// other seven with nothing to take. Each shard still holds consecutive tests of the one module,
     /// so a shard's worker builds that module's snapshot once, exactly as a split group always has.
     fn units(&self, input: &ScheduleInput) -> Vec<WorkerBatch> {
-        let mut groups_by_key: BTreeMap<&str, Group> = BTreeMap::new();
-        let mut total_ms: u64 = 0;
-        for t in input.tests() {
-            total_ms += t.duration_ms();
-            let g = groups_by_key.entry(t.locality_key()).or_insert(Group {
-                items: Vec::new(),
-                total_ms: 0,
-            });
-            g.items.push((t.node_id().clone(), t.duration_ms()));
-            g.total_ms += t.duration_ms();
-        }
-        let mut groups: Vec<(&str, Group)> = groups_by_key.into_iter().collect();
-        groups.sort_by(|(ka, a), (kb, b)| b.total_ms.cmp(&a.total_ms).then(ka.cmp(kb)));
+        let (groups, total_ms) = Self::groups(input);
 
         // One perfect bin. A unit at most this heavy means the queue can always keep every worker
         // busy; a unit heavier than this is the one thing a queue cannot schedule around. But a
@@ -186,11 +183,8 @@ mod tests {
         let batches = LocalityScheduler::default().plan(&input);
         for b in &batches {
             // every item in a batch shares the module prefix ⇒ locality preserved
-            let prefixes: std::collections::HashSet<_> = b
-                .items()
-                .iter()
-                .map(|n| n.as_str().split("::").next().unwrap())
-                .collect();
+            let prefixes: std::collections::HashSet<_> =
+                b.items().iter().map(|n| n.file()).collect();
             assert_eq!(
                 prefixes.len(),
                 1,
@@ -226,11 +220,8 @@ mod tests {
              the size of a perfect bin, which is the one thing a queue cannot schedule around"
         );
         for u in &units {
-            let modules: std::collections::HashSet<_> = u
-                .items()
-                .iter()
-                .map(|n| n.as_str().split("::").next().unwrap())
-                .collect();
+            let modules: std::collections::HashSet<_> =
+                u.items().iter().map(|n| n.file()).collect();
             assert_eq!(
                 modules.len(),
                 1,

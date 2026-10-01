@@ -109,7 +109,7 @@ fn run_batched(
         .map(|i| {
             ScheduledTest::new(
                 i.node_id.clone(),
-                locality_key(i.node_id.as_str()),
+                i.node_id.file().to_string(),
                 recorded.weight_of(i.node_id.as_str()),
             )
         })
@@ -331,10 +331,7 @@ fn run_subinterp_hybrid(
     items: Vec<TestItem>,
     plan: &RunPlan,
 ) -> Result<Vec<TestResult>, String> {
-    let mut modules: Vec<String> = items
-        .iter()
-        .map(|i| locality_key(i.node_id.as_str()))
-        .collect();
+    let mut modules: Vec<String> = items.iter().map(|i| i.node_id.file().to_string()).collect();
     modules.sort();
     modules.dedup();
 
@@ -349,7 +346,7 @@ fn run_subinterp_hybrid(
 
     let (safe_items, rest): (Vec<TestItem>, Vec<TestItem>) = items
         .into_iter()
-        .partition(|it| safe.contains(&locality_key(it.node_id.as_str())));
+        .partition(|it| safe.contains(it.node_id.file()));
 
     let mut all = Vec::new();
     if !safe_items.is_empty() {
@@ -498,10 +495,7 @@ impl ModulesFile {
     fn write(items: &[TestItem]) -> Result<Self, String> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let mut modules: Vec<String> = items
-            .iter()
-            .map(|i| locality_key(i.node_id.as_str()))
-            .collect();
+        let mut modules: Vec<String> = items.iter().map(|i| i.node_id.file().to_string()).collect();
         modules.sort();
         modules.dedup();
         let path = std::env::temp_dir().join(format!(
@@ -521,15 +515,9 @@ impl Drop for ModulesFile {
     }
 }
 
-/// A test's locality key for scheduling — its module (the file part of the node id), so a module's
-/// tests co-locate on one worker and reuse its module/session snapshot.
-pub fn locality_key(node_id: &str) -> String {
-    node_id.split("::").next().unwrap_or(node_id).to_string()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{locality_key, run_parallel, RecordedWeights};
+    use super::{run_parallel, RecordedWeights};
     use crate::runner::RunPlan;
     #[cfg(not(unix))]
     use crate::runner::WorkerStrategy;
@@ -568,15 +556,6 @@ mod tests {
     fn a_zero_recording_still_weighs_one() {
         let durations: HashMap<String, u64> = [("m.py::t".to_string(), 0)].into_iter().collect();
         assert_eq!(RecordedWeights::new(&durations).weight_of("m.py::t"), 1);
-    }
-
-    #[test]
-    fn locality_key_is_the_module_path() {
-        assert_eq!(locality_key("pkg/test_x.py::C::t"), "pkg/test_x.py");
-        assert_eq!(locality_key("test_x.py::t"), "test_x.py");
-        // A node id with no separator is its own key rather than an empty string, which would
-        // collapse every such test into one locality group.
-        assert_eq!(locality_key("test_x.py"), "test_x.py");
     }
 
     #[test]

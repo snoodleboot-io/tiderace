@@ -59,7 +59,6 @@ pub use engine_core::runner::default_workers;
 mod tests {
     use super::{default_workers, run_parallel};
     use engine_core::domain::{NodeId, ScopePath, TestItem, TestStyle};
-    use engine_core::runner::locality_key;
     use engine_core::testing::skip_live;
     use std::collections::HashMap;
     use std::collections::HashSet;
@@ -97,18 +96,12 @@ mod tests {
         repo_root().join("engine/py-shim/shim.py")
     }
     fn item(node_id: &str) -> TestItem {
-        let module = node_id.split("::").next().unwrap_or(node_id);
+        let module = NodeId::file_of(node_id);
         TestItem::new(
             NodeId::new(node_id),
             TestStyle::Function,
             ScopePath::module(module),
         )
-    }
-
-    #[test]
-    fn locality_key_is_the_module_part_of_the_node_id() {
-        assert_eq!(locality_key("pkg/test_a.py::test_x"), "pkg/test_a.py");
-        assert_eq!(locality_key("bare"), "bare");
     }
 
     #[test]
