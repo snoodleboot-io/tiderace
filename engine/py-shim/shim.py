@@ -5732,8 +5732,19 @@ def _fork_pool_workers(size: int, socket_path: str, engine_args: dict,
 
 def serve() -> int:
     root = sys.argv[1]
-    global _ROOT
+    global _ROOT, _STDOUT
     _ROOT = root
+    # The protocol owns a private duplicate of fd 1, and fd 1 itself — what `print()`, a C
+    # extension and a subprocess's inherited stdout reach — is pointed at stderr (TID-103). The
+    # frames are length-prefixed, so one stray byte on the stream desynchronises it for good: in
+    # the warm image (TID-84) the parent's stdout is the daemon's control pipe, shared by
+    # inheritance with every forked worker, and the first test that printed put its bytes in
+    # front of the next spawn's acknowledgement — read as a frame length and waited on forever.
+    # click's suite hung the daemon on its second run, deterministically. A one-shot worker's
+    # stdout is the engine's result stream, with the same exposure; its stray output now reaches
+    # the engine's stderr instead.
+    _STDOUT = os.dup(1)
+    os.dup2(2, 1)
     no_fork = "--no-fork" in sys.argv[2:]
     coverage = "--coverage" in sys.argv[2:] or os.environ.get("TIDERACE_COVERAGE") == "1"
     coverage_lines = ("--coverage-lines" in sys.argv[2:]
