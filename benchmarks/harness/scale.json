@@ -1,0 +1,124 @@
+{
+ "2000": {
+  "modules": 40,
+  "rows": {
+   "pytest": {
+    "median": 1.87,
+    "runs": [
+     2.7,
+     1.87,
+     1.84
+    ]
+   },
+   "pytest -n auto": {
+    "median": 3.02,
+    "runs": [
+     3.13,
+     3.02,
+     3.01
+    ]
+   },
+   "tiderace": {
+    "median": 0.71,
+    "runs": [
+     0.72,
+     0.71,
+     0.67
+    ]
+   },
+   "pytest -k one": {
+    "median": 0.65,
+    "runs": [
+     0.65,
+     0.67,
+     0.64
+    ]
+   },
+   "tiderace -k one, no daemon": {
+    "median": 0.43,
+    "runs": [
+     0.43,
+     0.43,
+     0.41
+    ]
+   },
+   "tiderace -k one, warm daemon": {
+    "median": 0.1,
+    "runs": [
+     0.12,
+     0.1,
+     0.09
+    ]
+   },
+   "tiderace, warm daemon": {
+    "median": 0.26,
+    "runs": [
+     0.25,
+     0.29,
+     0.26
+    ]
+   }
+  }
+ },
+ "20000": {
+  "modules": 400,
+  "rows": {
+   "pytest": {
+    "median": 16.39,
+    "runs": [
+     24.96,
+     16.19,
+     16.39
+    ]
+   },
+   "pytest -n auto": {
+    "median": 19.57,
+    "runs": [
+     19.8,
+     19.57,
+     19.55
+    ]
+   },
+   "tiderace": {
+    "median": 4.24,
+    "runs": [
+     4.56,
+     4.24,
+     4.18
+    ]
+   },
+   "pytest -k one": {
+    "median": 4.43,
+    "runs": [
+     4.43,
+     4.43,
+     4.5
+    ]
+   },
+   "tiderace -k one, no daemon": {
+    "median": 1.22,
+    "runs": [
+     1.21,
+     1.26,
+     1.22
+    ]
+   },
+   "tiderace -k one, warm daemon": {
+    "median": 0.81,
+    "runs": [
+     0.82,
+     0.79,
+     0.81
+    ]
+   },
+   "tiderace, warm daemon": {
+    "median": 5.51,
+    "runs": [
+     5.51,
+     5.59,
+     5.45
+    ]
+   }
+  }
+ }
+}

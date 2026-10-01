@@ -52,10 +52,10 @@ timed. Medians of interleaved rounds; the full tables, method and caveats are in
 
 | suite | tests | pytest | pytest -n auto | **tiderace** | vs pytest | vs xdist |
 |---|---:|---:|---:|---:|---:|---:|
-| pirn-core (monorepo) | 5,036 | 77.9 s | 40.4 s | **26.7 s** | 2.9× | 1.5× |
-| pirn-agents (monorepo) | 4,652 | 105.9 s | 47.6 s | **31.1 s** | 3.4× | 1.5× |
-| anyio | 1,479 | 48.2 s | 14.9 s | **9.7 s** | 5.0× | 1.5× |
-| click | 589 | 1.36 s | 1.82 s | **0.56 s** | 2.4× | 3.3× |
+| pirn-core (monorepo) | 5,036 | 78.0 s | 39.9 s | **27.2 s** | 2.9× | 1.5× |
+| pirn-agents (monorepo) | 4,652 | 104.7 s | 47.9 s | **32.4 s** | 3.2× | 1.5× |
+| anyio | 1,479 | 48.4 s | 15.0 s | **9.6 s** | 5.1× | 1.6× |
+| click | 589 | 1.38 s | 1.92 s | **0.69 s** | 2.0× | 2.8× |
 | flask | 482 | 2.08 s | 2.40 s | **0.99 s** | 2.1× | 2.4× |
 
 Outcomes are identical to pytest's on seven of the eight suites, node id for node id. And the run
