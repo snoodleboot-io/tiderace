@@ -35,6 +35,7 @@ pub use invalidator::{Invalidation, Invalidator};
 // Moved to `engine-core` (TID-17) so the CLI can reach the sub-interpreter tier too;
 // re-exported here to keep the daemon's public surface unchanged.
 pub use engine_core::exec::probe_modules;
+pub use rpc::client::{DaemonClient, Healthy, Started};
 pub use rpc::method::{RpcRequest, RpcResponse, RpcResult};
 pub use rpc::server::{read_frame, serve_connection, write_frame, RpcHandler};
 pub use rpc::socket::daemon_socket_path;
