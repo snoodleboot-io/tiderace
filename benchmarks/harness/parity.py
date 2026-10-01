@@ -1,19 +1,21 @@
 """Parity pass: pytest vs tiderace on every corpus, load-independent by design.
 
-    python benchmarks/harness/parity.py            # every corpus
-    python benchmarks/harness/parity.py click flask
+    python -m benchmarks.harness.parity            # every corpus
+    python -m benchmarks.harness.parity click flask
 
 Tallies come from `tiderace run --report` (TID-55), not from the terminal: scraping stdout is what
 once made a 62-test gap read as one number — 36 changed outcomes plus 32 node ids that never
 existed on our side plus 6 extra, two opposite errors partly cancelling. The report is per node, so
-`nodediff.py` can compare sets of ids rather than trusting a tally. Results accumulate in
+`nodediff` can compare sets of ids rather than trusting a tally. Results accumulate in
 `parity.json` beside this file; the per-corpus reports stay as `report-<corpus>.json`.
 """
-import json, os, re, subprocess, sys, time
-sys.path.insert(0, os.path.dirname(__file__))
-from corpora import CORPORA, TIDERACE, clean_env, tiderace_env
+import re
+import sys
+import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+from .corpora import CORPORA
+from .reports import fresh_report, read_json, report_path, write_json
+from .runs import pytest_cmd, pytest_env, tiderace_cmd, tiderace_env_for, timed
 
 
 def counts_pytest(text):
@@ -26,9 +28,9 @@ def counts_pytest(text):
 
 
 def counts_tiderace(report_path, text):
-    if not os.path.exists(report_path):
+    r = read_json(report_path)
+    if r is None:
         return None, text.strip().splitlines()[-1] if text.strip() else ""
-    r = json.load(open(report_path))
     c = {k: r[k] for k in ("passed", "failed", "skipped", "total")}
     c["error"] = r["errored"]
     c["skipped_modules"] = r.get("skipped_modules", 0)
@@ -37,31 +39,32 @@ def counts_tiderace(report_path, text):
     return c, line
 
 
-only = set(sys.argv[1:])
-out = {}
-for name, group, cwd, py, target, troot, _ in CORPORA:
-    if only and name not in only:
-        continue
-    t0 = time.time()
-    pr = subprocess.run([py, "-m", "pytest", "-q", "-p", "no:cacheprovider", target], cwd=cwd,
-                        capture_output=True, text=True, env=clean_env(), timeout=3600)
-    pc, pline = counts_pytest(pr.stdout + pr.stderr)
-    rpath = os.path.join(HERE, f"report-{name}.json")
-    if os.path.exists(rpath):
-        os.remove(rpath)  # a stale report from a previous pass must never be read as this one's
-    tr = subprocess.run([TIDERACE, "run", "-q", "--report", rpath, troot], cwd=cwd,
-                        capture_output=True, text=True, env=dict(tiderace_env(), TIDERACE_PYTHON=py),
-                        timeout=3600)
-    tc, tline = counts_tiderace(rpath, tr.stdout + tr.stderr)
-    # Passed / failed / error must agree exactly. Skips are compared by `nodediff.py`: pytest counts
-    # a module that skips at import once, tiderace once per test in it (TID-55), so the tallies
-    # differ by construction on any suite with an `importorskip`.
-    same = tc is not None and all(pc[k] == tc[k] for k in ("passed", "failed", "error"))
-    out[name] = {"group": group, "pytest": pc, "pytest_line": pline, "tiderace": tc,
-                 "tiderace_line": tline, "parity": same, "report": rpath}
-    print(f"{name:12s} {'PARITY ' if same else 'DIVERGE'}  pytest[{pline}]\n{'':21s}tiderace[{tline}]"
-          f"   ({time.time() - t0:.0f}s)", flush=True)
-path = os.path.join(HERE, "parity.json")
-prev = json.load(open(path)) if os.path.exists(path) else {}
-prev.update(out)
-json.dump(prev, open(path, "w"), indent=2)
+def main(argv):
+    only = set(argv)
+    out = {}
+    for corpus in CORPORA:
+        if only and corpus.name not in only:
+            continue
+        t0 = time.time()
+        pr = timed(pytest_cmd(corpus.python, corpus.pytest_target), corpus.cwd, pytest_env(corpus))
+        pc, pline = counts_pytest(pr.output)
+        rpath = fresh_report("report", corpus.name)
+        tr = timed(tiderace_cmd(corpus.tiderace_root, "--report", rpath), corpus.cwd,
+                   tiderace_env_for(corpus))
+        tc, tline = counts_tiderace(rpath, tr.output)
+        # Passed / failed / error must agree exactly. Skips are compared by `nodediff`: pytest
+        # counts a module that skips at import once, tiderace once per test in it (TID-55), so the
+        # tallies differ by construction on any suite with an `importorskip`.
+        same = tc is not None and all(pc[k] == tc[k] for k in ("passed", "failed", "error"))
+        out[corpus.name] = {"group": corpus.group, "pytest": pc, "pytest_line": pline, "tiderace": tc,
+                            "tiderace_line": tline, "parity": same, "report": rpath}
+        print(f"{corpus.name:12s} {'PARITY ' if same else 'DIVERGE'}  pytest[{pline}]\n"
+              f"{'':21s}tiderace[{tline}]   ({time.time() - t0:.0f}s)", flush=True)
+    path = report_path("parity")
+    prev = read_json(path, {})
+    prev.update(out)
+    write_json(path, prev, indent=2)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

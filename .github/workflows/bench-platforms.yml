@@ -65,7 +65,7 @@ jobs:
         run: |
           PY=$(python -c "import sys; print(sys.executable)")
           export TIDERACE_PY_FX_CORPUS="$PY" TIDERACE_PY_CLICK="$PY" TIDERACE_PY_CACHETOOLS="$PY"
-          python benchmarks/harness/platform_bench.py ${{ inputs.corpora || 'fx_corpus cachetools' }}
+          python -m benchmarks.harness.platform_bench ${{ inputs.corpora || 'fx_corpus cachetools' }}
       - name: Keep the numbers
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
