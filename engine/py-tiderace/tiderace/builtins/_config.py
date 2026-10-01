@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from ._runtime import context
+
 
 class NullPluginManager:
     """The plugin manager a runner with no plugins can honestly offer.
@@ -44,15 +46,6 @@ class NullPluginManager:
         return "<NullPluginManager: tiderace runs no pytest plugins>"
 
 
-def _declared_ini(name: str) -> Any:
-    try:
-        import shim  # the engine's own module, present only when the shim is running this
-    except Exception:  # noqa: BLE001 — imported directly (tests of this package); nothing known
-        return None
-    reader = getattr(shim, "_ini_value", None)
-    return reader(name) if reader is not None else None
-
-
 class RunConfig:
     """What `pytestconfig` gives a test, as much as is meaningful without pytest.
 
@@ -79,7 +72,7 @@ class RunConfig:
     def getini(self, name: str) -> Any:
         """An ini value: the project's configured value, else the default the declaring plugin or
         conftest gave `parser.addini` (the shim records those, TID-87), else `None`."""
-        return _declared_ini(name)
+        return context().ini(name)
 
     @property
     def rootpath(self):

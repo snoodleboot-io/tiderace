@@ -48,11 +48,11 @@ it times anything, checks that tiderace agrees with pytest on them test for test
 benchmark document is produced from it.
 
 ```bash
-python benchmarks/harness/parity.py             # pytest vs tiderace tallies, per corpus
-python benchmarks/harness/nodediff.py click     # per-node outcome diff — the only sound comparison
-python benchmarks/harness/selection_diff.py click -k context "not shell"   # what -k / -m select, vs pytest
-python benchmarks/harness/timing_rr.py          # pytest / xdist / tiderace, interleaved, medians
-PIRN_SNAPSHOT=... python benchmarks/harness/second_run.py pirn-core   # the run after an edit
+python -m benchmarks.harness.parity             # pytest vs tiderace tallies, per corpus
+python -m benchmarks.harness.nodediff click     # per-node outcome diff — the only sound comparison
+python -m benchmarks.harness.selection_diff click -k context "not shell"   # what -k / -m select, vs pytest
+python -m benchmarks.harness.timing_rr          # pytest / xdist / tiderace, interleaved, medians
+PIRN_SNAPSHOT=... python -m benchmarks.harness.second_run pirn-core   # the run after an edit
 ```
 
 The method — pinned inputs, parity before speed, interleaved rounds, load recorded, node-id
@@ -395,11 +395,11 @@ cargo build --release --manifest-path engine/Cargo.toml        # the engine
 
 # The real-suite harness: one venv per corpus (see benchmarks/harness/README.md);
 # PIRN_SNAPSHOT points at the internal monorepo snapshot for the four internal suites.
-python benchmarks/harness/parity.py                             # pytest vs tiderace tallies, every corpus
-python benchmarks/harness/nodediff.py click                     # per-node outcome diff — the only sound comparison
-ROUNDS=3 python benchmarks/harness/timing_rr.py                 # pytest / xdist / tiderace, interleaved, medians
-PIRN_SNAPSHOT=… python benchmarks/harness/second_run.py pirn-core   # the run after an edit
-PIRN_SNAPSHOT=… python benchmarks/harness/warm_vs_xdist.py pirn-core
+python -m benchmarks.harness.parity                             # pytest vs tiderace tallies, every corpus
+python -m benchmarks.harness.nodediff click                     # per-node outcome diff — the only sound comparison
+ROUNDS=3 python -m benchmarks.harness.timing_rr                 # pytest / xdist / tiderace, interleaved, medians
+PIRN_SNAPSHOT=… python -m benchmarks.harness.second_run pirn-core   # the run after an edit
+PIRN_SNAPSHOT=… python -m benchmarks.harness.warm_vs_xdist pirn-core
 
 # The fixture microbenchmark
 benchmarks/bench_3way.sh

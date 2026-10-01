@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Wait for the machine to stop being oversubscribed by other work, then run the given command.
 #
-#   benchmarks/harness/quiet_gate.sh 5 python benchmarks/harness/timing_rr.py pirn-core
+#   benchmarks/harness/quiet_gate.sh 5 python -m benchmarks.harness.timing_rr pirn-core
 #
 # A wall-clock comparison at load 20 on 8 cores measures the contention, not the runners: an idle
 # worker costs nothing when the OS has someone else to give its cycles to, so the very thing a

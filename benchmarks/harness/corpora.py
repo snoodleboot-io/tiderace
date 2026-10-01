@@ -1,4 +1,4 @@
-"""Benchmark corpus definitions — one place, used by every pass in this directory.
+"""Benchmark corpus definitions — one place, used by every pass in this package.
 
 Nothing here is an absolute path. Public corpora are the vendored checkouts under
 `conformance/vendor/`; each needs a virtualenv with that project's pinned pytest, found at
@@ -11,12 +11,35 @@ Why a snapshot rather than the live checkout: the live checkout's venv was being
 *during* an earlier pass, which moved pytest's own totals between runs. A benchmark needs one fixed
 environment, and a corpus that moves is itself worth reporting, so keep the snapshots.
 """
+from __future__ import annotations
+
 import os
+from dataclasses import dataclass
 
 R = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 VENDOR = os.path.join(R, "conformance", "vendor")
 VENVS = os.environ.get("TIDERACE_BENCH_VENVS", os.path.join(R, ".tiderace-bench-venvs"))
 PIRN = os.environ.get("PIRN_SNAPSHOT")
+
+
+@dataclass(frozen=True)
+class Corpus:
+    """One suite the harness runs: where it lives, which interpreter runs it, and what each
+    runner is pointed at. A pass used to unpack this as a seven-tuple, by position."""
+
+    name: str
+    group: str  # "public" (a vendored checkout) or "internal" (the monorepo snapshot)
+    cwd: str  # the directory both runners are invoked from
+    python: str  # the corpus's own interpreter — its pinned pytest
+    pytest_target: str  # what pytest is pointed at, relative to `cwd`
+    tiderace_root: str  # the run root tiderace is pointed at
+    xdist_path: str = ""  # extra PYTHONPATH supplying pytest-xdist where the venv has none
+
+    @property
+    def prefix(self) -> str:
+        """tiderace's node ids are relative to the run root and pytest's to `cwd`: the path that
+        maps one onto the other, `'.'` when they coincide."""
+        return os.path.relpath(self.tiderace_root, self.cwd)
 
 
 def _venv_python(venv: str) -> str:
@@ -32,9 +55,9 @@ def _python(name: str) -> str:
     )
 
 
-def _public(name: str):
+def _public(name: str) -> Corpus:
     root = os.path.join(VENDOR, name)
-    return (name, "public", root, _python(name), "tests", os.path.join(root, "tests"), "")
+    return Corpus(name, "public", root, _python(name), "tests", os.path.join(root, "tests"))
 
 
 # pytest-xdist for the internal corpora, installed to a directory of its own rather than into the
@@ -43,25 +66,27 @@ def _public(name: str):
 XDIST_PATH = os.environ.get("TIDERACE_XDIST_PATH", os.path.join(R, ".tiderace-bench-venvs", "xdist"))
 
 
-def _internal(pkg: str):
+def _internal(pkg: str) -> Corpus:
     root = os.path.join(PIRN, "packages", pkg)
-    return (pkg, "internal", root, os.path.join(PIRN, ".venv", "bin", "python"), "tests", root,
-            XDIST_PATH)
+    return Corpus(pkg, "internal", root, os.path.join(PIRN, ".venv", "bin", "python"), "tests",
+                  root, XDIST_PATH)
 
 
-# (name, group, cwd, python, pytest target, tiderace root, extra PYTHONPATH for xdist)
-CORPORA = [
-    (
-        "fx_corpus", "internal", os.path.join(R, "benchmarks", "fixtures", "fx_corpus"),
+_FX = os.path.join(R, "benchmarks", "fixtures", "fx_corpus")
+CORPORA: tuple[Corpus, ...] = (
+    Corpus(
+        "fx_corpus", "internal", _FX,
         os.environ.get("TIDERACE_PY_FX_CORPUS") or _venv_python(os.path.join(R, ".tiderace-fx-venv")),
-        "tests", os.path.join(R, "benchmarks", "fixtures", "fx_corpus", "tests"), "",
+        "tests", os.path.join(_FX, "tests"),
     ),
-    *([_internal("pirn-data"), _internal("pirn-agents"), _internal("pirn-core")] if PIRN else []),
+) + (
+    (_internal("pirn-core"), _internal("pirn-agents"), _internal("pirn-data")) if PIRN else ()
+) + (
     _public("cachetools"),
     _public("click"),
     _public("flask"),
     _public("anyio"),
-]
+)
 
 # `TIDERACE_BIN` lets a pass point at a binary built from a branch without touching the tree the
 # other pass is using — the A/B between two builds has to be able to run them side by side.
@@ -73,11 +98,11 @@ SHIM = os.environ.get("TIDERACE_SHIM") or os.path.join(R, "engine", "py-shim", "
 TR_PATH = os.environ.get("TIDERACE_PY_TIDERACE") or os.path.join(R, "engine", "py-tiderace")
 
 
-def by_name(name: str):
-    return next(c for c in CORPORA if c[0] == name)
+def by_name(name: str) -> Corpus:
+    return next(c for c in CORPORA if c.name == name)
 
 
-def load() -> float:
+def load_average() -> float:
     """The one-minute load average — recorded with every measurement, never assumed. Zero where
     the platform has none to report (Windows)."""
     try:

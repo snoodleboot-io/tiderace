@@ -6,8 +6,8 @@ Every node in a report from the parallel runner carries `worker`, `unit`, `unit_
 when, and how long it sat idle — plus the critical path and the ideal makespan computed from the
 same durations, so a benchmark number comes with its explanation rather than a guess.
 
-    timeline.py report.json            # lanes, idle, critical path, ideal
-    timeline.py report.json --units 12 # also the twelve longest units
+    python -m benchmarks.harness.timeline report.json            # lanes, idle, critical path, ideal
+    python -m benchmarks.harness.timeline report.json --units 12 # also the twelve longest units
 """
 import argparse
 import collections
@@ -15,7 +15,8 @@ import json
 import sys
 
 
-def load(path):
+def schedule_from(path):
+    """The report and its units — one per `unit`, with the nodes it ran and their summed duration."""
     with open(path, encoding="utf-8") as fh:
         report = json.load(fh)
     tests = [t for t in report["tests"] if t.get("unit") is not None]
@@ -39,7 +40,7 @@ def main():
     ap.add_argument("--units", type=int, default=0, help="also list the N longest units")
     ap.add_argument("--width", type=int, default=100)
     args = ap.parse_args()
-    report, units = load(args.report)
+    report, units = schedule_from(args.report)
 
     lanes = collections.defaultdict(list)
     for u in units:

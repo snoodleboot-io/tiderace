@@ -1773,6 +1773,10 @@ def _register_builtins(reg: Registry) -> None:
               f"capfd/caplog will not resolve. Install `tiderace` into this interpreter, or put "
               f"engine/py-tiderace on PYTHONPATH.")
         return
+    # The builtins read the run root, the declared options and the ini values through one
+    # accessor (TID-111); hand them this module, whose globals they used to reach with
+    # `import shim`. Per interpreter: a sub-interpreter registers its own copy.
+    builtins_pkg.set_context(builtins_pkg._runtime.ModuleContext(sys.modules[__name__]))
     for obj in builtins_pkg.providers():
         reg.add(_native_fixture_def(obj, "", {}))
     _register_anyio_backend(reg)

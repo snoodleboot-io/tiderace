@@ -1,13 +1,15 @@
 # Benchmark harness — parity first, then wall clock
 
-The scripts behind the *Tiderace on Eight Suites* benchmark document. `run_benchmarks.py` one
+The package behind the *Tiderace on Eight Suites* benchmark document — every pass is `python -m benchmarks.harness.<pass>` from the repository root. `run_benchmarks.py` one
 directory up measures a generated fixture under hyperfine; this directory measures **real suites**
 — vendored public projects and a snapshot of the internal monorepo — and, before it times
 anything, checks that tiderace agrees with pytest on them test for test.
 
 | script | what it does |
 | -- | -- |
-| `corpora.py` | the corpus list; every other script imports it |
+| `corpora.py` | the corpus table (`Corpus` records); every pass imports it |
+| `runs.py` | the timed run, the interleaved rounds, and the two command lines, spelled once |
+| `reports.py` | where each pass's JSON lands, and how it is written and read back |
 | `parity.py` | pytest vs tiderace tallies per corpus, from `tiderace run --report` |
 | `nodediff.py` | per-node outcome diff for one corpus — the only sound comparison |
 | `selection_diff.py` | what `-k` / `-m` select, as node-id sets, against pytest's `--collect-only` (TID-100) |
@@ -49,7 +51,7 @@ for c in cachetools click flask anyio; do
   uv venv -q .tiderace-bench-venvs/$c
   uv pip install -q --python .tiderace-bench-venvs/$c/bin/python -e conformance/vendor/$c pytest pytest-xdist
 done
-python benchmarks/harness/parity.py cachetools        # 215 passed on both sides
+python -m benchmarks.harness.parity cachetools        # 215 passed on both sides
 ```
 
 For the internal corpora, snapshot the monorepo at a commit (source plus a *copy* of its venv,

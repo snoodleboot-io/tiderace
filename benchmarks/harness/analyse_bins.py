@@ -1,6 +1,6 @@
 """Reconstruct the scheduler's bins from a `--report` and charge them what was actually measured.
 
-    python benchmarks/harness/analyse_bins.py benchmarks/harness/report-pirn-agents.json
+    python -m benchmarks.harness.analyse_bins benchmarks/harness/report-pirn-agents.json
 
 `LocalityScheduler` is deterministic, so the bins it produced for a run can be rebuilt from the
 algorithm and then charged the per-node durations the report recorded — the bins that ran, not a
@@ -34,8 +34,10 @@ def collected_id(node_id, expanded):
     return node_id
 
 
-def load(path):
-    raw = json.load(open(path))
+def collected_durations(path):
+    """Per collected item, the summed duration of its reported nodes — and the raw report."""
+    with open(path) as fh:
+        raw = json.load(fh)
     items = {}
     for t in raw["tests"]:
         cid = collected_id(t["node_id"], t.get("expanded", False))
@@ -82,7 +84,7 @@ def group_steal(items, workers=WORKERS, order="count"):
 
 
 def report(name, path):
-    items, raw = load(path)
+    items, raw = collected_durations(path)
     total = sum(items.values()); floor = total / WORKERS
     durs = sorted(items.values(), reverse=True)
     print(f"\n=== {name} ===")
