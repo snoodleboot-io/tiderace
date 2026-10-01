@@ -21,6 +21,8 @@ pub struct DaemonConfig {
     /// Route sub-interpreter-safe modules through the parallel sub-interpreter pool on a full
     /// run (ADR-E015 / TID-11, `TIDERACE_SUBINTERP=1`). Its purpose is Windows parallelism.
     pub subinterp: bool,
+    /// Where `serve` listens, when not the per-project default (`TIDERACE_SOCKET`).
+    pub socket: Option<PathBuf>,
 }
 
 impl DaemonConfig {
@@ -37,11 +39,20 @@ impl DaemonConfig {
             cache_dir: None,
             optimistic_no_fork: true,
             subinterp: false,
+            socket: None,
         }
     }
 
-    /// [`new`](Self::new), with `TIDERACE_CACHE_DIR`, `TIDERACE_FORCE_FORK` and
-    /// `TIDERACE_SUBINTERP` read from the environment — the one place the daemon reads them.
+    /// Where a daemon with this configuration listens: the override, else the per-project path
+    /// (see [`daemon_socket_path`](crate::daemon_socket_path)).
+    pub fn socket_path(&self) -> PathBuf {
+        self.socket
+            .clone()
+            .unwrap_or_else(|| crate::rpc::socket::daemon_socket_path(&self.root))
+    }
+
+    /// [`new`](Self::new), with `TIDERACE_CACHE_DIR`, `TIDERACE_FORCE_FORK`, `TIDERACE_SUBINTERP`
+    /// and `TIDERACE_SOCKET` read from the environment — the one place the daemon reads them.
     pub fn from_env(
         python: impl Into<String>,
         shim: impl Into<PathBuf>,
@@ -54,6 +65,10 @@ impl DaemonConfig {
                 .map(PathBuf::from),
             optimistic_no_fork: std::env::var("TIDERACE_FORCE_FORK").as_deref() != Ok("1"),
             subinterp: std::env::var("TIDERACE_SUBINTERP").as_deref() == Ok("1"),
+            socket: std::env::var("TIDERACE_SOCKET")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
             ..Self::new(python, shim, root)
         }
     }

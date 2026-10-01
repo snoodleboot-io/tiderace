@@ -31,7 +31,7 @@ pub use memory::{
     MemorySizing,
 };
 pub use phase_timer::PhaseTimer;
-pub use run::{run_parallel, run_parallel_with_notes};
+pub use run::{run_parallel, run_parallel_warm_notes, run_parallel_with_notes};
 #[cfg(unix)]
 pub use run::{run_parallel_with_pool, run_parallel_with_pool_notes};
 pub use run_notes::{RunNotes, RunOutcome};

@@ -4,3 +4,4 @@
 pub mod fold;
 pub mod keyword_prefilter;
 pub mod plan;
+pub mod safe_modules;

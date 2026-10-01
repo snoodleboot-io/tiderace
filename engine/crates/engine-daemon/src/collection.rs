@@ -9,7 +9,6 @@ use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::TestItem;
 
 use crate::error::Result;
-#[cfg(unix)]
 use crate::tree_stamp::tree_stamp;
 use crate::EngineHandler;
 
@@ -18,22 +17,15 @@ impl EngineHandler {
     /// collection (TID-101). A stamp covers every `.py` and pytest config file under the root by
     /// path, size and mtime — an added, removed or edited test file changes it.
     pub(crate) fn collect(&mut self) -> Result<Vec<TestItem>> {
-        #[cfg(unix)]
-        {
-            let stamp = tree_stamp(&self.root);
-            if let Some((seen, items)) = &self.collected {
-                if *seen == stamp {
-                    return Ok(items.clone());
-                }
+        let stamp = tree_stamp(&self.root);
+        if let Some((seen, items)) = &self.collected {
+            if *seen == stamp {
+                return Ok(items.clone());
             }
-            let items = Self::collect_tree(&self.root)?;
-            self.collected = Some((stamp, items.clone()));
-            Ok(items)
         }
-        #[cfg(not(unix))]
-        {
-            Self::collect_tree(&self.root)
-        }
+        let items = Self::collect_tree(&self.root)?;
+        self.collected = Some((stamp, items.clone()));
+        Ok(items)
     }
 
     pub(crate) fn collect_tree(root: &Path) -> Result<Vec<TestItem>> {
@@ -41,7 +33,7 @@ impl EngineHandler {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use crate::EngineHandler;
 

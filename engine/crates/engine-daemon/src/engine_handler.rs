@@ -13,8 +13,7 @@ use crate::config::DaemonConfig;
 use crate::error::Result;
 use crate::rpc::method::{RpcRequest, RpcResponse, RpcResult};
 use crate::rpc::server::RpcHandler;
-use crate::state::plan::PersistedState;
-use engine_core::exec::SafeSetCache;
+use crate::warm_image::{HeldImage, WarmImage};
 
 /// Summary of an impact-aware run: which tests actually executed vs. were served from warm state.
 /// Served results carry the recorded outcome and detail with a zero duration.
@@ -36,16 +35,12 @@ pub struct EngineHandler {
     pub(crate) worker: Option<ForkWorker>, // warm wellspring, kept alive across Run requests
     /// The warm **image** for full parallel runs (TID-84): a persistent pool parent holding the
     /// imported suite, from which every `RunFull` forks its workers. Dropped and relaunched when
-    /// the tree's `.py` files change (`warm_stamp`), so a stale module is never executed.
-    #[cfg(unix)]
-    pub(crate) warm: Option<engine_core::exec::WellspringPool>,
-    #[cfg(unix)]
-    pub(crate) warm_stamp: Option<u64>,
+    /// the tree's files change, so a stale module is never executed. See [`WarmImage`].
+    pub(crate) warm: WarmImage,
     /// The last collection and the tree stamp it was taken under (TID-101). Collection is a walk
     /// of every test file, 52 ms of a 390 ms `-k` round trip on a 5,600-node suite, and the daemon
     /// already takes the stamp per run to validate the warm image; the same stamp validates the
     /// collection, which depends on exactly the files the stamp covers.
-    #[cfg(unix)]
     pub(crate) collected: Option<(u64, Vec<TestItem>)>,
     /// Content-addressed result cache (ADR-E004, TID-7); see [`DaemonConfig::cache_dir`].
     pub(crate) cache: Option<DirCache>,
@@ -71,13 +66,19 @@ impl EngineHandler {
             config,
             worker: None,
             cache,
-            #[cfg(unix)]
-            warm: None,
-            #[cfg(unix)]
-            warm_stamp: None,
-            #[cfg(unix)]
+            warm: WarmImage::none(),
             collected: None,
         }
+    }
+
+    /// What this handler was configured with.
+    pub fn config(&self) -> &DaemonConfig {
+        &self.config
+    }
+
+    /// Whether a warm image is currently held.
+    pub fn is_warm(&self) -> bool {
+        self.warm.is_held()
     }
 
     /// Launch the wellspring once; reuse it thereafter (warm). Runs tests no-fork + restore by default
@@ -160,83 +161,40 @@ impl EngineHandler {
                 .filter(|it| wanted.contains(it.node_id.as_str()))
                 .collect()
         };
-        #[cfg(unix)]
-        {
-            // Warm image (TID-84): this run's workers are forked off a persistent parent that
-            // already holds the imported suite — when one is held and still describes the tree,
-            // or when this is a full run, which launches it. When the ladder is off
-            // (`TIDERACE_FORCE_FORK=1`) the one-shot pool runs as before.
-            let mut pool = if self.config.optimistic_no_fork {
-                self.warm_pool(full_run)?
-            } else {
-                None
-            };
-            phase.mark("warm pool");
-            // This run's selection (TID-90): a warm image's workers apply it after the fork; a
-            // one-shot pool reads it the way `tiderace run` hands it over, from the environment,
-            // set for this run alone so the next request (or a later image launch) sees none of it.
-            let env_guard = match pool.as_mut() {
-                Some(p) => {
-                    p.set_selection(selection.cloned());
-                    None
-                }
-                // SAFETY: the daemon serves one request at a time on this thread, and no other
-                // thread reads the environment while a run is being set up.
-                None => selection.map(|sel| unsafe { sel.apply_env() }),
-            };
-            let out = match pool.as_mut() {
-                // The daemon's warm image (TID-84): this run's workers are forked off it.
-                Some(p) => engine_core::runner::run_parallel_with_pool_notes(
-                    &self.python,
-                    &self.shim,
-                    &self.root,
-                    items,
-                    &plan,
-                    learned,
-                    p,
-                ),
-                None => engine_core::runner::run_parallel_with_notes(
-                    &self.python,
-                    &self.shim,
-                    &self.root,
-                    items,
-                    &plan,
-                    learned,
-                ),
-            };
-            self.warm = pool; // back for the next run, whatever this one's outcome
-            drop(env_guard);
-            phase.mark("run_parallel");
-            Ok(print_notes(out?))
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (full_run, selection);
-            Ok(print_notes(engine_core::runner::run_parallel_with_notes(
-                &self.python,
-                &self.shim,
-                &self.root,
-                items,
-                &plan,
-                learned,
-            )?))
-        }
-    }
-
-    /// The sub-interpreter-safe module set for `modules` (ADR-E015 TID-9 cache + TID-11).
-    ///
-    /// The classification and content-hash invalidation live in `engine_core`'s [`SafeSetCache`], so
-    /// the CLI gets the same behaviour instead of re-probing every run (TID-35). The daemon keeps
-    /// *persisting* the verdicts in its own state file, which it already writes.
-    pub(crate) fn safe_set(
-        &self,
-        state: &mut PersistedState,
-        modules: &[String],
-    ) -> Result<HashSet<String>> {
-        let mut cache = SafeSetCache::from_entries(std::mem::take(&mut state.safe_modules));
-        let safe = cache.resolve(&self.python, &self.shim, &self.root, modules);
-        state.safe_modules = cache.into_entries();
-        Ok(safe?)
+        // Warm image (TID-84): this run's workers are forked off a persistent parent that
+        // already holds the imported suite — when one is held and still describes the tree, or
+        // when this is a full run, which launches it. When the ladder is off
+        // (`TIDERACE_FORCE_FORK=1`) the one-shot pool runs as before.
+        let mut held = if self.config.optimistic_no_fork {
+            self.warm
+                .take_for_run(&self.python, &self.shim, &self.root, full_run)?
+        } else {
+            HeldImage::none()
+        };
+        phase.mark("warm pool");
+        // This run's selection (TID-90): a warm image's workers apply it after the fork; a
+        // one-shot pool reads it the way `tiderace run` hands it over, from the environment,
+        // set for this run alone so the next request (or a later image launch) sees none of it.
+        let env_guard = if held.set_selection(selection.cloned()) {
+            None
+        } else {
+            // SAFETY: the daemon serves one request at a time on this thread, and no other
+            // thread reads the environment while a run is being set up.
+            selection.map(|sel| unsafe { sel.apply_env() })
+        };
+        let out = engine_core::runner::run_parallel_warm_notes(
+            &self.python,
+            &self.shim,
+            &self.root,
+            items,
+            &plan,
+            learned,
+            held.for_runner(),
+        );
+        self.warm.put_back(held); // back for the next run, whatever this one's outcome
+        drop(env_guard);
+        phase.mark("run_parallel");
+        Ok(print_notes(out?))
     }
 }
 
@@ -294,7 +252,7 @@ impl EngineHandler {
                     .worker
                     .as_ref()
                     .and_then(ForkWorker::wellspring_pid)
-                    .or_else(|| self.warm_pid())
+                    .or_else(|| self.warm.pid())
                     .unwrap_or_else(std::process::id),
                 warm: self.worker.is_some() || self.is_warm(),
             },
@@ -309,94 +267,5 @@ impl RpcHandler for EngineHandler {
             .unwrap_or_else(|e| RpcResponse::Error {
                 message: e.to_string(),
             })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use engine_core::testing::skip_live;
-
-    fn repo_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../..")
-            .canonicalize()
-            .expect("repo root")
-    }
-
-    /// Sub-interp safety needs CPython 3.14 (`concurrent.interpreters`) + numpy for the unsafe case —
-    /// gate the `safe_set` test on the fx venv.
-    fn fx_venv() -> Option<String> {
-        let p = repo_root().join(".tiderace-fx-venv/bin/python");
-        p.exists().then(|| p.to_string_lossy().into_owned())
-    }
-
-    #[test]
-    fn safe_set_classifies_probes_once_and_caches() {
-        let Some(python) = fx_venv() else {
-            skip_live("`.tiderace-fx-venv` (CPython 3.14 + numpy) not present");
-            return;
-        };
-        let dir = temp("safeset");
-        std::fs::write(
-            dir.join("test_pure.py"),
-            "def test_a():\n    assert 1 == 1\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("test_np.py"),
-            "import numpy\ndef test_n():\n    assert int(numpy.array([1]).sum()) == 1\n",
-        )
-        .unwrap();
-        let handler = EngineHandler::new(
-            python,
-            repo_root().join("engine/py-shim/shim.py"),
-            dir.clone(),
-        );
-        let mut state = PersistedState::default();
-        let modules = vec!["test_pure.py".to_string(), "test_np.py".to_string()];
-
-        let safe = handler.safe_set(&mut state, &modules).expect("safe_set");
-        assert!(
-            safe.contains("test_pure.py"),
-            "pure module is sub-interp-safe"
-        );
-        assert!(!safe.contains("test_np.py"), "numpy module is not safe");
-        assert_eq!(
-            state.safe_modules.get("test_pure.py").map(|r| r.safe),
-            Some(true)
-        );
-        assert_eq!(
-            state.safe_modules.get("test_np.py").map(|r| r.safe),
-            Some(false)
-        );
-
-        // Second call: verdicts are cached by content hash, so the result is stable (no re-probe needed).
-        let hashes: Vec<String> = state
-            .safe_modules
-            .values()
-            .map(|r| r.hash.clone())
-            .collect();
-        let safe2 = handler
-            .safe_set(&mut state, &modules)
-            .expect("safe_set cached");
-        assert_eq!(safe, safe2);
-        assert_eq!(
-            hashes,
-            state
-                .safe_modules
-                .values()
-                .map(|r| r.hash.clone())
-                .collect::<Vec<_>>(),
-            "unchanged modules keep their cached verdict"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    fn temp(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("tiderace_safeset_{tag}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        p
     }
 }

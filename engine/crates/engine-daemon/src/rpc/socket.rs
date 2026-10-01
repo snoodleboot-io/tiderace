@@ -1,5 +1,6 @@
 use std::path::Path;
 
+#[cfg(unix)]
 use crate::rpc::server::{serve_connection, RpcHandler};
 
 /// Where a daemon serving `root` listens, and where `tiderace run` looks for one (TID-84):
