@@ -11,6 +11,8 @@ anything, checks that tiderace agrees with pytest on them test for test.
 | `parity.py` | pytest vs tiderace tallies per corpus, from `tiderace run --report` |
 | `nodediff.py` | per-node outcome diff for one corpus — the only sound comparison |
 | `selection_diff.py` | what `-k` / `-m` select, as node-id sets, against pytest's `--collect-only` (TID-100) |
+| `platform_bench.py` | cold timings on Windows / macOS / Linux for the corpora that need no snapshot, each tier the platform has; run by `bench-platforms.yml` (TID-13) |
+| `scale_corpus.py`, `scale_bench.py` | a synthetic suite of any size, and how the runners scale with it — full run, `-k` one test, with and without the daemon |
 | `timing_rr.py` | pytest / `pytest -n auto` / tiderace, interleaved rounds, medians, load recorded |
 | `binab.py` | two tiderace binaries A/B'd on the same corpora, interleaved |
 | `analyse_bins.py` | rebuild the scheduler's bins from a report and charge them measured durations |
