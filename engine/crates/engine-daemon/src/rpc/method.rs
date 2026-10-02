@@ -23,8 +23,6 @@ pub enum RpcRequest {
         #[serde(default)]
         strict_markers: bool,
     },
-    /// Start watching; the daemon streams impacted re-runs until cancelled.
-    Watch,
     /// Drop warm state (a stale interpreter after a conftest/config/C-ext change) and re-run all.
     Recycle,
     /// Liveness/warmth probe.
@@ -67,7 +65,6 @@ pub enum RpcResponse {
     RanFull {
         results: Vec<TestResult>,
     },
-    Watching,
     Healthy {
         pid: u32,
         warm: bool,
@@ -95,7 +92,6 @@ mod tests {
             RpcRequest::Run {
                 node_ids: vec!["t.py::a".into()],
             },
-            RpcRequest::Watch,
             RpcRequest::Recycle,
             RpcRequest::Health,
             RpcRequest::Shutdown,

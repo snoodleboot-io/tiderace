@@ -79,11 +79,12 @@ binary (`main.rs`). Module files (`engine-daemon/src/`):
   `plan()`; see [state & cache](database.md)), `fold.rs` (how a run's results fold into it,
   `RunScope`), `keyword_prefilter.rs` (`-k` decided by the daemon where the record can vouch),
   `safe_modules.rs` (the sub-interpreter safe set, probed once and persisted).
-- **`watch.rs` / `fs_watcher.rs` / `invalidator.rs`** — `watch` mode: debounced filesystem events feed
-  the invalidator, which uses the dep graph to re-run only impacted tests on each save.
+- **`watch.rs` / `fs_watcher.rs`** — `watch` mode: debounced filesystem events, each classified
+  (a `.py` edit → the daemon's own run, which re-runs what the change reaches; a conftest / config /
+  C-extension change → recycle the warm interpreter first) and handed to the handler.
 - **`rpc/`** — `method.rs` (`RpcRequest` / `RpcResponse`), `server.rs` (framing, `RpcHandler`),
   `socket.rs` (the per-project Unix socket and its path), `client.rs` (`DaemonClient`, what
-  `tiderace run` and `tiderace daemon …` talk through); `session.rs` the warm session.
+  `tiderace run` and `tiderace daemon …` talk through).
 
 The parallel pool itself lives in `engine-core` (`runner/run.rs` over `exec/tiers/`); the daemon's
 contribution is the warm image those workers fork from. `probe` mode calls

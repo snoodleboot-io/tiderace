@@ -246,7 +246,6 @@ impl EngineHandler {
                     results: self.run(&[])?,
                 }
             }
-            RpcRequest::Watch => RpcResponse::Watching,
             RpcRequest::Health => RpcResponse::Healthy {
                 pid: self
                     .worker
