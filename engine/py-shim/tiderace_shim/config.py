@@ -1,4 +1,4 @@
-"""The project's own pytest configuration, loaded once (TID-121).
+"""The project's own pytest configuration, loaded once (TID-121), and the run's (TID-124).
 
 pytest reads one config file — the nearest at or above the run root that *carries* a pytest
 section, in its precedence order — and that file's directory is the rootdir. The shim used to
@@ -6,15 +6,22 @@ open the same four files twice (once for `addopts`, once for every other setting
 `addopts` with `shlex` in three places and scan it by string containment in a fourth. This is the
 one read: a [`ProjectConfig`] with the sections, the `addopts` argv, and the lookups the shim
 needs — a setting's values, a flag's presence, an option's value in the spellings pytest accepts.
+
+A [`RunConfig`] is what one run of the shim is configured with — the root, the project, what its
+`addopts` ignores, the modules `--modules` names — loaded once by the mode that starts the shim
+and handed to discovery and the engine, where module globals used to carry each piece.
 """
 from __future__ import annotations
 
 import configparser
+import fnmatch
 import os
 import shlex
 import tomllib
 from dataclasses import dataclass, field
 from typing import Any
+
+from .selection import path_names
 
 NOTSET = object()
 
@@ -174,3 +181,95 @@ def load_project_config(start: str) -> ProjectConfig:
             root = os.path.abspath(start)
             return ProjectConfig(root, None, _sections_in(root), "")
         directory = parent
+
+
+# ------------------------------------------------------------------------------ the run
+def ignores(project: ProjectConfig) -> tuple:
+    """`--ignore` / `--ignore-glob` paths out of the project's `addopts`, resolved to absolute paths
+    against the config's own directory, as pytest resolves them.
+
+    A project that excludes a directory from its default run means it: pirn-core's `--ignore=tests/perf`
+    holds benchmarks that need the `pytest-benchmark` plugin, and collecting them anyway reported 23
+    failures for tests pytest never runs. Ignored here rather than in the Rust collector because this
+    is where the project's own config is already being read."""
+    return tuple((os.path.abspath(os.path.join(project.dir, value)), glob)
+                 for flag, glob in (("--ignore", False), ("--ignore-glob", True))
+                 for value in project.opt_values(flag) if value)
+
+
+def _force_asyncio(project: ProjectConfig) -> bool:
+    """`asyncio_mode = "auto"` means pytest-asyncio claims *every* async test, including ones carrying
+    `@pytest.mark.anyio`. In that configuration pytest runs even a `[trio]`-labelled variant on an
+    asyncio loop — the id says trio and the loop never is. Emulating the suite's configured
+    toolchain is the job here, so the same thing happens: the expansion still produces one variant
+    per backend, as pytest's ids do, and they all run where pytest runs them (TID-54)."""
+    if not any(str(v).strip().strip('"\'') == "auto" for v in project.values("asyncio_mode")):
+        return False
+    try:
+        import pytest_asyncio  # noqa: F401 — only its presence matters
+    except Exception:  # noqa: BLE001 — declared but not installed: nothing claims the tests
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class RunConfig:
+    """What one run of the shim is configured with (TID-124). `root` is the run root as the engine
+    gave it (argv[1]); `project` the project's own config; `ignored` the absolute paths its
+    `addopts` excludes; `force_asyncio` whether pytest-asyncio's auto mode drives every async test;
+    `modules` the test modules this run executes, suite-relative (`tests/x/test_y.py`), or None
+    for all of them (TID-75) — set from `--modules <file>` before anything is imported, so a run
+    that executes one test does not pay the import of every test module in the suite (4s on
+    pirn-agents, the whole of a one-test run after an edit)."""
+
+    root: str
+    project: ProjectConfig
+    ignored: tuple = ()
+    force_asyncio: bool = False
+    modules: frozenset | None = None
+
+    @classmethod
+    def load(cls, root: str, *, modules_file: str | None = None) -> RunConfig:
+        project = load_project_config(root)
+        modules = None
+        if modules_file:
+            with open(modules_file, encoding="utf-8") as fh:
+                modules = frozenset(line.strip() for line in fh if line.strip())
+        return cls(root, project, ignores(project), _force_asyncio(project), modules)
+
+    @property
+    def abs_root(self) -> str:
+        return os.path.abspath(self.root or ".")
+
+    def is_ignored(self, path: str) -> bool:
+        """Is `path` (absolute) excluded by the project's own `--ignore` / `--ignore-glob`?"""
+        if not self.ignored:
+            return False
+        # Absolute on both sides: the run root arrives as `.` as often as not, and a relative path
+        # never matches a target resolved against the config's directory.
+        path = os.path.abspath(path)
+        for target, glob in self.ignored:
+            if glob:
+                if fnmatch.fnmatch(path, target):
+                    return True
+            elif path == target or path.startswith(target + os.sep):
+                return True
+        return False
+
+    def module_ignored(self, module_key: str) -> bool:
+        return self.is_ignored(os.path.join(self.root or ".", module_key))
+
+    def module_selected(self, rel: str) -> bool:
+        """Whether this run executes tests from `rel`. Only test *modules* are ever skipped: every
+        conftest in the tree is still imported, exactly as pytest imports every conftest at
+        collection whatever it later deselects — a conftest can carry a side effect the rest of the
+        suite relies on, and pruning the directories without selected modules cost 50 tests their
+        isolation on pirn-agents before this was understood."""
+        return self.modules is None or rel in self.modules
+
+    def keyword_names(self, node_id: str, marks) -> list:
+        """What pytest's `-k` matches against: the names its path gives the node (TID-100), every
+        `::` segment — class, function, the function with its parametrize id — and the node's mark
+        names."""
+        parts = node_id.split("::")
+        return [*path_names(parts[0], self.abs_root, self.project.dir), *parts[1:], *sorted(marks)]

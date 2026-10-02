@@ -90,8 +90,9 @@ def main() -> int:
             f.write(CORPUS)
 
         sys.path.insert(0, root)
-        shim._preimport(root)
-        reg = shim._discover(root)
+        run = shim.RunConfig.load(root)
+        shim._preimport(run)
+        reg = shim._discover(run)
 
         builtin_names = sorted(n for n in reg.by_name if n in {"monkeypatch", "tmp_path", "capsys", "capfd"})
         print(f"[discovery] builtin providers auto-registered : {builtin_names}")
@@ -100,7 +101,7 @@ def main() -> int:
               f"{{ {', '.join(f'{t}->{by_type[t]}' for t in sorted(by_type) if t in {'MonkeyPatch','TmpPath','Capsys','Capfd'})} }}")
         registered_ok = builtin_names == ["capfd", "capsys", "monkeypatch", "tmp_path"]
 
-        engine = shim.Engine(reg, no_fork=True)
+        engine = shim.Engine(reg, run, no_fork=True)
         order = [
             ("test_mp_mutates", "passed"),
             ("test_mp_restored", "passed"),

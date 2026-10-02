@@ -55,9 +55,10 @@ def main() -> int:
         with open(os.path.join(root, "test_asserts.py"), "w") as f:
             f.write(CORPUS)
         sys.path.insert(0, root)
-        shim._preimport(root)
-        reg = shim._discover(root)
-        engine = shim.Engine(reg, no_fork=True, root=root)
+        run = shim.RunConfig.load(root)
+        shim._preimport(run)
+        reg = shim._discover(run)
+        engine = shim.Engine(reg, run, no_fork=True)
 
         def run(name):
             return engine.run(f"test_asserts.py::{name}", "function", 5000)

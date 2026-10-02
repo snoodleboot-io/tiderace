@@ -14,6 +14,8 @@ dialects as one `Mark`, folded once; the marker API `request.node` and a hook it
 snapshots, verdicts and restores behind the no-fork tiers) and `safe.py` (attribute access that
 treats any exception as absent), `plan.py` (what a node's run will execute, decided before
 anything is set up) and `tiers.py` (the isolation ladder's tiers: the one place the tier is chosen,
-and the node's response assembled from its variants) — TID-123. Phase 6e retires the shim's
-globals.
+and the node's response assembled from its variants) — TID-123. Phase 6e (TID-124) retires the
+shim's globals: `config.py`'s `RunConfig` is the run (root, project, ignores, the `--modules`
+set), `selection.py` what it selects (`-k`, `-m`, `--strict-markers`, the declared marks), both
+on the engine; `log.py` is the one line to stderr.
 """

@@ -113,7 +113,11 @@ result frames, the node-id resolver and the project-config loader it builds on �
 `pytest_compat.py` folds both mark dialects once, `isolation.py` is the snapshot / verdict /
 restore behind the no-fork tiers, `plan.py` is what a node's run will execute, decided before anything
 is set up, and `tiers.py` is the isolation ladder's tiers, chosen once, with the response assembled
-from a node's variants — TID-123). The engine launches the entry, `TIDERACE_SHIM` points
+from a node's variants — TID-123; `selection.py` is what a run selects — `-k`, `-m`,
+`--strict-markers`, the declared marks — as one `Selection` the engine holds and the daemon's
+per-run patch replaces, and `config.py`'s `RunConfig` is the run itself — root, project, ignores,
+the `--modules` set — loaded once and handed to discovery and the engine, where module globals
+used to carry each piece; `log.py` is the one line to stderr — TID-124). The engine launches the entry, `TIDERACE_SHIM` points
 at it, and the wheel stages both into `tiderace/_shim/`. The only logic that runs inside CPython. Imports user code, invokes test bodies, and implements the
 **isolation ladder**: `static_impurity` (AST pre-filter), `_restorable` (can this module be snapshot
 + restored?), `_restore_shared` (snapshot/undo of module globals + `os.environ`), and `Engine.run`
