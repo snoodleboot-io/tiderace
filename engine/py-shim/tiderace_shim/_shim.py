@@ -54,6 +54,7 @@ import unittest
 import warnings
 
 from .config import NOTSET as _NOTSET, ProjectConfig, load_project_config, option as _argv_option
+from .isolation import Isolation, _restorable
 from .pytest_compat import (MarkerBearer, fold as _fold_marks, normalise_all as _normalise_marks,
                             skip_reason as _mark_skip_reason)
 from .protocol import (EXIT_UNREPORTABLE as _EXIT_UNREPORTABLE, Transport, end_child,
@@ -63,6 +64,7 @@ from .protocol import (EXIT_UNREPORTABLE as _EXIT_UNREPORTABLE, Transport, end_c
 from .nodes import (Target, class_method as _class_method, import_module as _import_module,
                     module_key as _module_key, module_name as _module_name, resolve_target,
                     set_run_root)
+from .safe import MISSING as _MISSING, safe_getattr as _safe_getattr, safe_hasattr as _safe_hasattr
 from .results import (UNKNOWN_PURITY as _UNKNOWN_PURITY, Outcome, empty_expansion, errored,
                       expansion, purity_from, response, skipped, variant, with_purity)
 
@@ -671,35 +673,6 @@ def _test_finalizers(request) -> None:
     """A test request's finalizers — after the body has fully run, including an awaited one."""
     if request is not None:
         _run_finalizers(request._finalizers)
-
-
-_MISSING = object()
-
-
-def _safe_getattr(obj, name: str, default=None):
-    """`getattr` that treats *any* exception as "absent", not only `AttributeError` (TID-43).
-
-    Discovery probes every module-level value to see whether it is a fixture or a provider, and those
-    values are arbitrary objects. Plenty of them raise something other than `AttributeError` when
-    touched: flask's `request`, `g`, `session` and `current_app` are werkzeug `LocalProxy` objects
-    that raise `RuntimeError: Working outside of request context`; Django's `SimpleLazyObject` can
-    raise whatever its factory raises; a mock can have a side effect on attribute access.
-
-    Plain `hasattr` and `getattr(obj, name, default)` only swallow `AttributeError`, so any of those
-    escaped `_discover` and killed the shim before it was ready — which on flask made the default
-    configuration hang forever (see `WellspringPool::launch`). pytest's discovery goes through
-    `_pytest.compat.safe_getattr` for precisely this reason; this is the same contract.
-
-    `BaseException` is deliberately *not* caught: `KeyboardInterrupt` and `SystemExit` from a probe
-    mean the user or the interpreter wants out, and swallowing them would be its own bug."""
-    try:
-        return getattr(obj, name, default)
-    except Exception:  # noqa: BLE001 — see the docstring; this is the point
-        return default
-
-
-def _safe_hasattr(obj, name: str) -> bool:
-    return _safe_getattr(obj, name, _MISSING) is not _MISSING
 
 
 def _fixture_marker(obj):
@@ -1832,8 +1805,8 @@ def static_impurity(func) -> str | None:
 
 
 # --------------------------------------------------------------------------- purity guard (→ batching)
-_OPAQUE = object()
-# The purity tri-state (`_UNKNOWN_PURITY`, `None`, a reason) is defined with its wire encoding in `results.py`.
+# The purity tri-state (`_UNKNOWN_PURITY`, `None`, a reason) is defined with its wire encoding in
+# `results.py`; the snapshots, verdicts and restores live in `isolation.py` (TID-123).
 
 # Windows has no `fork()`. The isolation ladder's bottom rung (fork an opaque module) therefore doesn't
 # exist there, so the shim must decide what to do instead rather than call `os.fork` and raise.
@@ -1852,142 +1825,6 @@ def _child_fault_detail(exc: BaseException) -> str:
     except BaseException:  # noqa: BLE001 — a __repr__ that raises must not cost us the whole frame
         trace = "".join(traceback.format_exception_only(type(exc), exc))
     return f"fixture setup/teardown raised ({label}):\n{trace}"
-
-
-def _snapshot_shared(module) -> dict:
-    """A deep snapshot of a module's mutable top-level state — the names a test could mutate to
-    contaminate a batch-mate. Functions/classes/modules/dunders are excluded; values that can't be
-    deep-copied are marked opaque and skipped (the differential gate is the soundness backstop)."""
-    out = {}
-    for k, v in list(vars(module).items()):
-        if k.startswith("__") or callable(v) or isinstance(v, type) or inspect.ismodule(v):
-            continue
-        try:
-            copied = copy.deepcopy(v)
-        except Exception:  # noqa: BLE001
-            out[k] = _OPAQUE  # un-copyable ⇒ the module forks; this must stay ahead of the rule below
-            continue
-        # A value that copies but compares by identity (no `__eq__`): its copy could never equal
-        # the original, so every test in a module holding one was judged impure and the value was
-        # rebound to a fresh copy after each. `from __future__ import annotations` binds one
-        # (`annotations`, a `__future__._Feature`) in almost every module — 4,491 of pirn-core's
-        # 4,499 impure verdicts were that one name (TID-77). Keep the object itself: the name is
-        # unchanged while it still refers to it, and mutation *inside* it is what the fingerprint
-        # already leaves to the differential gate.
-        out[k] = v if type(v).__eq__ is object.__eq__ else copied
-    return out
-
-
-def _purity_verdict(module, before: dict, env_before: dict):
-    """Compare the module's shared state + `os.environ` to the pre-body snapshot. Returns an impurity
-    reason (a test that mutated shared state — NOT safe to batch) or `None` (pure — batchable)."""
-    after = _snapshot_shared(module)
-    for k in set(before) | set(after):
-        b, a = before.get(k, _MISSING), after.get(k, _MISSING)
-        if b is _OPAQUE or a is _OPAQUE:
-            continue  # couldn't snapshot ⇒ can't judge; leave to the differential gate
-        if b is _MISSING or a is _MISSING or b != a:
-            return f"mutated module global `{k}`"
-    if dict(os.environ) != env_before:
-        return "mutated os.environ"
-    return None
-
-
-def _restore_in_place(live, old) -> bool:
-    """Restore `live`'s CONTENTS from `old`, preserving its identity. True if it was handled (TID-22).
-
-    Rebinding the module attribute instead — `d[k] = deepcopy(old)` — restores the *name* but not the
-    *object*, so anything holding a direct reference to the original (a registered stub, a callback, a
-    fixture that captured the sink, a class attribute) keeps writing into the old object while the
-    module attribute points at a fresh copy. The two silently diverge, and the resulting failure
-    surfaces arbitrarily far from the cause.
-
-    A plain module-level function is unaffected either way — it resolves globals by name at call time.
-    The bug needs something that captured the object itself, which is exactly what test doubles do."""
-    if live is old or type(live) is not type(old):
-        return False
-    if isinstance(live, dict):
-        live.clear()
-        live.update(copy.deepcopy(old))
-        return True
-    if isinstance(live, list):
-        live[:] = copy.deepcopy(old)
-        return True
-    if isinstance(live, set):
-        live.clear()
-        live.update(copy.deepcopy(old))
-        return True
-    if isinstance(live, bytearray):
-        live[:] = old
-        return True
-    # A user object is the other common sink: a stub or recorder held by reference, whose attributes
-    # the test mutates. Restore its attributes RECURSIVELY rather than replacing its `__dict__`
-    # wholesale — the object's own attributes are frequently the very containers other globals alias,
-    # and swapping them for copies breaks exactly the identity this function exists to preserve.
-    inst = getattr(live, "__dict__", None)
-    if isinstance(inst, dict):
-        old_vars = vars(old)
-        for name in set(inst) | set(old_vars):
-            if name not in old_vars:
-                del inst[name]
-            elif name not in inst or not _restore_in_place(inst[name], old_vars[name]):
-                inst[name] = copy.deepcopy(old_vars[name])
-        return True
-    slots = [s for cls in type(live).__mro__ for s in getattr(cls, "__slots__", ())]
-    if slots:
-        for name in slots:
-            if not hasattr(old, name):
-                if hasattr(live, name):
-                    delattr(live, name)
-            elif not hasattr(live, name) or not _restore_in_place(
-                getattr(live, name), getattr(old, name)
-            ):
-                setattr(live, name, copy.deepcopy(getattr(old, name)))
-        return True
-    # Everything else — deque, array.array, numpy arrays, custom C containers — via the two shapes
-    # that preserve identity (TID-23). Slice assignment is tried first because it is the closer to
-    # atomic: `clear()` followed by a failing `extend()` would leave the container empty, which is
-    # worse than either restoring it or rebinding it.
-    #
-    # Widening `_restorable` to force a fork for these instead is the other sound answer, and was
-    # rejected: Windows has no fork, so `--no-fork` would turn a module-level numpy array — entirely
-    # ordinary — into a hard error. `_restorable` stays the backstop for genuinely opaque values.
-    try:
-        live[:] = copy.deepcopy(old)
-        return True
-    except Exception:  # noqa: BLE001 — not a sliceable sequence; try the other shape
-        pass
-    try:
-        restored = copy.deepcopy(old)
-        live.clear()
-        live.extend(restored)
-        return True
-    except Exception:  # noqa: BLE001 — not a clear/extend container either; rebinding is the fallback
-        pass
-    return False
-
-
-def _restore_shared(module, before: dict, env_before: dict) -> None:
-    """Undo a (bounded) test's mutations from the pre-body snapshot — fork-free isolation. Restores the
-    module's snapshotted globals (re-setting changed ones, removing added ones) and `os.environ`. Sound
-    only for the snapshotted footprint: a mutation through an opaque/unsnapshottable value can't be
-    undone here, so such tests must still fork (see `_restorable`)."""
-    current = _snapshot_shared(module)
-    d = vars(module)
-    for k in set(before) | set(current):
-        old = before.get(k, _MISSING)
-        if old is _OPAQUE or current.get(k, _MISSING) is _OPAQUE:
-            continue  # can't safely restore an opaque value
-        if old is _MISSING:
-            d.pop(k, None)  # the test added this global → remove it
-        elif d.get(k, _MISSING) != old:
-            # Contents first, identity preserved (TID-22); rebinding is the fallback for immutables
-            # (int/str/tuple), where identity cannot be observed through mutation anyway.
-            if not _restore_in_place(d.get(k, _MISSING), old):
-                d[k] = copy.deepcopy(old)
-    if dict(os.environ) != env_before:
-        os.environ.clear()
-        os.environ.update(env_before)
 
 
 # The test frameworks themselves. A suite mutating pytest's internals is not the leak this is for,
@@ -2019,304 +1856,6 @@ def _watched_packages(module_key: str) -> tuple:
     result = tuple(sorted(roots))
     _WATCHED_PACKAGES[module_key] = result
     return result
-
-
-# module key -> (sys.modules size, [(name, module)] watched, their namespace sizes, targets)
-_REGISTRY_TARGETS: dict = {}
-
-
-def _registry_targets(module_key: str) -> list:
-    """The module-level containers worth watching for this test's module, found once.
-
-    Finding them means walking every module of the watched packages and every name in it, which
-    measured at 7ms — far more than the tests it wraps, and paid twice per test. The containers
-    themselves are few (two, on one 4,500-test suite), so the scan is cached.
-
-    The cache is valid while nothing that could add a container has happened (TID-68). Three things
-    can: `sys.modules` grew (a new module imported); a watched module was **replaced** (removed and
-    re-imported — TID-56's deletions do exactly that — so its containers are new objects and the
-    cached ones are stale references); or a watched module's namespace **grew** (a test or fixture
-    assigned `lib.REGISTRY = {}` onto a module that already existed). The first is one integer; the
-    other two are one identity check and one `len` per watched module, which is the packages the
-    test file imports rather than all of `sys.modules` — cheap enough to pay per test, which the
-    full scan is not. The earlier cache keyed on the first alone and its docstring called that "the
-    only way a new one can appear"; it was not."""
-    size = len(sys.modules)
-    cached = _REGISTRY_TARGETS.get(module_key)
-    if cached is not None and cached[0] == size:
-        _, watched, sizes, targets = cached
-        if (all(sys.modules.get(name) is module for name, module in watched)
-                and tuple(len(vars(module)) for _, module in watched) == sizes):
-            return targets
-    roots = _watched_packages(module_key)
-    watched: list = []
-    targets: list = []
-    if roots:
-        for name, module in list(sys.modules.items()):
-            if name.partition(".")[0] not in roots or module is None:
-                continue
-            namespace = getattr(module, "__dict__", None)
-            if not namespace:
-                continue
-            watched.append((name, module))
-            for attr, value in list(namespace.items()):
-                # Exact types only: a subclass may define `__len__` arbitrarily, and a proxy object
-                # can raise on access (TID-43's lazy proxies are exactly that shape).
-                if attr.startswith("__") or type(value) not in (dict, list, set):
-                    continue
-                targets.append((f"{name}.{attr}", value))
-    sizes = tuple(len(vars(module)) for _, module in watched)
-    _REGISTRY_TARGETS[module_key] = (size, watched, sizes, targets)
-    return targets
-
-
-def _registry_snapshot(module_key: str) -> dict:
-    """Shallow copies of the module-level containers in the packages this test's module imports.
-
-    Copied rather than merely sized, because detection alone does not help the *neighbours*: the
-    offender can be re-run in the clean room, but the worker it polluted keeps serving tests, and
-    they would go on seeing a registry entry that a finished test added. A shallow copy is enough to
-    put the container back — the entries themselves are the library's, not ours to duplicate.
-
-    Restored **in place** (`clear` + refill), never rebound: other modules hold references to that
-    exact dict, and swapping in a new one would leave them looking at the polluted original — the
-    same reason `_restore_in_place` exists (TID-22)."""
-    out: dict = {}
-    for label, container in _registry_targets(module_key):
-        out[label] = (container, copy.copy(container))
-    return out
-
-
-def _is_test_owned(value, module_key: str) -> bool:
-    """Whether `value` was defined by the *test code* rather than by library code.
-
-    This is the line between pollution and a warm cache, and shape cannot draw it: both are additions
-    to a module-level dict. Origin can.
-
-    * A class the test defines and registers — click's `add_completion_class(MyshComplete)`, where
-      `MyshComplete` is declared inside the test function — belongs to that test. Its neighbours must
-      not see it.
-    * A handler a *library* registers for itself on first import — PIL putting a WEBP writer into
-      `PIL.Image.SAVE` when `WebPImagePlugin` loads — is that library warming up. Removing it breaks
-      the next test that wanted to save a WEBP, which is precisely what an earlier cut of this did.
-
-    "Library" here means anything that is not a test file, **including the project's own modules**: a
-    project that fills a plugin registry when one of its modules is imported is doing the same lazy
-    registration PIL does, and the fact that the code lives in this repo changes nothing about it."""
-    origin = _safe_getattr(value, "__module__", None) or _safe_getattr(type(value), "__module__", "")
-    if not isinstance(origin, str) or not origin:
-        return False
-    if origin == _module_name(module_key):
-        return True  # defined in this very test module, function-local classes included
-    module = sys.modules.get(origin)
-    file = _safe_getattr(module, "__file__", None) if module is not None else None
-    if not file:
-        return False
-    name = os.path.basename(file)
-    # A conftest counts: a fixture registering something for its tests is still test-side setup.
-    return name == "conftest.py" or name.startswith("test_") or name.endswith("_test.py")
-
-
-def _registry_delta(before: dict, module_key: str) -> str | None:
-    """What the suite added to another module's containers since `before`, without touching it —
-    the per-test verdict's view; `_restore_registries` puts it back at the module boundary."""
-    changed = []
-    for key, (container, saved) in before.items():
-        try:
-            if container == saved:
-                continue
-            if isinstance(container, dict):
-                added = any(k not in saved and _is_test_owned(container[k], module_key) for k in container)
-            else:
-                added = any(v not in saved and _is_test_owned(v, module_key) for v in container)
-        except Exception:  # noqa: BLE001 — an uncooperative container is not a verdict
-            continue
-        if added:
-            changed.append(key)
-    if not changed:
-        return None
-    shown = ", ".join(sorted(changed)[:3])
-    more = "" if len(changed) <= 3 else f" (+{len(changed) - 3} more)"
-    return f"{shown}{more}"
-
-
-def _restore_registries(before: dict, module_key: str) -> str | None:
-    """Remove what the *suite* put into another module's containers; returns what it changed.
-
-    Only the suite's own additions are pulled back out. A library's lazy self-registration stays,
-    because the next test may well depend on it having happened.
-
-    Edited in place, so every reference to that container sees the correction."""
-    changed = []
-    for key, (container, saved) in before.items():
-        if container == saved:
-            continue
-        removed = False
-        try:
-            if isinstance(container, dict):
-                for k in [k for k in container if k not in saved and _is_test_owned(container[k], module_key)]:
-                    del container[k]
-                    removed = True
-            elif isinstance(container, list):
-                keep = [v for v in container if v in saved or not _is_test_owned(v, module_key)]
-                if len(keep) != len(container):
-                    container[:] = keep
-                    removed = True
-            else:
-                for v in [v for v in container if v not in saved and _is_test_owned(v, module_key)]:
-                    container.discard(v)
-                    removed = True
-        except Exception:  # noqa: BLE001 — an uncooperative container stays as it is
-            pass
-        if removed:
-            changed.append(key)
-    if not changed:
-        return None
-    shown = ", ".join(sorted(changed)[:3])
-    more = "" if len(changed) <= 3 else f" (+{len(changed) - 3} more)"
-    return f"mutated another module's state: {shown}{more}"
-
-
-def _state_fingerprint() -> dict:
-    """A cheap snapshot of the interpreter state a test could disturb (TID-33).
-
-    Identities, keys and counts only — never a deep copy — so this is affordable to take around
-    every in-process test. It is not trying to describe the world, only to notice that the world
-    moved.
-
-    The point is catching the categories we have NOT modelled. Restore covers the test module's
-    globals, `os.environ` and `sys.modules`, and each of those was added after an incident; there is
-    no reason to believe the list is finished. A fingerprint that shifts means the test reached
-    somewhere we do not know how to undo, which is exactly when it should have forked.
-
-    `sys.modules` is deliberately absent, even though it is the obvious thing to watch. It is
-    already handled better upstream: `_restore_modules` runs before this comparison and puts back
-    everything a test removed or replaced, so the only delta left to see here is modules the test
-    *added* — and those are a warmed import cache that `_restore_modules` keeps on purpose. Flagging
-    them would fork the test without undoing anything, since the import stays in the wellspring
-    either way. Measured on a 4,514-test corpus that was 17 of the 18 trips, every one an ordinary
-    lazy import."""
-    root = logging.getLogger()
-    return {
-        "sys.path": list(sys.path),
-        "environ": frozenset(os.environ),
-        "warnings.filters": len(warnings.filters),
-        "logging.handlers": tuple(id(h) for h in root.handlers),
-        "logging.level": root.level,
-        "threads": threading.active_count(),
-        # The working directory is process-wide and every relative path in the next test resolves
-        # against it, so a test that chdirs without cleaning up silently moves its neighbours'
-        # footing. flask's suite does exactly that and nine of its tests then disagreed with pytest —
-        # but only on the in-process tier, which is the signature of a leak the fingerprint is blind
-        # to (TID-45). `getcwd` can raise if the directory was deleted underneath us, which is itself
-        # a disturbance worth catching rather than a reason to crash the worker.
-        "cwd": _safe_cwd(),
-    }
-
-
-def _safe_cwd() -> str | None:
-    """`os.getcwd()`, or None if the directory has been removed underneath the process."""
-    try:
-        return os.getcwd()
-    except OSError:
-        return None
-
-
-def _restore_state(before: dict) -> None:
-    """Put back the interpreter state the fingerprint can restore, in place.
-
-    The fingerprint exists to notice categories nobody modelled, but several of the things it
-    watches are trivially restorable once you know they moved — so knowing is most of the work.
-    `sys.path`, the warnings filters and the root logger's handlers are all just lists; they are
-    restored by content so anything holding a reference keeps seeing the right object, for the same
-    reason `_restore_in_place` exists (TID-22).
-
-    What cannot be undone here is a thread the test left running. That is reported rather than
-    fixed, and the node is still demoted to forking."""
-    sys.path[:] = before["sys.path"]
-    if len(warnings.filters) != before["warnings.filters"]:
-        del warnings.filters[: len(warnings.filters) - before["warnings.filters"]]
-    root = logging.getLogger()
-    if tuple(id(h) for h in root.handlers) != before["logging.handlers"]:
-        keep = {i: h for i, h in ((id(h), h) for h in root.handlers)}
-        root.handlers[:] = [keep[i] for i in before["logging.handlers"] if i in keep]
-    root.setLevel(before["logging.level"])
-    # Cheap to put back and cheap to check, so the common case — a test that chdirs and forgets —
-    # costs its neighbours nothing. A directory that no longer exists cannot be returned to; the
-    # delta below still reports the move, and the node is demoted.
-    if before.get("cwd") is not None and _safe_cwd() != before["cwd"]:
-        try:
-            os.chdir(before["cwd"])
-        except OSError:
-            pass
-
-
-def _fingerprint_delta(before: dict, after: dict) -> str | None:
-    """A human-readable description of what moved between two fingerprints, or None if nothing did.
-
-    Named per key rather than reported as a bare "state changed", because the whole value of this
-    signal is telling an author *what* their test touched."""
-    # A thread *finishing* is not this test's doing — it is some earlier test's background worker
-    # exiting, and reporting it as a leak both flags an innocent test and prints "left -1 threads".
-    # Only growth is a disturbance. Every other key is compared for inequality in both directions:
-    # a removed environment variable or warnings filter is as much a change as an added one.
-    changed = [
-        k for k in before
-        if (after.get(k, 0) > before[k] if k == "threads" else before[k] != after.get(k))
-    ]
-    if not changed:
-        return None
-    parts = []
-    for key in changed:
-        if key == "threads":
-            parts.append(f"left {after[key] - before[key]} thread(s) running")
-        elif key == "cwd":
-            parts.append(f"changed the working directory to {after[key]}")
-        elif key == "environ":
-            added = sorted(after[key] - before[key])
-            removed = sorted(before[key] - after[key])
-            detail = ", ".join(added + [f"-{r}" for r in removed][:3])
-            parts.append(f"changed os.environ ({detail})")
-        else:
-            parts.append(f"changed {key}")
-    return "; ".join(parts)
-
-
-def _restore_modules(before: dict) -> list:
-    """Put back any module a test REPLACED in `sys.modules`; returns the names it swapped (TID-27).
-
-    `_snapshot_shared` covers one module's globals, so it cannot see a test that evicts a *library*
-    module and re-imports it — which leaves two copies of every class that module defines. A test
-    holding the original then sets state the library, now bound to the replacement, cannot see. The
-    failure lands in an unrelated test with nothing pointing back at the cause.
-
-    The snapshot is a **shallow** `dict(sys.modules)`: identities only, ~1600 references, so it costs
-    microseconds rather than the deep copy `_snapshot_shared` pays. That is what makes covering the
-    whole interpreter affordable here when snapshotting every module's *contents* would not be.
-
-    Modules the test merely **added** are left alone. Those are a warmed import cache, not damage,
-    and evicting them would only make the next test pay to import them again.
-
-    A module the test **removed** is left removed, which is a different thing from one it replaced
-    (TID-56). Suites purge a name on purpose — flask's conftest pops a module at teardown so the next
-    test imports it fresh from that test's own temporary directory — and putting it back handed the
-    next test a module built against the previous test's tmp dir, with nothing to re-import because
-    the name was already bound. Restoring only names still bound to *something else* keeps TID-27's
-    case (evict-and-reimport leaves a different object there, so the original still goes back) and
-    honours the removal. The cost of honouring it is one import the author asked for."""
-    replaced = []
-    for name, module in before.items():
-        current = sys.modules.get(name)
-        if current is not None and current is not module:
-            sys.modules[name] = module
-            replaced.append(name)
-    return replaced
-
-
-def _restorable(module) -> bool:
-    """Whether a module's shared state is fully snapshot/restorable (no opaque mutable globals). A test
-    in a non-restorable module can't use the no-fork restore path — it must fork for isolation."""
-    return _OPAQUE not in _snapshot_shared(module).values()
 
 
 def _drive_async(make_coro, backend=None):
@@ -2891,7 +2430,7 @@ class Engine:
                 break
             _teardown(top.gen)
             self.active.pop()
-        if self._guard is not None and self._guard["module_key"] != _module_key(node_id):
+        if self._guard is not None and self._guard.module_key != _module_key(node_id):
             self._leave_module()
 
     def _enter_module(self, module_key: str) -> None:
@@ -2899,46 +2438,21 @@ class Engine:
         globals, `os.environ`, `sys.modules`, the interpreter state the fingerprint watches, and the
         library containers this module's imports reach (TID-81). `_leave_module` restores all of it."""
         if self._guard is not None:
-            if self._guard["module_key"] == module_key:
+            if self._guard.module_key == module_key:
                 return
             self._leave_module()
         try:
             mod = _import_module(module_key)
         except Exception:  # noqa: BLE001 — nothing to snapshot; nothing to put back either
             return
-        self._guard = {
-            "module_key": module_key,
-            "module": mod,
-            "globals": _snapshot_shared(mod),
-            "environ": dict(os.environ),
-            "modules": dict(sys.modules),
-            "state": _state_fingerprint(),
-            "registries": _registry_snapshot(module_key),
-        }
+        self._guard = Isolation.before(module_key, mod, _watched_packages(module_key), measure=True, full=True)
 
     def _leave_module(self) -> None:
         """Restore the entered module's snapshot: the next module on this worker starts from the
         state this one found, whatever its tests did in between (TID-81)."""
         guard, self._guard = self._guard, None
-        if guard is None:
-            return
-        try:
-            _restore_shared(guard["module"], guard["globals"], guard["environ"])
-        except Exception:  # noqa: BLE001 — a global that will not restore must not take the worker
-            pass
-        _restore_modules(guard["modules"])
-        # A container the library created *during* the module (TID-68) was not in the entry
-        # snapshot; found now, it is restored against "empty", which pulls the suite's own entries
-        # out and leaves the library's.
-        registries = dict(guard["registries"])
-        for label, (container, _) in _registry_snapshot(guard["module_key"]).items():
-            if label not in registries:
-                try:
-                    registries[label] = (container, type(container)())
-                except Exception:  # noqa: BLE001 — an exotic container stays as it is
-                    pass
-        _restore_registries(registries, guard["module_key"])
-        _restore_state(guard["state"])
+        if guard is not None:
+            guard.restore()
 
     def run(self, node_id: str, style: str, deadline_ms: int, force_no_fork: bool = False,
             trusted_pure: bool = False, recorded_must_fork: bool = False) -> dict:
@@ -3718,58 +3232,19 @@ class Engine:
             if self.restore and in_process:
                 self._enter_module(module_key)
             mod = _import_module(module_key) if need_snap else None
-            before = _snapshot_shared(mod) if mod is not None else None
-            env_before = dict(os.environ) if mod is not None else None
-            # Tracked independently of the per-module snapshot: `sys.modules` is interpreter-global,
-            # and a test can swap a library module without touching a single global of its own
-            # (TID-27). Cheap enough to do unconditionally on the in-process path.
-            modules_before = dict(sys.modules) if (self.restore and in_process) else None
-            # Everything restore does NOT model (TID-33). Identities and counts only, so it is
-            # affordable per test, and it is the only thing here that can notice a category nobody
-            # has thought of yet.
-            state_before = _state_fingerprint() if (self.restore and in_process) else None
-            # A registry inside an imported library is state the module snapshot cannot see: it does
-            # not live in this test's module, and restore has no way to put it back (TID-46).
-            registry_before = _registry_snapshot(module_key) if state_before is not None else None
+            full = self.restore and in_process
+            isolation = Isolation.before(module_key, mod, _watched_packages(module_key) if full else (),
+                                         measure=mod is not None, full=full)
             outcome, detail = _invoke(node_id, style, test_args)
-            # Everything below MEASURES; nothing here restores. A file's tests run in one process
-            # in file order, and what one leaves behind is there for the next, as under pytest
-            # (TID-80). The restore that stands in for a fork now happens when this worker leaves
-            # the module (`_leave_module`), against the snapshot taken when it entered, so the
-            # next module starts clean and this one behaves as its author saw it under pytest
-            # (TID-81). The per-test verdict still says what each test touched: it decides the
-            # bare tier (TID-1) and it is what a reader of `--report` wants to know.
-            purity = _purity_verdict(mod, before, env_before) if mod is not None else _UNKNOWN_PURITY
-            if modules_before is not None:
-                replaced = [name for name, module in modules_before.items()
-                            if sys.modules.get(name) is not None and sys.modules.get(name) is not module]
-                if replaced:
-                    # Impure whatever the globals said: `_purity_verdict` cannot see this, and a test
-                    # recorded pure would later take the BARE no-fork tier, which skips the snapshot
-                    # entirely and would leave the swap in place for good (TID-1).
-                    shown = ", ".join(sorted(replaced)[:3])
-                    more = f" (+{len(replaced) - 3} more)" if len(replaced) > 3 else ""
-                    purity = f"replaced modules in sys.modules: {shown}{more}"
-            if state_before is not None:
-                drift = _fingerprint_delta(state_before, _state_fingerprint())
-                registry_drift = _registry_delta(registry_before, module_key)
-                if registry_drift is not None and purity is None:
-                    purity = f"mutated another module's state: {registry_drift}"
-                if drift is not None:
-                    if purity is None:
-                        purity = f"changed interpreter state: {drift}"
-                    # A thread left running is the one thing no restore can undo, at the boundary
-                    # or anywhere: it keeps executing in this process, and in every child forked
-                    # from it. That test should never have run in-process — `_leaked` tells the
-                    # caller to discard this result and re-run it forked (TID-33, TID-50), and it
-                    # forks from now on. Everything else the fingerprint watches is put back when
-                    # the module is left, and inside the module it is what pytest would show too.
-                    residue = _fingerprint_delta(
-                        {k: v for k, v in state_before.items() if k == "threads"},
-                        {k: v for k, v in _state_fingerprint().items() if k == "threads"})
-                    if residue is not None:
-                        self._leaked = f"{drift} (unrestorable: {residue})"
-                        purity = f"disturbed interpreter state: {self._leaked}"
+            # Everything below MEASURES; nothing here restores: the restore that stands in for a
+            # fork happens when this worker leaves the module (`_leave_module`), against the
+            # snapshot taken when it entered (TID-80, TID-81). The per-test verdict still says what
+            # each test touched: it decides the bare tier (TID-1) and it is what a reader of
+            # `--report` wants to know. What leaked — a thread — tells the caller to discard this
+            # result and re-run it forked (TID-33, TID-50).
+            purity, leaked = isolation.verdict()
+            if leaked is not None:
+                self._leaked = leaked
             cov.stop()
             return outcome, detail, cov.report_with_imports(module_key), purity
         finally:

@@ -109,7 +109,9 @@ import-once + parallel fork; not the production path.
 `shim.py` is a thin entry file; the shim is the package beside it, `tiderace_shim/` (`_shim.py`,
 with `main()` as the argv dispatch — TID-116; `results.py`, `nodes.py` and `config.py` are the
 result frames, the node-id resolver and the project-config loader it builds on — TID-121;
-`protocol.py` is the one transport: frames, the request loop, and the forked children — TID-122). The engine launches the entry, `TIDERACE_SHIM` points
+`protocol.py` is the one transport: frames, the request loop, and the forked children — TID-122;
+`pytest_compat.py` folds both mark dialects once and `isolation.py` is the snapshot / verdict /
+restore behind the no-fork tiers — TID-123). The engine launches the entry, `TIDERACE_SHIM` points
 at it, and the wheel stages both into `tiderace/_shim/`. The only logic that runs inside CPython. Imports user code, invokes test bodies, and implements the
 **isolation ladder**: `static_impurity` (AST pre-filter), `_restorable` (can this module be snapshot
 + restored?), `_restore_shared` (snapshot/undo of module globals + `os.environ`), and `Engine.run`
