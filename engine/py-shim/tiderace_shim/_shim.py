@@ -55,6 +55,7 @@ import unittest
 import warnings
 
 from .config import NOTSET as _NOTSET, ProjectConfig, RunConfig, option as _argv_option
+from .discovery import Discovery
 from .log import warn as _warn
 from .selection import (Selection, plugin_marks as _plugin_marks, pytest_major as _pytest_major,
                         registered_marks as _registered_marks)
@@ -376,21 +377,11 @@ class _FinalizingHandle:
         self.finalizers = finalizers
 
 
-# Command-line options declared by conftests via `pytest_addoption`, as `dest -> default` (TID-14).
-# Only defaults live here: tiderace has no way to *pass* a custom flag yet (that is TID-17), so a
-# declared option always reads as its default — which is exactly what an opt-in guard like
-# `if not request.config.getoption("--real"): pytest.skip(...)` needs to resolve correctly.
-_CLI_OPTIONS: dict[str, object] = {}
-# `parser.addini(name, help, type, default)` declarations, as `name -> (type, default)` (TID-87). A
-# value the project's config sets wins over the declared default; `getini` of a name nobody
-# declared is `None`, as before.
-_INI_DECLARED: dict[str, tuple] = {}
-
-
-def _ini_value(project: ProjectConfig, name: str):
-    """`config.getini(name)`: the project's configured value if set, else the declared default,
-    else `None`. Typed the way pytest types it — `bool` parses, list types split."""
-    declared = _INI_DECLARED.get(name)
+def _ini_value(project: ProjectConfig, ini_declared: dict, name: str):
+    """`config.getini(name)`: the project's configured value if set, else the declared default
+    (`ini_declared`, what the conftests' `addini` calls recorded), else `None`. Typed the way
+    pytest types it — `bool` parses, list types split."""
+    declared = ini_declared.get(name)
     ini_type = declared[0] if declared else None
     values = project.values(name)
     if values:
@@ -415,8 +406,9 @@ class _OptionRecorder:
     than model argparse, record just what `getoption` needs: the destination name and the default
     the option would have carried."""
 
-    def __init__(self, options: dict):
+    def __init__(self, options: dict, ini: dict):
         self._options = options
+        self._ini = ini
 
     def addoption(self, *names, **kw) -> None:
         dest = kw.get("dest")
@@ -438,16 +430,16 @@ class _OptionRecorder:
         return self  # groups expose the same `addoption`, so the recorder can be its own group
 
     def addini(self, name, help=None, type=None, default=_NOTSET, **_kw) -> None:  # noqa: A002
-        _INI_DECLARED[name] = (type, default)  # read back through `config.getini` (TID-87)
+        self._ini[name] = (type, default)  # read back through `config.getini` (TID-87)
 
 
-def _collect_addoption(module) -> None:
+def _collect_addoption(module, disc: Discovery) -> None:
     """Run a conftest's `pytest_addoption` hook against the recorder, if it has one."""
     hook = getattr(module, "pytest_addoption", None)
     if hook is None:
         return
     try:
-        hook(_OptionRecorder(_CLI_OPTIONS))
+        hook(_OptionRecorder(disc.cli_options, disc.ini_declared))
     except Exception as exc:  # noqa: BLE001 — a hook we can't model must not abort discovery
         _warn(f"pytest_addoption in {getattr(module, '__file__', '?')} "
               f"could not be recorded: {exc!r}")
@@ -455,17 +447,19 @@ def _collect_addoption(module) -> None:
 
 class _Config:
     """The slice of pytest's `config` that tests reach for through `request.config` — one per run,
-    built by the engine (and by discovery, for the collection hooks) from the run's `RunConfig`."""
+    built by the engine (and by discovery, for the collection hooks) from the run's `RunConfig`
+    and what discovery recorded: the options and ini values the conftests declared."""
 
-    __slots__ = ("run",)
+    __slots__ = ("run", "discovery")
 
-    def __init__(self, run: RunConfig) -> None:
+    def __init__(self, run: RunConfig, discovery: Discovery) -> None:
         self.run = run
+        self.discovery = discovery
 
     def getoption(self, name: str, default=_NOTSET, skip: bool = False):
         key = name.lstrip("-").replace("-", "_")
-        if key in _CLI_OPTIONS:
-            value = _CLI_OPTIONS[key]
+        if key in self.discovery.cli_options:
+            value = self.discovery.cli_options[key]
         elif default is not _NOTSET:
             value = default
         else:
@@ -477,12 +471,7 @@ class _Config:
         return value
 
     def getini(self, name: str):
-        return _ini_value(self.run.project, name)
-
-
-# Node ids a collection hook (or a direct `@pytest.mark.skip`) decided to skip, as `node_id -> reason`
-# (TID-20). Computed once during discovery, consulted per node in `Engine.run`.
-_MARKER_SKIPS: dict[str, str] = {}
+        return _ini_value(self.run.project, self.discovery.ini_declared, name)
 
 
 def _own_markers(*owners) -> list:
@@ -570,8 +559,9 @@ def _enumerate_items(test_modules: list) -> list:
     return items
 
 
-def _run_collection_hooks(conftests: list, test_modules: list, config: _Config) -> None:
-    """Run every conftest's `pytest_collection_modifyitems`, then record the skips it produced.
+def _run_collection_hooks(conftests: list, test_modules: list, config: _Config) -> dict:
+    """Run every conftest's `pytest_collection_modifyitems`, then return the skips it produced —
+    `node_id -> reason` (TID-20), computed once and consulted per node by the gate.
 
     Suites gate optional backends here — `needs_postgres`, `needs_kuzu` — so without it those tests
     run anyway and die on a missing import. pytest reports them as skips; tiderace reported a red run
@@ -598,10 +588,12 @@ def _run_collection_hooks(conftests: list, test_modules: list, config: _Config) 
         except Exception as exc:  # noqa: BLE001 — a hook we can't run must not abort discovery
             _warn_hook_failed(module, exc)
 
+    skips: dict = {}
     for item in items:
         reason = _mark_skip_reason(_normalise_marks(item.iter_markers()))
         if reason is not None:
-            _MARKER_SKIPS[item.nodeid] = reason
+            skips[item.nodeid] = reason
+    return skips
 
 
 def _warn_hook_failed(module, exc: BaseException) -> None:
@@ -860,12 +852,6 @@ class Registry:
 # silently did not exist. That is how the repo's own `fx_corpus` became unrunnable (TID-34).
 _ROOTDIR_MARKERS = ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "setup.py")
 
-# Ancestor conftests, memoised per run root. They must be *executed once*: a conftest's whole job is
-# side effects (env defaults, warning filters, sys.path surgery), and running it twice would apply
-# them twice. `serve()` warms this before `_preimport`; `_discover` then reads it back.
-_ANCESTOR_CONFTESTS: dict[str, list] = {}
-
-
 def _rootdir(root: str) -> str | None:
     """The nearest ancestor of `root` holding a project marker, or None if there is none.
 
@@ -882,7 +868,7 @@ def _rootdir(root: str) -> str | None:
         cur = parent
 
 
-def _load_ancestor_conftests(root: str) -> list:
+def _load_ancestor_conftests(root: str, disc: Discovery) -> list:
     """Import every `conftest.py` between rootdir and the run root, shallowest first (TID-19).
 
     `os.walk(root)` only ever sees the tree at or below the run root, so a `conftest.py` beside
@@ -891,12 +877,11 @@ def _load_ancestor_conftests(root: str) -> list:
     `sys.path` surgery, plugin registration. Skipping it does not degrade gracefully; it surfaces
     later as a failure whose stated cause points nowhere near conftest discovery.
 
-    Returns `[(module, location)]` where location is a `..`-relative dir (see `_location_depth`)."""
+    Returns `[(module, location)]` where location is a `..`-relative dir (see `_location_depth`),
+    and records it on `disc.ancestors`: they must be *executed once* — a conftest's whole job is
+    side effects (env defaults, warning filters, sys.path surgery), and running it twice would
+    apply them twice. `serve()` imports them before `_preimport`; `_discover` finds them there."""
     key = os.path.abspath(root)
-    cached = _ANCESTOR_CONFTESTS.get(key)
-    if cached is not None:
-        return cached
-
     out: list = []
     ceiling = _rootdir(root)
     if ceiling is not None:
@@ -912,12 +897,12 @@ def _load_ancestor_conftests(root: str) -> list:
             if not os.path.exists(path):
                 continue
             location = os.path.relpath(directory, key).replace(os.sep, "/")
-            module = _import_conftest(path, location)
+            module = _import_conftest(path, location, disc)
             if module is not None:
-                _collect_addoption(module)
+                _collect_addoption(module, disc)
                 out.append((module, location))
 
-    _ANCESTOR_CONFTESTS[key] = out
+    disc.ancestors = out
     return out
 
 
@@ -950,21 +935,25 @@ def _walk_suite(root: str):
         yield current, dirs, files
 
 
-def _discover(run: RunConfig, *, timer: _PhaseTimer | None = None) -> Registry:
-    """The registry: every fixture and provider the run's conftests and selected test modules
-    define, the builtins' and the plugins', with the collection hooks run and the per-directory
-    skips recorded on the way. `timer` counts the test modules `--modules` left out."""
-    reg = Registry()
+def _discover(run: RunConfig, disc: Discovery | None = None, *,
+              timer: _PhaseTimer | None = None) -> Discovery:
+    """What the run's suite defines: the registry — every fixture and provider its conftests and
+    selected test modules define, the builtins' and the plugins' — with the collection hooks run
+    and the conftests, their options, and the per-directory skips recorded on the way, as one
+    `Discovery`. `disc` is the one `serve()` already imported the ancestor conftests into; `timer`
+    counts the test modules `--modules` left out."""
+    disc = disc if disc is not None else Discovery(Registry())
+    reg = disc.registry
     root, project = run.root, run.project
     native: list[tuple] = []  # (provider obj, location) — resolved in a second pass (see below)
     conftests: list = []  # every conftest module, for the collection hooks (TID-20)
-    _CONFTEST_SCOPES.clear()  # rebuilt with them: which directory each one governs (TID-85)
     test_modules: list = []  # (module, rel path) — the items those hooks inspect
     # Ancestor conftests first: their fixtures are the widest in the tree, and `serve()` has already
     # executed them ahead of `_preimport` so their side effects precede every test-module import.
-    for module, location in _load_ancestor_conftests(root):
+    ancestors = disc.ancestors if disc.ancestors is not None else _load_ancestor_conftests(root, disc)
+    for module, location in ancestors:
         conftests.append(module)
-        _CONFTEST_SCOPES.append((location, module))
+        disc.conftest_scopes.append((location, module))
         for attr, obj in list(vars(module).items()):
             if _is_native_provider(obj):
                 native.append((obj, location))
@@ -973,7 +962,7 @@ def _discover(run: RunConfig, *, timer: _PhaseTimer | None = None) -> Registry:
     for current, dirs, files in _walk_suite(root):
         rel_dir = os.path.relpath(current, root)
         rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
-        if _dir_skip(rel_dir) is not None:
+        if disc.dir_skip(rel_dir) is not None:
             dirs[:] = []  # a skipped conftest's subtree is not collected at all, as in pytest
             continue
         if run.is_ignored(current):
@@ -982,18 +971,18 @@ def _discover(run: RunConfig, *, timer: _PhaseTimer | None = None) -> Registry:
         # The directory's conftest before its test modules: it may skip the directory, and `sorted`
         # alone would put `a_test.py` ahead of `conftest.py`.
         for name in sorted(files, key=lambda n: (n != "conftest.py", n)):
-            if _dir_skip(rel_dir) is not None:
+            if disc.dir_skip(rel_dir) is not None:
                 dirs[:] = []
                 break
             if not name.endswith(".py"):
                 continue
             path = os.path.join(current, name)
             if name == "conftest.py":
-                module, location = _import_conftest(path, rel_dir), rel_dir
+                module, location = _import_conftest(path, rel_dir, disc), rel_dir
                 if module is not None:
-                    _collect_addoption(module)
+                    _collect_addoption(module, disc)
                     conftests.append(module)
-                    _CONFTEST_SCOPES.append((location, module))
+                    disc.conftest_scopes.append((location, module))
             elif name.startswith("test_") or name.endswith("_test.py"):
                 # Named through `_module_name`, exactly as execution names it (TID-37). The old
                 # spelling was relative to the run *root*, which forced the run root itself onto
@@ -1030,7 +1019,7 @@ def _discover(run: RunConfig, *, timer: _PhaseTimer | None = None) -> Registry:
 
     # After every conftest is loaded and every test module imported — the hooks need both, and the
     # marks they inspect only exist once the decorators have run.
-    _run_collection_hooks(conftests, test_modules, _Config(run))
+    disc.marker_skips = _run_collection_hooks(conftests, test_modules, _Config(run, disc))
 
     # `--strict-markers` (TID-59): ask pytest for the plugins' marks *now*, in the process every
     # worker is forked from. The answer was fetched lazily by the first strict node each worker
@@ -1048,11 +1037,11 @@ def _discover(run: RunConfig, *, timer: _PhaseTimer | None = None) -> Registry:
         type_index.setdefault(spec.provides, []).append(spec.name)
     for obj, location in native:
         reg.add(_native_fixture_def(obj, location, type_index))
-    _register_builtins(reg, run)
+    _register_builtins(run, disc)
     # Last, so everything above — a conftest at any depth, the builtins, the native anyio_backend —
     # takes precedence over a plugin's fixture of the same name, as in pytest (TID-87).
-    _register_plugin_fixtures(reg, project, conftests)
-    return reg
+    _register_plugin_fixtures(disc, project, conftests)
+    return disc
 
 
 # --------------------------------------------------------------------------- plugin fixtures
@@ -1117,20 +1106,21 @@ def _plugin_modules(project: ProjectConfig, conftests: list) -> list:
     return found
 
 
-def _register_plugin_fixtures(reg: Registry, project: ProjectConfig, conftests: list) -> None:
+def _register_plugin_fixtures(disc: Discovery, project: ProjectConfig, conftests: list) -> None:
     """Import each plugin module and register the fixtures it defines at the root location, after
     everything else (TID-87): a suite's own fixture of the same name — a conftest at any depth, a
     test module's — already outranks it, and a name the shim itself provides (a builtin, the native
     `anyio_backend`) is left alone. Only fixtures are taken; the plugin's hooks are never called,
     except `pytest_addoption`, which is recorded exactly as a conftest's is (TID-14) so its
     options and ini defaults read back through `config`."""
+    reg = disc.registry
     for name, module_name in _plugin_modules(project, conftests):
         try:
             module = importlib.import_module(module_name)
         except (Exception, *_SKIP_EXCEPTIONS) as exc:  # noqa: BLE001 — one plugin, not the run
             _warn(f"pytest plugin {name!r} ({module_name}) not loaded: {exc!r}")
             continue
-        _collect_addoption(module)
+        _collect_addoption(module, disc)
         for attr, obj in list(vars(module).items()):
             if not _is_fixture(obj):
                 continue
@@ -1165,10 +1155,11 @@ class _BuiltinsContext:
     """What the builtins see of the run — the `RunContext` the authoring package defines (TID-111):
     the root, the options conftests declared, the ini values."""
 
-    __slots__ = ("run",)
+    __slots__ = ("run", "discovery")
 
-    def __init__(self, run: RunConfig) -> None:
+    def __init__(self, run: RunConfig, discovery: Discovery) -> None:
         self.run = run
+        self.discovery = discovery
 
     @property
     def rootdir(self) -> str:
@@ -1176,13 +1167,13 @@ class _BuiltinsContext:
 
     @property
     def options(self) -> dict:
-        return dict(_CLI_OPTIONS)
+        return dict(self.discovery.cli_options)
 
     def ini(self, name: str):
-        return _ini_value(self.run.project, name)
+        return _ini_value(self.run.project, self.discovery.ini_declared, name)
 
 
-def _register_builtins(reg: Registry, run: RunConfig) -> None:
+def _register_builtins(run: RunConfig, disc: Discovery) -> None:
     """Register tiderace's always-available builtin resources (ROADMAP-v2 B1: monkeypatch/tmp_path/
     capsys/capfd/caplog) at the root location (""), so every test can request them — by type (the
     migrated form, `mp: MonkeyPatch`) or by name (the pytest form, `monkeypatch`), with no per-tree
@@ -1193,6 +1184,7 @@ def _register_builtins(reg: Registry, run: RunConfig) -> None:
     here meant every builtin was quietly missing while the suite stayed green, which is how the CI
     fixture venv went a long time with no builtin coverage at all and how `tmp_path` sat recorded as
     36 open errors months after it worked."""
+    reg = disc.registry
     try:
         import tiderace.builtins as builtins_pkg
     except Exception as exc:  # noqa: BLE001 — tiderace not importable ⇒ no builtins
@@ -1202,7 +1194,7 @@ def _register_builtins(reg: Registry, run: RunConfig) -> None:
         return
     # The builtins read the run root, the declared options and the ini values through one
     # accessor (TID-111); hand them the run. Per interpreter: a sub-interpreter registers its own.
-    builtins_pkg.set_context(_BuiltinsContext(run))
+    builtins_pkg.set_context(_BuiltinsContext(run, disc))
     for obj in builtins_pkg.providers():
         reg.add(_native_fixture_def(obj, "", {}))
     _register_anyio_backend(reg)
@@ -1250,43 +1242,11 @@ def _register_anyio_backend(reg: Registry) -> None:
                        func=anyio_backend, location=""))
 
 
-_DIR_SKIPS: dict[str, str] = {}  # suite-relative dir ("" = everything) -> why its conftest skipped it
-# suite-relative dir ("" = everything) -> the traceback of its conftest's failed import (TID-72).
-# pytest stops at collection with one error and runs nothing; every test under that conftest is
-# reported here with the conftest's own traceback, which is the same verdict per test.
-_DIR_ERRORS: dict[str, str] = {}
-
-
-def _dir_mark(marks: dict, rel_path: str) -> str | None:
-    """The mark (a skip reason, a conftest's import failure) covering `rel_path` — a suite-relative
-    file or directory — from the nearest ancestor directory that carries one; `""` covers all."""
-    if not marks:
-        return None
-    if "" in marks:
-        return marks[""]
-    parts = rel_path.split("/")
-    for depth in range(len(parts), 0, -1):
-        mark = marks.get("/".join(parts[:depth]))
-        if mark is not None:
-            return mark
-    return None
-
-
-def _dir_skip(rel_path: str) -> str | None:
-    """The skip reason covering `rel_path`, if a conftest skipped it."""
-    return _dir_mark(_DIR_SKIPS, rel_path)
-
-
-def _dir_error(rel_path: str) -> str | None:
-    """The conftest import failure covering `rel_path`, if one of its conftests did not import."""
-    return _dir_mark(_DIR_ERRORS, rel_path)
-
-
 def _skip_reason(exc: BaseException) -> str:
     return str(getattr(exc, "msg", None) or exc) or type(exc).__name__
 
 
-def _import_conftest(path: str, rel_dir: str):
+def _import_conftest(path: str, rel_dir: str, disc: Discovery):
     # Ancestor dirs (TID-19) arrive as `..`, `../..`, … — dotted, non-identifier, and indistinguishable
     # from each other once punctuation is stripped. Name them by how far up they sit instead.
     suffix = f"up{len(rel_dir.split('/'))}" if rel_dir.startswith("..") else rel_dir.replace("/", "_")
@@ -1302,7 +1262,7 @@ def _import_conftest(path: str, rel_dir: str):
         # nothing below it (TID-48). `Skipped` is a BaseException, so it used to sail past the handler
         # below and kill the shim during discovery: under the shared-import pool that was the pool
         # parent, and the entire run failed before a single test started.
-        _DIR_SKIPS["" if rel_dir.startswith("..") else rel_dir] = _skip_reason(exc)
+        disc.dir_skips["" if rel_dir.startswith("..") else rel_dir] = _skip_reason(exc)
         return None
     except Exception as exc:  # noqa: BLE001 — a broken conftest is every test under it, not the run
         # A conftest that fails to import takes its fixtures and its side effects with it. The tests
@@ -1312,7 +1272,7 @@ def _import_conftest(path: str, rel_dir: str):
         # the per-test equivalent is every test under that conftest erroring with that traceback,
         # which `run()` reports the way it reports a conftest-level skip (TID-48).
         _warn(f"could not import {path}: {exc!r}")
-        _DIR_ERRORS["" if rel_dir.startswith("..") else rel_dir] = (
+        disc.dir_errors["" if rel_dir.startswith("..") else rel_dir] = (
             f"conftest {path} failed to import:\n"
             + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
         return None
@@ -2112,18 +2072,20 @@ class _Coverage:
 class Engine:
     """Parent-side scope state: wider-than-function fixtures live here, inherited by forked children."""
 
-    def __init__(self, reg: Registry, config: RunConfig, *, options: EngineOptions | None = None,
+    def __init__(self, discovery: Discovery, config: RunConfig, *, options: EngineOptions | None = None,
                  selection: Selection | None = None, no_fork: bool = False, coverage: bool = False,
                  purity_guard: bool = False, restore: bool = False, coverage_lines: bool = False):
-        """`config` is the run — root, project, what it ignores, the modules it executes (TID-124);
+        """`discovery` is what discovery produced — the registry, the conftests, their options, the
+        collection hooks' skips; `config` the run — root, project, what it ignores, the modules it executes (TID-124);
         `options` the engine's knobs (`EngineOptions`), and the keyword booleans the same five for
         the callers that spell them out (the proofs); `selection` this run's `-k` / `-m` /
         `--strict-markers` — by default the project's own and the environment's, read now, after
         discovery, so a mark a conftest registered natively counts as declared."""
-        self.reg = reg
+        self.discovery = discovery
+        self.reg = discovery.registry
         self.config = config
         self.selection = selection if selection is not None else Selection.load(config.project)
-        self._pytest_config = _Config(config)  # `request.config`: one per run
+        self._pytest_config = _Config(config, discovery)  # `request.config`: one per run
         self.options = options or EngineOptions(no_fork=no_fork, restore=restore, purity_guard=purity_guard,
                                                 coverage=coverage, coverage_lines=coverage_lines)
         self._leaked = None          # this test's unmodelled state drift, if any (TID-33)
@@ -2225,10 +2187,10 @@ class Engine:
             return empty_expansion(node_id)
         # A conftest that did not import (TID-72), before the skip: a directory whose setup is broken
         # is broken for every test in it, and that is an error pytest would have stopped on.
-        dir_error = _dir_error(module_key)
+        dir_error = self.discovery.dir_error(module_key)
         if dir_error is not None:
             return errored(node_id, dir_error)
-        dir_skip = _dir_skip(module_key)
+        dir_skip = self.discovery.dir_skip(module_key)
         if dir_skip is not None:
             # `skip_origin` names the module that never imported, so the summary can report skips in
             # both dimensions (TID-55): a conftest's `importorskip` skips every test under it, and
@@ -2307,7 +2269,7 @@ class Engine:
         # Native marks first, then anything a `@pytest.mark.skip` or a collection hook decided
         # (TID-20). Both short-circuit BEFORE any fixture setup — a test skipped for a missing
         # backend must not pay to build one.
-        skip_reason = _mark_skip_reason(_normalise_marks(marks)) or _MARKER_SKIPS.get(node_id)
+        skip_reason = _mark_skip_reason(_normalise_marks(marks)) or self.discovery.marker_skips.get(node_id)
         # Applied once the case ids exist, below: pytest collects a skip-marked parametrized test
         # as one variant per case and skips each, so `test_lchmod[asyncio]`, `[trio]`, … are what
         # the tally holds — not one un-expanded `test_lchmod` (TID-88). Nothing is set up on the
@@ -3080,10 +3042,11 @@ class Engine:
         to run ⇒ nothing computed: a suite without the hook pays a dictionary lookup."""
         node_id, module, func = node.node_id, node.module, node.func
         owner = node.cls if node.style == "class_method" else None
-        if node_id in _HOOK_MARKS:
-            return _HOOK_MARKS[node_id]
-        if _safe_getattr(module, "pytest_generate_tests", None) is None and not any(
-                _safe_getattr(m, "pytest_generate_tests", None) is not None for _, m in _CONFTEST_SCOPES):
+        cached = self.discovery.hook_marks.get(node_id)
+        if cached is not None:
+            return cached
+        if (_safe_getattr(module, "pytest_generate_tests", None) is None
+                and not self.discovery.generate_tests_hooks):
             return []
         requested = self._requested(node)  # param → provider (or the bare name)
         names = list(requested)
@@ -3094,7 +3057,7 @@ class Engine:
         except Exception:  # noqa: BLE001 — an unresolvable request is the test's problem, later
             pass
         return _generate_tests_marks(node_id, func, module, owner, names,
-                                     _own_markers(module, owner, func), self._pytest_config)
+                                     _own_markers(module, owner, func), self._pytest_config, self.discovery)
 
     def teardown_all(self) -> None:
         _save_file_deps_cache(self.config.root)  # what this worker parsed, for the next run (TID-82)
@@ -3103,12 +3066,6 @@ class Engine:
             _teardown(self.active.pop().gen)
         _xunit_class_teardown()  # tearDownClass / teardown_class, once per class (TID-64)
         _xunit_module_teardown()  # tearDownModule / teardown_module, once this worker is done
-
-
-# Every conftest `_discover` imported, with the directory it governs: `""`/`"."` for the run root, a
-# `..`-relative location for an ancestor (which governs everything), else a root-relative directory.
-_CONFTEST_SCOPES: list = []
-_HOOK_MARKS: dict[str, list] = {}  # node id → the parametrize marks its generate_tests hooks produced
 
 
 class _GenerateTestsError(Exception):
@@ -3153,38 +3110,20 @@ class _MetaFunc:
         self._marks.append(_SyntheticMark(names, argvalues, ids, indirect))
 
 
-def _conftests_governing(module_key: str) -> list:
-    """The conftest modules whose directory holds `module_key`, deepest first — pytest's calling
-    order for their hooks (a later-registered plugin is called first)."""
-    module_dir = module_key.rsplit("/", 1)[0] if "/" in module_key else ""
-    governing = []
-    for location, module in _CONFTEST_SCOPES:
-        loc = "" if location in (".", "") else location.replace(os.sep, "/")
-        if loc.startswith(".."):
-            depth = -1  # an ancestor: governs everything, called after every in-tree conftest
-        elif loc == "" or module_dir == loc or module_dir.startswith(loc + "/"):
-            depth = loc.count("/") + 1 if loc else 0
-        else:
-            continue
-        governing.append((depth, module))
-    governing.sort(key=lambda d: -d[0])
-    return [m for _, m in governing]
-
-
 def _generate_tests_marks(node_id: str, func, module, cls, fixturenames: list, markers: list,
-                          config: _Config) -> list:
+                          config: _Config, disc: Discovery) -> list:
     """Run the `pytest_generate_tests` hooks that apply to this test — its module's own first, then
     its conftests deepest to root — and return the parametrize marks they declared, in pytest's
     order (which is the order their ids appear in the node id). Cached per node: hooks are
     deterministic and `_cases`/`_indirect` both ask."""
-    cached = _HOOK_MARKS.get(node_id)
+    cached = disc.hook_marks.get(node_id)
     if cached is not None:
         return cached
     hooks = []
     own = _safe_getattr(module, "pytest_generate_tests", None)
     if callable(own):
         hooks.append(own)
-    for conftest in _conftests_governing(_module_key(node_id)):
+    for conftest in disc.conftests_governing(_module_key(node_id)):
         hook = _safe_getattr(conftest, "pytest_generate_tests", None)
         if callable(hook):
             hooks.append(hook)
@@ -3194,7 +3133,7 @@ def _generate_tests_marks(node_id: str, func, module, cls, fixturenames: list, m
         for hook in hooks:
             hook(metafunc)
         marks = metafunc._marks
-    _HOOK_MARKS[node_id] = marks
+    disc.hook_marks[node_id] = marks
     return marks
 
 
@@ -4374,15 +4313,16 @@ def serve() -> int:
     _phase = _PhaseTimer()
     if _phase.on and run.modules is not None:
         _warn(f"start-up: {len(run.modules)} modules selected")
-    _load_ancestor_conftests(root)
+    disc = Discovery(Registry())
+    _load_ancestor_conftests(root, disc)
     _phase.mark("ancestor conftests")
     _preimport(run)
     _phase.mark("pre-import test modules")
-    reg = _discover(run, timer=_phase)
+    _discover(run, disc, timer=_phase)
     _phase.mark("discover (conftests, fixtures, hooks, marks)")
     if _phase.on and _phase.unselected:
         _warn(f"start-up: {_phase.unselected} test modules not imported (unselected)")
-    engine_args = dict(reg=reg, config=run, options=EngineOptions(
+    engine_args = dict(discovery=disc, config=run, options=EngineOptions(
         no_fork=no_fork, restore=restore, purity_guard=purity, coverage=coverage,
         coverage_lines=coverage_lines))
     # Pool mode (TID-4): fork the workers from this one imported image instead of importing per

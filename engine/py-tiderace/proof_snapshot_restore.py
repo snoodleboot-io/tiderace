@@ -43,16 +43,17 @@ def main() -> int:
         sys.path.insert(0, root)
         run = shim.RunConfig.load(root)
         shim._preimport(run)
-        reg = shim._discover(run)
+        disc = shim._discover(run)
+        reg = disc.registry
         nodes = [f"test_restore.py::test_{i}" for i in range(N)]
 
         # 1. No fork, NO restore → contamination (n accumulates ⇒ most fail).
-        e = shim.Engine(reg, run, no_fork=False)
+        e = shim.Engine(disc, run, no_fork=False)
         reset()
         no_restore_pass = run_all(e, nodes, force_no_fork=True)
 
         # 2. No fork, WITH restore → isolated (each starts clean ⇒ all pass), and time it.
-        e_r = shim.Engine(reg, run, no_fork=False, restore=True)
+        e_r = shim.Engine(disc, run, no_fork=False, restore=True)
         reset()
         t0 = time.perf_counter()
         restore_pass = run_all(e_r, nodes, force_no_fork=True)

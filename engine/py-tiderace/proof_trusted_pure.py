@@ -43,8 +43,9 @@ def main() -> int:
         sys.path.insert(0, root)
         run = shim.RunConfig.load(root)
         shim._preimport(run)
-        reg = shim._discover(run)
-        e = shim.Engine(reg, run, no_fork=False, restore=True)
+        disc = shim._discover(run)
+        reg = disc.registry
+        e = shim.Engine(disc, run, no_fork=False, restore=True)
 
         pure_nodes = [f"test_pure.py::test_p{i}" for i in range(N)]
         impure_nodes = [f"test_impure.py::test_m{i}" for i in range(N)]

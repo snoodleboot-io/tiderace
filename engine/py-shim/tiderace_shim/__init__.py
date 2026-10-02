@@ -16,6 +16,8 @@ treats any exception as absent), `plan.py` (what a node's run will execute, deci
 anything is set up) and `tiers.py` (the isolation ladder's tiers: the one place the tier is chosen,
 and the node's response assembled from its variants) — TID-123. Phase 6e (TID-124) retires the
 shim's globals: `config.py`'s `RunConfig` is the run (root, project, ignores, the `--modules`
-set), `selection.py` what it selects (`-k`, `-m`, `--strict-markers`, the declared marks), both
-on the engine; `log.py` is the one line to stderr.
+set), `selection.py` what it selects (`-k`, `-m`, `--strict-markers`, the declared marks),
+`discovery.py`'s `Discovery` what discovery produced (the registry, the conftests, their options
+and ini declarations, the hooks' skips, the skipped and broken directories), all on the engine;
+`log.py` is the one line to stderr.
 """
