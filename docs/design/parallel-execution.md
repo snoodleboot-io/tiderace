@@ -193,9 +193,6 @@ Key properties:
   snapshot.
 - **No learning pass.** Restore works on the very first run; the **purity guard** records verdicts as
   a free side effect of running, so subsequent runs can promote pure tests to the bare tier.
-- **Static pre-filter** (`shim.static_impurity`) is a cheap AST scan that flags obvious mutators
-  (`global`, writes to free/module names, `os.environ`/`os.chdir`/`random.seed`-style calls) without
-  running — a conservative impurity test that seeds the tier decision.
 
 The daemon enables this by default: it sets `TIDERACE_RESTORE=1` and requests no-fork on every test;
 the shim downgrades to fork only where unsound. `TIDERACE_FORCE_FORK=1` reverts to fork-per-test as a
