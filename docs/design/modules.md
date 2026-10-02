@@ -117,7 +117,10 @@ from a node's variants — TID-123; `selection.py` is what a run selects — `-k
 `--strict-markers`, the declared marks — as one `Selection` the engine holds and the daemon's
 per-run patch replaces, and `config.py`'s `RunConfig` is the run itself — root, project, ignores,
 the `--modules` set — loaded once and handed to discovery and the engine, where module globals
-used to carry each piece; `log.py` is the one line to stderr — TID-124). The engine launches the entry, `TIDERACE_SHIM` points
+used to carry each piece; `discovery.py`'s `Discovery` is what discovery produced — the registry,
+the conftests and the directory each governs, their options and ini declarations, the collection
+hooks' skips, the directories a conftest skipped or broke — on the engine and `request.config`;
+`log.py` is the one line to stderr — TID-124). The engine launches the entry, `TIDERACE_SHIM` points
 at it, and the wheel stages both into `tiderace/_shim/`. The only logic that runs inside CPython. Imports user code, invokes test bodies, and implements the
 **isolation ladder**: `static_impurity` (AST pre-filter), `_restorable` (can this module be snapshot
 + restored?), `_restore_shared` (snapshot/undo of module globals + `os.environ`), and `Engine.run`

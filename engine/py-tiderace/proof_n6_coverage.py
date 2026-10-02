@@ -52,12 +52,13 @@ def main() -> int:
         sys.path.insert(0, root)
         run = shim.RunConfig.load(root)
         shim._preimport(run)
-        reg = shim._discover(run)
+        disc = shim._discover(run)
+        reg = disc.registry
 
         mech = "sys.monitoring" if getattr(sys, "monitoring", None) else "sys.settrace"
         print(f"[mechanism] {mech} (CPython {sys.version_info.major}.{sys.version_info.minor})")
 
-        engine = shim.Engine(reg, run, no_fork=True, coverage=True)
+        engine = shim.Engine(disc, run, no_fork=True, coverage=True)
         res = engine.run("test_cov.py::test_uses_used", "function", 5000)
         engine.teardown_all()
 
