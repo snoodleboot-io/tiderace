@@ -111,8 +111,9 @@ with `main()` as the argv dispatch — TID-116; `results.py`, `nodes.py` and `co
 result frames, the node-id resolver and the project-config loader it builds on — TID-121;
 `protocol.py` is the one transport: frames, the request loop, and the forked children — TID-122;
 `pytest_compat.py` folds both mark dialects once, `isolation.py` is the snapshot / verdict /
-restore behind the no-fork tiers, and `plan.py` is what a node's run will execute, decided before
-anything is set up — TID-123). The engine launches the entry, `TIDERACE_SHIM` points
+restore behind the no-fork tiers, `plan.py` is what a node's run will execute, decided before anything
+is set up, and `tiers.py` is the isolation ladder's tiers, chosen once, with the response assembled
+from a node's variants — TID-123). The engine launches the entry, `TIDERACE_SHIM` points
 at it, and the wheel stages both into `tiderace/_shim/`. The only logic that runs inside CPython. Imports user code, invokes test bodies, and implements the
 **isolation ladder**: `static_impurity` (AST pre-filter), `_restorable` (can this module be snapshot
 + restored?), `_restore_shared` (snapshot/undo of module globals + `os.environ`), and `Engine.run`
