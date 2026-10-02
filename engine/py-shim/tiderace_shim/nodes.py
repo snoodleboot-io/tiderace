@@ -17,14 +17,6 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import Any
 
-_RUN_ROOT = ""  # the run root (argv[1]); set by the mode that starts the shim, before any import
-
-
-def set_run_root(root: str) -> None:
-    global _RUN_ROOT
-    _RUN_ROOT = root
-
-
 def module_key(node_id: str) -> str:
     """The module path of a node id: 'tests/m.py::C::t' -> 'tests/m.py'."""
     return node_id.partition("::")[0]
@@ -37,13 +29,14 @@ def class_method(node_id: str) -> tuple[str, str]:
     return cls, method
 
 
-def module_name(key: str) -> str:
-    """Importable dotted module name for a module key ('tests/m.py' -> 'tests.m').
+def module_name(key: str, root: str) -> str:
+    """Importable dotted module name for a module key ('tests/m.py' -> 'tests.m') under the run
+    root `root`.
 
     Rooted the way pytest roots it: walk up while the directory is a package
     (has `__init__.py`), and import relative to the first directory that is not.
-    That directory is also put on `sys.path`, because the dotted name is only
-    resolvable from there.
+    `import_module` puts that directory on `sys.path`, because the dotted name is only
+    resolvable from there; the name itself is a pure function of the tree (TID-124).
 
     Naming relative to the run root instead is wrong whenever a test package is
     named like a stdlib module. `<root>/types/test_x.py` yields `types.test_x`,
@@ -53,11 +46,11 @@ def module_name(key: str) -> str:
     directory directly renames the module and the errors vanish, which makes the
     bug look like a batch-size effect rather than a naming one.
     """
-    base = os.path.abspath(_RUN_ROOT) if _RUN_ROOT else os.getcwd()
-    directory, name = _module_name_walk(key, base)
-    if directory not in sys.path:
-        sys.path.insert(0, directory)
-    return name
+    return _module_name_walk(key, _base(root))[1]
+
+
+def _base(root: str) -> str:
+    return os.path.abspath(root) if root else os.getcwd()
 
 
 @functools.lru_cache(maxsize=None)
@@ -79,10 +72,15 @@ def _module_name_walk(key: str, base: str) -> tuple[str, str]:
     return directory, ".".join(parts)
 
 
-def import_module(key: str) -> ModuleType:
+def import_module(key: str, root: str) -> ModuleType:
     """The module a module key names, imported (or already imported) under its pytest name —
-    the one place the shim imports a test module by key."""
-    return importlib.import_module(module_name(key))
+    the one place the shim imports a test module by key. The directory the name is rooted at
+    goes first on `sys.path` if it is not there: the one import-system side effect, where the
+    import happens rather than where the name is derived."""
+    directory, name = _module_name_walk(key, _base(root))
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    return importlib.import_module(name)
 
 
 @dataclass(frozen=True)
@@ -130,12 +128,12 @@ class Target:
         return inspect.iscoroutinefunction(self.func)
 
 
-def resolve_target(node_id: str, style: str, *, lenient: bool = False) -> Target:
-    """Import the node's module and walk its `::` chain. Strict by default — a missing class or
-    function raises, as a test that cannot be found should; `lenient` leaves it `None`, for the
-    readers that answer "nothing" rather than fail (marks, class chains)."""
+def resolve_target(node_id: str, style: str, root: str, *, lenient: bool = False) -> Target:
+    """Import the node's module, under the run root `root`, and walk its `::` chain. Strict by
+    default — a missing class or function raises, as a test that cannot be found should; `lenient`
+    leaves it `None`, for the readers that answer "nothing" rather than fail (marks, class chains)."""
     key = module_key(node_id)
-    module = import_module(key)
+    module = import_module(key, root)
     cls = func = None
     if style in ("class_method", "unittest_method"):
         cls_name, method = class_method(node_id)

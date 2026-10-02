@@ -18,10 +18,9 @@ import os
 import sys
 import threading
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from .nodes import module_name as _module_name
 from .results import UNKNOWN_PURITY as _UNKNOWN_PURITY
 from .safe import MISSING as _MISSING, safe_getattr as _safe_getattr
 
@@ -165,12 +164,10 @@ def _restore_shared(module, before: dict, env_before: dict) -> None:
 
 
 
-# module key -> (sys.modules size, [(name, module)] watched, their namespace sizes, targets)
-_REGISTRY_TARGETS: dict = {}
-
-
-def _registry_targets(module_key: str, roots: tuple) -> list:
-    """The module-level containers worth watching for this test's module, found once.
+def _registry_targets(cache: dict, module_key: str, roots: tuple) -> list:
+    """The module-level containers worth watching for this test's module, found once. `cache` is
+    the process's memo: module key -> (sys.modules size, [(name, module)] watched, their namespace
+    sizes, targets).
 
     Finding them means walking every module of the watched packages and every name in it, which
     measured at 7ms — far more than the tests it wraps, and paid twice per test. The containers
@@ -186,7 +183,7 @@ def _registry_targets(module_key: str, roots: tuple) -> list:
     full scan is not. The earlier cache keyed on the first alone and its docstring called that "the
     only way a new one can appear"; it was not."""
     size = len(sys.modules)
-    cached = _REGISTRY_TARGETS.get(module_key)
+    cached = cache.get(module_key)
     if cached is not None and cached[0] == size:
         _, watched, sizes, targets = cached
         if (all(sys.modules.get(name) is module for name, module in watched)
@@ -209,11 +206,11 @@ def _registry_targets(module_key: str, roots: tuple) -> list:
                     continue
                 targets.append((f"{name}.{attr}", value))
     sizes = tuple(len(vars(module)) for _, module in watched)
-    _REGISTRY_TARGETS[module_key] = (size, watched, sizes, targets)
+    cache[module_key] = (size, watched, sizes, targets)
     return targets
 
 
-def _registry_snapshot(module_key: str, roots: tuple) -> dict:
+def _registry_snapshot(cache: dict, module_key: str, roots: tuple) -> dict:
     """Shallow copies of the module-level containers in the packages this test's module imports.
 
     Copied rather than merely sized, because detection alone does not help the *neighbours*: the
@@ -225,12 +222,12 @@ def _registry_snapshot(module_key: str, roots: tuple) -> dict:
     exact dict, and swapping in a new one would leave them looking at the polluted original — the
     same reason `_restore_in_place` exists (TID-22)."""
     out: dict = {}
-    for label, container in _registry_targets(module_key, roots):
+    for label, container in _registry_targets(cache, module_key, roots):
         out[label] = (container, copy.copy(container))
     return out
 
 
-def _is_test_owned(value, module_key: str) -> bool:
+def _is_test_owned(value, test_module: str) -> bool:
     """Whether `value` was defined by the *test code* rather than by library code.
 
     This is the line between pollution and a warm cache, and shape cannot draw it: both are additions
@@ -249,7 +246,7 @@ def _is_test_owned(value, module_key: str) -> bool:
     origin = _safe_getattr(value, "__module__", None) or _safe_getattr(type(value), "__module__", "")
     if not isinstance(origin, str) or not origin:
         return False
-    if origin == _module_name(module_key):
+    if origin == test_module:
         return True  # defined in this very test module, function-local classes included
     module = sys.modules.get(origin)
     file = _safe_getattr(module, "__file__", None) if module is not None else None
@@ -260,7 +257,7 @@ def _is_test_owned(value, module_key: str) -> bool:
     return name == "conftest.py" or name.startswith("test_") or name.endswith("_test.py")
 
 
-def _registry_delta(before: dict, module_key: str) -> str | None:
+def _registry_delta(before: dict, test_module: str) -> str | None:
     """What the suite added to another module's containers since `before`, without touching it —
     the per-test verdict's view; `_restore_registries` puts it back at the module boundary."""
     changed = []
@@ -269,9 +266,9 @@ def _registry_delta(before: dict, module_key: str) -> str | None:
             if container == saved:
                 continue
             if isinstance(container, dict):
-                added = any(k not in saved and _is_test_owned(container[k], module_key) for k in container)
+                added = any(k not in saved and _is_test_owned(container[k], test_module) for k in container)
             else:
-                added = any(v not in saved and _is_test_owned(v, module_key) for v in container)
+                added = any(v not in saved and _is_test_owned(v, test_module) for v in container)
         except Exception:  # noqa: BLE001 — an uncooperative container is not a verdict
             continue
         if added:
@@ -283,7 +280,7 @@ def _registry_delta(before: dict, module_key: str) -> str | None:
     return f"{shown}{more}"
 
 
-def _restore_registries(before: dict, module_key: str) -> str | None:
+def _restore_registries(before: dict, test_module: str) -> str | None:
     """Remove what the *suite* put into another module's containers; returns what it changed.
 
     Only the suite's own additions are pulled back out. A library's lazy self-registration stays,
@@ -297,16 +294,17 @@ def _restore_registries(before: dict, module_key: str) -> str | None:
         removed = False
         try:
             if isinstance(container, dict):
-                for k in [k for k in container if k not in saved and _is_test_owned(container[k], module_key)]:
+                added = [k for k in container if k not in saved and _is_test_owned(container[k], test_module)]
+                for k in added:
                     del container[k]
                     removed = True
             elif isinstance(container, list):
-                keep = [v for v in container if v in saved or not _is_test_owned(v, module_key)]
+                keep = [v for v in container if v in saved or not _is_test_owned(v, test_module)]
                 if len(keep) != len(container):
                     container[:] = keep
                     removed = True
             else:
-                for v in [v for v in container if v not in saved and _is_test_owned(v, module_key)]:
+                for v in [v for v in container if v not in saved and _is_test_owned(v, test_module)]:
                     container.discard(v)
                     removed = True
         except Exception:  # noqa: BLE001 — an uncooperative container stays as it is
@@ -482,20 +480,31 @@ class Isolation:
     modules_before: dict | None
     state_before: dict | None
     registries_before: dict | None
+    registry_cache: dict = field(default_factory=dict)  # the process's memo of registry targets (TID-68)
 
     @classmethod
-    def before(cls, module_key: str, module: Any, roots: tuple, *, measure: bool, full: bool) -> "Isolation":
+    def before(cls, module_key: str, module: Any, roots: tuple, *, measure: bool, full: bool,
+               registry_cache: dict | None = None) -> "Isolation":
         """Take the snapshots the level needs. `module` may be `None` when nothing could be imported
-        — then there is nothing to measure, and nothing to put back either."""
+        — then there is nothing to measure, and nothing to put back either. `registry_cache` is the
+        process's memo of the containers worth watching, shared across every `Isolation` it takes."""
         measured = measure and module is not None
+        cache = registry_cache if registry_cache is not None else {}
         return cls(
             module_key, roots, module,
             _snapshot_shared(module) if measured else None,
             dict(os.environ) if measured else None,
             dict(sys.modules) if full else None,
             _state_fingerprint() if full else None,
-            _registry_snapshot(module_key, roots) if full else None,
+            _registry_snapshot(cache, module_key, roots) if full else None,
+            cache,
         )
+
+    @property
+    def test_module(self) -> str:
+        """The test module's import name — what a value defined by the test code reports as its
+        `__module__`; empty when nothing was imported."""
+        return getattr(self.module, "__name__", "") if self.module is not None else ""
 
     def verdict(self) -> tuple[Any, str | None]:
         """What the test did: `(purity, leaked)`. Purity is a reason (impure), `None` (measured
@@ -522,7 +531,7 @@ class Isolation:
         if self.state_before is not None:
             after = _state_fingerprint()
             drift = _fingerprint_delta(self.state_before, after)
-            registry_drift = _registry_delta(self.registries_before, self.module_key)
+            registry_drift = _registry_delta(self.registries_before, self.test_module)
             if registry_drift is not None and purity is None:
                 purity = f"mutated another module's state: {registry_drift}"
             if drift is not None:
@@ -554,12 +563,13 @@ class Isolation:
             # snapshot; found now, it is restored against "empty", which pulls the suite's own
             # entries out and leaves the library's.
             registries = dict(self.registries_before)
-            for label, (container, _) in _registry_snapshot(self.module_key, self.roots).items():
+            found = _registry_snapshot(self.registry_cache, self.module_key, self.roots)
+            for label, (container, _) in found.items():
                 if label not in registries:
                     try:
                         registries[label] = (container, type(container)())
                     except Exception:  # noqa: BLE001 — an exotic container stays as it is
                         pass
-            _restore_registries(registries, self.module_key)
+            _restore_registries(registries, self.test_module)
         if self.state_before is not None:
             _restore_state(self.state_before)
