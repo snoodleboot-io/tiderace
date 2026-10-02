@@ -56,6 +56,7 @@ import warnings
 from .config import NOTSET as _NOTSET, ProjectConfig, load_project_config, option as _argv_option
 from .isolation import Isolation, _restorable
 from .plan import Plan
+from .tiers import Routing, Tier, VariantResult, assemble, route
 from .pytest_compat import (MarkerBearer, fold as _fold_marks, normalise_all as _normalise_marks,
                             skip_reason as _mark_skip_reason)
 from .protocol import (EXIT_UNREPORTABLE as _EXIT_UNREPORTABLE, Transport, end_child,
@@ -2689,6 +2690,17 @@ class Engine:
         return Plan(node, names, marks, requested, fixture_requested, closure, indirect,
                     case_kwargs_list, combos, combo_id_maps, parametrized_node, variant_ids, selected)
 
+    def _route(self, module_key: str, force_no_fork: bool, trusted_pure: bool,
+               recorded_must_fork: bool) -> Tier:
+        """The node's tier (`tiers.route`), from this engine's configuration and state."""
+        child = self._module_child
+        return route(Routing(
+            fork_available=_FORK_AVAILABLE, in_module_child=self._in_module_child,
+            module_child_holds_module=child is not None and child.module_key == module_key,
+            no_fork=self.no_fork, restore=self.restore, force_no_fork=force_no_fork,
+            trusted_pure=trusted_pure, recorded_must_fork=recorded_must_fork,
+        ), lambda: _restorable(_import_module(module_key)))
+
     def run(self, node_id: str, style: str, deadline_ms: int, force_no_fork: bool = False,
             trusted_pure: bool = False, recorded_must_fork: bool = False) -> dict:
         # `force_no_fork`: run THIS test in-process (no fork). On a trivial test that is ~90× cheaper than a
@@ -2706,75 +2718,24 @@ class Engine:
             return plan
         node, marks, fixture_requested, closure, indirect = (
             plan.node, plan.marks, plan.fixture_requested, plan.closure, plan.indirect)
-        case_kwargs_list, combos, combo_id_maps = plan.case_kwargs_list, plan.combos, plan.combo_id_maps
+        case_kwargs_list, combos = plan.case_kwargs_list, plan.combos
         parametrized_node, variant_ids, selected = plan.parametrized_node, plan.variant_ids, plan.selected
-        variants: list[dict] = []
-        outcomes: list[tuple[str, str]] = []
-        coverage: dict[str, set] = {}  # union of touched lines across all variants of this node
-        impurity = None  # first impurity reason across variants (any impure ⇒ the node is impure)
-        node_pure = None  # tri-state across variants: None (unmeasured), True (all measured pure), False
-        node_must_fork = False  # any case disturbed interpreter state ⇒ fork the whole node (TID-33)
         # `--strategy subprocess` runs in-process by configuration; there the restore is the remedy
         # and there is nothing better to hand the node to.
         force_no_fork_only = self.no_fork
-        # Per-variant results, reported alongside the aggregate (TID-25). Each case already gets its
-        # own `_fork_run`, so collapsing them to one outcome discarded results that had already been
-        # paid for — the tally lost the passes, and a node with several failures kept one detail.
         # Only now — after `-k` has chosen and a whole-node skip has returned — does the node's
-        # *route* get decided (TID-99). It used to sit above the case expansion, so every node
-        # `-k` was about to deselect first paid the restorability snapshot (a deepcopy of its
-        # module's shared state), and one in an opaque module was forked into a module child
-        # only to be deselected there. Nothing below the old position set anything up: the
-        # closure, the combos and the ids are graph and registry reads.
-        # Soundness gate for BOTH in-process paths. A module whose shared state we can't snapshot/restore
-        # (opaque globals — an open file, a generator, a live socket) must fork: running it in-process
-        # leaks whatever the test mutated into the next test on the same module.
-        #
-        # This applies to `--no-fork` mode too, not just an optimistic per-test request. It previously
-        # checked only `force_no_fork`, so whole-run no-fork (`--no-fork`, i.e. the SubprocessWorker /
-        # Windows path) ran opaque modules in-process regardless and silently produced wrong results —
-        # e.g. a module-level generator stayed advanced across tests. See
-        # `py-tiderace/proof_windows_opaque_fork.py`.
-        #
-        # A trusted-pure test skips the check: known pure ⇒ it won't mutate, so restorability is moot.
-        must_fork = False
-        if self.restore and not trusted_pure and (force_no_fork or self.no_fork):
-            try:
-                must_fork = not _restorable(_import_module(module_key))
-            except Exception:  # noqa: BLE001 — can't import/inspect ⇒ be safe, fork
-                must_fork = True
-            if must_fork:
-                force_no_fork = False
-        # A recorded state-disturber (TID-33) is denied the in-process tier the same way, and takes
-        # the same route as an opaque module below (TID-96). It used to fall through to a fork per
-        # test, each child a fresh process in which a unittest class's `setUpClass` had not run —
-        # pirn-agents' cross-process replay class paid its 5s set-up seven times, where pytest and
-        # the module child pay it once. With the ladder off (`TIDERACE_FORCE_FORK=1`) nothing is
-        # recorded as a disturber, so that mode keeps its fork per test.
-        if recorded_must_fork and self.restore and not self.no_fork:
-            must_fork = True
-            force_no_fork = False
-        # And a module child already open for this file takes the rest of the file: only the
-        # method that left the thread behind is recorded, its siblings arrive unflagged, and sending
-        # them back to the worker would run them in a second process — a unittest class's
-        # `setUpClass` a second time. TID-80 made the child the boundary between modules; a file
-        # whose tests are split across two processes is what pytest never does (TID-96).
-        if (self._module_child is not None and not self._in_module_child and _FORK_AVAILABLE
-                and self._module_child.module_key == module_key and self.restore
-                and not self.no_fork):
-            must_fork = True
-            force_no_fork = False
-        # An opaque module's tests run in ONE forked child, sequentially, for as long as the batch
-        # stays on that module (TID-80). Forking per test kept the module's own tests apart, which
-        # pytest never does: an object one test put into a module-scoped moto mock was gone for the
-        # next, because it lived and died in that test's child. The child is the isolation boundary
-        # between modules, which is what opacity is about; inside it the file behaves as under
-        # pytest. Fewer forks, too.
-        if must_fork and _FORK_AVAILABLE and not self._in_module_child:
+        # *route* get decided (TID-99): nothing above set anything up, so a node `-k` was about to
+        # deselect never pays the restorability snapshot. `_route` is the one place the tier is
+        # chosen (TID-123). An opaque module's tests run in ONE forked child, sequentially, for as
+        # long as the batch stays on that module (TID-80): the child is the isolation boundary
+        # between modules; inside it the file behaves as under pytest.
+        tier = self._route(module_key, force_no_fork, trusted_pure, recorded_must_fork)
+        if tier is Tier.MODULE_CHILD:
             return self._module_child_run(node_id, style, deadline_ms)
+        results: list[VariantResult] = []
         variant_index = 0
         per_combo = plan.per_combo
-        for combo, combo_ids in zip(combos, combo_id_maps):
+        for combo in combos:
             if not any(i in selected for i in range(variant_index, variant_index + per_combo)):
                 variant_index += per_combo  # nothing here survives `-k`: build none of its fixtures
                 continue
@@ -2787,7 +2748,7 @@ class Engine:
                 # rather than the fixture (TID-34). Same lesson as TID-15, one level up.
                 return errored(node_id, "error setting up fixtures: "
                                + "".join(traceback.format_exception_only(type(exc), exc)))
-            for case_pos, case_kwargs in enumerate(case_kwargs_list):
+            for case_kwargs in case_kwargs_list:
                 if variant_index not in selected:
                     variant_index += 1  # deselected by `-k`: absent from the tally, as in pytest
                     continue
@@ -2805,54 +2766,23 @@ class Engine:
                     if routed:
                         case_combo = {**combo, **routed}
                         test_kwargs = {k: v for k, v in case_kwargs.items() if k not in indirect}
-                oc, detail, cov, purity = self._fork_run(
+                oc, detail, cov, purity = self._run_variant(
                     node_id, style, fixture_requested, closure, case_combo, deadline_ms, test_kwargs,
-                    force_no_fork, trusted_pure, must_fork, variant_ids[variant_index])
+                    tier, variant_ids[variant_index])
                 # Per case, because only some cases of a parametrized node may trip (TID-33).
-                disturbed = self._state_disturbed
-                node_must_fork = node_must_fork or disturbed
-                if parametrized_node:
-                    case = variant(variant_ids[variant_index], oc, detail,
-                                   int((time.perf_counter() - started) * 1000),
-                                   keywords=_keyword_names(variant_ids[variant_index], names))
-                    if cov:
-                        case["coverage"] = {p: sorted(l) for p, l in cov.items()}
-                    with_purity(case, purity)
-                    if disturbed:
-                        case["must_fork"] = True
-                    variants.append(case)
+                results.append(VariantResult(variant_ids[variant_index], oc, detail, cov, purity,
+                                             self._state_disturbed,
+                                             int((time.perf_counter() - started) * 1000)))
                 variant_index += 1
-                outcomes.append((oc, detail))
-                for path, lines in cov.items():
-                    coverage.setdefault(path, set()).update(lines)
-                if purity is _UNKNOWN_PURITY:
-                    continue  # this variant measured nothing — leave the node verdict as-is
-                if purity is None:  # measured pure
-                    if node_pure is None:
-                        node_pure = True
-                else:  # measured impure
-                    node_pure = False
-                    if impurity is None:
-                        impurity = purity
-        outcome, detail = _aggregate(outcomes)
         # The native marks first, then pytest's own `@pytest.mark.xfail` / `skip`, closest first
         # — both through one fold (TID-123). Without the second a test the author marked as
         # expected-to-fail was reported as a failure — one of click's two remaining divergences
         # (TID-63).
-        outcome, detail = _fold_marks(_normalise_marks(marks), outcome, detail)
-        outcome, detail = _fold_marks(_normalise_marks(reversed(_pytest_markers(node))), outcome, detail)
-        resp = response(node_id, outcome, detail=detail, keywords=_keyword_names(node_id, names))
-        # Additive and omitted for an unparametrized node, so its frame stays byte-identical.
-        if variants:
-            resp["variants"] = variants
-        if coverage:  # additive field (Phase-3 CONTRACT §6); omitted when capture is off/empty
-            resp["coverage"] = {path: sorted(lines) for path, lines in coverage.items()}
-        if node_pure is not None:  # additive: purity was measured (guard or restore) — record the verdict
-            resp["pure"] = node_pure
-            if impurity is not None:
-                resp["impurity"] = impurity
-        if node_must_fork:  # additive; omitted for the overwhelming majority that never trip
-            resp["must_fork"] = True
+        resp = assemble(node_id, results, parametrized=parametrized_node,
+                        native_marks=_normalise_marks(marks),
+                        pytest_marks=_normalise_marks(reversed(_pytest_markers(node))),
+                        keywords=lambda nid: _keyword_names(nid, names))
+        node_must_fork = any(r.disturbed for r in results)
         # A node that disturbed interpreter state has an in-process result nobody should trust, and
         # this process is no longer a safe thing to fork. Re-run it in the clean room and report that
         # instead — the pristine image is the only place the answer is both correct and reachable
@@ -3063,27 +2993,26 @@ class Engine:
         self._module_child = None
         return status
 
-    def _fork_run(self, node_id, style, requested, closure, combo, deadline_ms, case_kwargs=None,
-                  force_no_fork=False, trusted_pure=False, must_fork=False, variant_id=None) -> tuple:
-        """Run one (combo, case) variant; returns `(outcome, detail, coverage, purity)` where purity is a
-        reason string (impure), `None` (measured pure), or `_UNKNOWN_PURITY` (not measured). `force_no_fork`
-        runs it in THIS process (the pure-test fast path) without forking; `trusted_pure` additionally
-        skips the snapshot (bare no-fork). `must_fork` means the caller determined the module is not
-        snapshot-restorable, so isolation REQUIRES a fork — it overrides both in-process paths."""
+    def _run_variant(self, node_id, style, requested, closure, combo, deadline_ms, case_kwargs,
+                     tier: Tier, variant_id) -> tuple:
+        """Run one (combo, case) variant on `tier`; returns `(outcome, detail, coverage, purity)`
+        where purity is a reason string (impure), `None` (measured pure), or `_UNKNOWN_PURITY` (not
+        measured). The in-process tiers run it in THIS process (the bare one without a snapshot);
+        the fork tier in a pristine copy-on-write child."""
         case_kwargs = case_kwargs or {}
 
         # No fork on this platform (Windows) and the module needs one to be isolated. Refuse rather
         # than run it: in-process would leak un-restorable state into the next test on this module, and
         # a wrong green is worse than a reported error. Previously this fell through to `os.fork()` and
         # raised an uncaught AttributeError, killing the worker.
-        if must_fork and not _FORK_AVAILABLE:
+        if tier is Tier.REFUSED:
             return ("error",
                     f"cannot isolate {node_id}: its module has state that can't be snapshot-restored, "
                     f"so it requires fork() — unavailable on this platform. Make the module's globals "
                     f"deep-copyable, or mark the test pure if it doesn't mutate shared state.",
                     {}, _UNKNOWN_PURITY)
 
-        if (self.no_fork or force_no_fork) and not must_fork:
+        if tier.in_process:
             # No-COW fallback: run the test in THIS process (no isolation, but the same fixture
             # engine → result-identical outcomes; §8 boundary 3). Function fixtures are set up and
             # torn down per test in-process; wider scopes still live once in the parent.
@@ -3093,8 +3022,7 @@ class Engine:
                 # but a test that blocks on this tier used to block the worker, and the run.
                 with _in_process_deadline(deadline_ms):
                     result = self._child_exec(node_id, style, requested, closure, combo, case_kwargs,
-                                              variant_id=variant_id,
-                                              in_process=True, trusted_pure=trusted_pure)
+                                              variant_id=variant_id, tier=tier)
             except _InProcessTimeout as exc:
                 # The test was interrupted mid-body: whatever it held is not torn down, so this
                 # process is not to be trusted with the next in-process test — the node forks from
@@ -3120,16 +3048,16 @@ class Engine:
                 # the test's *module* is unrestorable; this says the test disturbed the interpreter.
                 self._state_disturbed = True
                 self._disturbance = drift
-            if drift is not None and _CLEAN_ROOM is not None and not must_fork and not self.no_fork:
+            if drift is not None and _CLEAN_ROOM is not None and not self.no_fork:
                 # The clean room re-runs the whole node from a pristine image; `run()` above does the
                 # handoff and reports THAT. Forking here would fork the process this test just
                 # dirtied — if what it leaked was a thread, straight into a deadlock (TID-50).
                 return result
-            if drift is not None and _FORK_AVAILABLE and not must_fork and not self.no_fork:
+            if drift is not None and _FORK_AVAILABLE and not self.no_fork:
                 _warn(f"re-running {node_id} in a fork — it {drift}")
-                oc, detail, cov, _ = self._fork_run(
+                oc, detail, cov, _ = self._run_variant(
                     node_id, style, requested, closure, combo, deadline_ms, case_kwargs,
-                    force_no_fork=False, trusted_pure=False, must_fork=True, variant_id=variant_id)
+                    Tier.FORK, variant_id)
                 # Keep the impurity verdict: the point is that this node must not take the
                 # in-process path again, and the forked run cannot observe what the first one did.
                 return oc, detail, cov, f"disturbed interpreter state: {drift}"
@@ -3139,7 +3067,8 @@ class Engine:
             # ---- CHILD: pristine COW copy with all wider fixtures already warm ----
             try:
                 outcome, detail, coverage, purity = self._child_exec(
-                    node_id, style, requested, closure, combo, case_kwargs, variant_id=variant_id)
+                    node_id, style, requested, closure, combo, case_kwargs, variant_id=variant_id,
+                    tier=Tier.FORK)
                 payload = {"outcome": outcome, "detail": detail[:4000]}
                 if coverage:
                     payload["coverage"] = coverage
@@ -3198,7 +3127,7 @@ class Engine:
         return res["outcome"], res.get("detail", ""), res.get("coverage", {}), purity_from(res)
 
     def _child_exec(self, node_id, style, requested, closure, combo, case_kwargs=None, variant_id=None,
-                    in_process=False, trusted_pure=False) -> tuple:
+                    tier: Tier = Tier.FORK) -> tuple:
         """In the forked child: set up function-scope fixtures (incl. parametrized + reinit-after-fork
         resources, which thus get a FRESH handle per child), run the body, tear down in reverse.
         `case_kwargs` are the @tiderace.cases values bound to the test's bare params. Returns
@@ -3257,11 +3186,14 @@ class Engine:
             # BARE no-fork — no measurement, no restore, no isolation. Worth ~3.4× where it applies and
             # usually applies to few tests: anything recording into shared state is not pure (TID-41).
             # Otherwise snapshot to measure/restore.
-            need_snap = (self.purity_guard or (self.restore and in_process)) and not trusted_pure
-            if self.restore and in_process:
+            # The isolation level follows from the tier: an in-process test under restore enters
+            # the module guard and takes the full set of snapshots (TID-81); the bare tier measures
+            # nothing (TID-1); otherwise the purity guard decides whether to measure.
+            full = self.restore and tier.in_process
+            measure = tier is not Tier.BARE and (full or self.purity_guard)
+            if full:
                 self._enter_module(module_key)
-            mod = _import_module(module_key) if need_snap else None
-            full = self.restore and in_process
+            mod = _import_module(module_key) if measure else None
             isolation = Isolation.before(module_key, mod, _watched_packages(module_key) if full else (),
                                          measure=mod is not None, full=full)
             outcome, detail = _invoke(node_id, style, test_args)
