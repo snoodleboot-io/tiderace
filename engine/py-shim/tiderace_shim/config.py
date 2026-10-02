@@ -197,7 +197,7 @@ def ignores(project: ProjectConfig) -> tuple:
                  for value in project.opt_values(flag) if value)
 
 
-def _force_asyncio(project: ProjectConfig) -> bool:
+def _asyncio_auto_mode(project: ProjectConfig) -> bool:
     """`asyncio_mode = "auto"` means pytest-asyncio claims *every* async test, including ones carrying
     `@pytest.mark.anyio`. In that configuration pytest runs even a `[trio]`-labelled variant on an
     asyncio loop — the id says trio and the loop never is. Emulating the suite's configured
@@ -235,7 +235,7 @@ class RunConfig:
         if modules_file:
             with open(modules_file, encoding="utf-8") as fh:
                 modules = frozenset(line.strip() for line in fh if line.strip())
-        return cls(root, project, ignores(project), _force_asyncio(project), modules)
+        return cls(root, project, ignores(project), _asyncio_auto_mode(project), modules)
 
     @property
     def abs_root(self) -> str:
