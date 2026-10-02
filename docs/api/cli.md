@@ -187,9 +187,10 @@ serving on /tmp/td.sock …
 
 ### `tiderace-daemon watch <root>` — inner loop
 
-Discover the candidate tests, then block and watch the tree (50 ms debounce). On each save, re-run
-only the impacted tests using the DepGraph (which tightens as coverage accrues; the first edits
-conservatively re-run all). Each filesystem event prints `path: Action`. Ctrl-C to stop.
+Block and watch the tree (50 ms debounce). On each `.py` save, run through the daemon's own
+impact-aware path — re-collect, re-run what the change reaches, serve the rest from the record; a
+conftest / config / C-extension change recycles the warm interpreter first. Each change prints
+`path: Action` (`Ran(n)`, `Recycled(n)` or `Idle`). Ctrl-C to stop.
 
 ```bash
 TIDERACE_SHIM=py-shim/shim.py tiderace-daemon watch tests/
@@ -197,7 +198,7 @@ TIDERACE_SHIM=py-shim/shim.py tiderace-daemon watch tests/
 
 ```
 watching tests/ (Ctrl-C to stop)…
-tests/test_auth.py: Modify
+tests/test_auth.py: Ran(5)
 ```
 
 ### `tiderace-daemon bench <root> [iters]` — cold-vs-warm timing

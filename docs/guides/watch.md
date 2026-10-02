@@ -12,7 +12,7 @@ tiderace-daemon watch tests/
 ```
 watching tests/ (Ctrl-C to stop)…
 src/auth.py:    Ran(2)
-test_auth.py:   Recollected(5)
+test_auth.py:   Ran(5)
 conftest.py:    Recycled(12)
 ```
 
@@ -20,32 +20,22 @@ conftest.py:    Recycled(12)
 
 ```mermaid
 flowchart TD
-    SAVE["you save a file"] --> HASH["content-hash the file"]
-    HASH --> SAME{"content actually<br/>changed?"}
-    SAME -->|"no (mtime touch only)"| IDLE["Idle — nothing runs"]
-    SAME -->|yes| KIND{"what kind of file?"}
-    KIND -->|"source file"| IMP["re-run impacted tests<br/>(dep graph) — Ran(n)"]
-    KIND -->|"test file"| REC["re-collect + re-run<br/>Recollected(n)"]
-    KIND -->|"conftest / config / C-ext"| RCY["recycle warm interpreter<br/>then re-run — Recycled(n)"]
+    SAVE["you save a file"] --> KIND{"what kind of file?"}
+    KIND -->|"a .py file"| RUN["the daemon's run: re-collect,<br/>re-run what the change reaches,<br/>serve the rest from the record — Ran(n)"]
+    KIND -->|"conftest / config / C-ext"| RCY["recycle the warm interpreter<br/>then re-run everything — Recycled(n)"]
+    KIND -->|"anything else"| IDLE["Idle — nothing runs"]
 ```
 
-On startup `watch` discovers your tests and seeds the dependency graph (empty until coverage runs
-accrue). Then it watches the tree, coalescing each save's burst of filesystem events within a short
-quiet window, and does the **minimum** work per change:
+`watch` watches the tree, coalescing each save's burst of filesystem events within a short quiet
+window, and hands every change to the same run path `tiderace run` uses through the daemon:
 
-- **Source edit** → re-run only the tests whose recorded dependencies include that file (`Ran(n)`).
-- **Test-file edit** → re-collect and re-run (`Recollected(n)`).
-- **`conftest.py` / config / C-extension change** → recycle the warm interpreter (its imports are
-  now stale), then re-run (`Recycled(n)`).
-- **No real change** (e.g. an mtime-only touch with identical content) → `Idle`, nothing runs.
-
-## Cold start is conservative, then tightens
-
-The dependency graph is empty until coverage from real runs populates it. So the **first** edits in
-a fresh `watch` session conservatively re-run the full candidate set (correct, just not yet precise);
-as runs accrue coverage footprints, selection narrows to exactly the impacted tests. The impact-aware
-daemon `run` already records this footprint to `.tiderace-state.json`, so a project you've `run`
-recently starts `watch` with a warmer graph.
+- **`.py` edit** (source or test) → the daemon's full run: it re-collects, re-runs the tests whose
+  recorded footprint reaches the saved file, and serves the rest from the persisted record
+  (`.tiderace-state.json`) — `Ran(n)`. With no record yet, everything runs once; the next save is
+  precise.
+- **`conftest.py` / project config / `setup.py` / C-extension change** → recycle the warm
+  interpreter (its imports are now stale), then re-run everything (`Recycled(n)`).
+- **Anything else** → `Idle`, nothing runs.
 
 ## When *not* to use it
 
