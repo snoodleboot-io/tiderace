@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::fixtures::{ClosureHash, ClosureHasher};
+use super::closure_hash::{ClosureHash, ClosureHasher};
 
 /// The content-addressed cache key for one test outcome (ADR-E004): a hash over the test's
 /// *transitive input closure*, so an outcome is a pure function of its inputs and shareable across

@@ -23,7 +23,6 @@ use crate::exec::transport::{
     run_batch_lost, Live, LostWorker, PipeTransport, ShimTransport, LOST_WORKER_MARGIN_MS,
 };
 use crate::exec::worker::Worker;
-use crate::exec::worker_caps::WorkerCaps;
 
 /// No-fork fallback executor: a warm `python`+shim process, scope setup re-run (not snapshotted).
 pub struct SubprocessWorker {
@@ -99,11 +98,6 @@ impl SubprocessWorker {
             t.modules = Some(file.to_path_buf());
         }
         self
-    }
-
-    /// Advertise no-COW capabilities so the scheduler prefers larger batches / pure-LPT balancing.
-    pub fn capabilities(&self) -> WorkerCaps {
-        WorkerCaps::subprocess(self.pool_size)
     }
 
     /// Launch the no-fork wellspring (`python <shim> <root> --no-fork --restore`) and complete
@@ -222,12 +216,6 @@ impl crate::exec::tier::LaneSeed for SubprocessLane {
 mod tests {
     use super::*;
 
-    #[test]
-    fn capabilities_report_no_cow() {
-        let caps = SubprocessWorker::new(5_000, 4).capabilities();
-        assert!(!caps.supports_cow, "the fallback path has no COW");
-        assert_eq!(caps.max_parallel, 4);
-    }
 
     #[test]
     fn run_without_target_is_an_error_not_a_panic() {

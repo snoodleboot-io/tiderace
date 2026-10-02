@@ -18,8 +18,8 @@ Its own runner (no pytest at runtime) · No-fork isolation · Impact analysis ·
 ## What is tiderace?
 
 tiderace is a **compiled Rust engine that runs Python tests directly**. The Rust side owns collection,
-the fixture graph, scheduling, isolation, coverage, and impact analysis; a small Python *shim* is the
-only code inside CPython, and it exists only to import your tests and call their bodies. **There is no
+scheduling, isolation, coverage, and impact analysis; a Python *shim* is the only code inside CPython —
+it imports your tests, resolves their fixtures and calls their bodies. **There is no
 pytest at runtime.**
 
 That design unlocks two things no pytest plugin can do together:

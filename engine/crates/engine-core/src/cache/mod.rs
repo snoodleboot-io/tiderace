@@ -15,6 +15,7 @@
 // file name = snake_case of the `Cache` trait (project convention)
 mod cache;
 mod cache_key;
+mod closure_hash;
 mod cached_outcome;
 mod dir_cache;
 mod local_cache;
@@ -24,6 +25,7 @@ mod tiered_cache;
 
 pub use cache::Cache;
 pub use cache_key::{CacheKey, CacheKeyBuilder};
+pub use closure_hash::{ClosureHash, ClosureHasher};
 pub use cached_outcome::CachedOutcome;
 pub use dir_cache::DirCache;
 pub use local_cache::LocalCache;

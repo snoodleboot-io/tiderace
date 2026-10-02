@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::fixtures::ClosureHasher;
+use crate::cache::ClosureHasher;
 
 /// The sentinel a missing or unreadable file hashes to: it never equals a real digest, so the
 /// file always counts as changed.

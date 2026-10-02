@@ -5,31 +5,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{NodeId, Outcome, TestStyle};
 use crate::error::{EngineError, Result};
-use crate::fixtures::{FixtureArgs, FixtureInstance};
 
 /// A request to execute one test in a forked child of the Wellspring.
 ///
-/// **Phase 3 extension (contract-frozen).** The Phase 2 wire fields (`node_id`, `style`,
-/// `deadline_ms`) are unchanged. Phase 3 adds the fixture fields the forked child needs —
-/// `post_fork` (Function-scope instances to set up in-child), `reinit` (fork-fragile resource node
-/// ids to rebuild post-fork, W11), and `fixture_args` (the assembled argument map). All three are
-/// `#[serde(skip_serializing_if = ...)]` so a **fixtureless** request serializes byte-identically to
-/// the Phase 2 frame — the length-prefixed JSON framing itself is unchanged (Phase 2 CONTRACT §3).
+/// The Phase 2 wire fields (`node_id`, `style`, `deadline_ms`) plus the routing hints below, each
+/// `#[serde(skip_serializing_if = ...)]` so a plain request serializes byte-identically to the
+/// Phase 2 frame — the length-prefixed JSON framing itself is unchanged (Phase 2 CONTRACT §3).
+/// Fixtures are the shim's: it resolves and sets them up from the node id alone.
 #[derive(Debug, Serialize)]
 pub struct ExecRequest<'a> {
     pub node_id: &'a NodeId,
     /// The test style; its serde form is the token the shim dispatches on.
     pub style: TestStyle,
     pub deadline_ms: u64,
-    /// Function-scope fixture instances to set up in the forked child, topo order (design 05 §5.2).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub post_fork: Vec<FixtureInstance>,
-    /// `reinit_after_fork` fixture node ids to rebuild in-child (W11).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub reinit: Vec<String>,
-    /// The assembled argument map the body is invoked with.
-    #[serde(default, skip_serializing_if = "FixtureArgs::is_empty")]
-    pub fixture_args: FixtureArgs,
     /// Ask the shim to run this test **in-process (no fork)** — the pure/restore fast path. The shim
     /// still forks if the module isn't snapshot-restorable (soundness). `false` ⇒ byte-identical frame.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -52,16 +40,12 @@ pub struct ExecRequest<'a> {
 }
 
 impl<'a> ExecRequest<'a> {
-    /// A Phase-2-shaped (fixtureless) request: the three wire fields, empty fixture fields. Keeps
-    /// existing call sites concise and the frame byte-identical to Phase 2.
+    /// A plain request: the three wire fields, no routing hints — the frame byte-identical to Phase 2.
     pub fn bare(node_id: &'a NodeId, style: TestStyle, deadline_ms: u64) -> Self {
         Self {
             node_id,
             style,
             deadline_ms,
-            post_fork: Vec::new(),
-            reinit: Vec::new(),
-            fixture_args: FixtureArgs::new(),
             force_no_fork: false,
             trusted_pure: false,
             must_fork: false,

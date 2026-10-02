@@ -21,10 +21,6 @@ All collection, graph, schedule, exec, coverage, impact, and cache logic. Module
 
 - **`collection`** — `RegexCollector` (`regex_collector.rs`) discovers test files and node ids by
   fast regex scan; no interpreter, no `--collect-only`. Behind the `Collector` trait.
-- **`fixtures`** — the `FixtureGraph` (`fixture_graph.rs`) and resolvers (`fixture_resolver.rs`,
-  `layered_resolver.rs`): build each test's fixture **closure** across scopes, with `override_table`,
-  `finalizer` ordering, `param_value`/`fixture_args` parametrization, and `closure_hash` (a fixture
-  closure's identity, used as a cache-key input).
 - **`scheduler`** — `LocalityScheduler` (`locality_scheduler.rs`, ADR-E010): groups a module's tests
   together (scope locality) and LPT-balances them into `WorkerBatch`es (`worker_batch.rs`) across N
   workers. `round_robin_scheduler.rs` is a simpler baseline; both behind the `Scheduler` trait.
@@ -45,9 +41,8 @@ All collection, graph, schedule, exec, coverage, impact, and cache logic. Module
   worker runs with (`RunKnobs`), `limits.rs` the one place deadlines live, `selection.rs` the
   `-k` / `-m` selection and how it travels through the environment. The `ShimTransport` seam
   (`transport.rs` — `PipeTransport`) and the typed wire (`shim_protocol.rs` — `ExecRequest` /
-  `ExecResponse`, `read_frame`/`write_frame`); `WatermarkStack` (`watermark_stack.rs`) tracks
-  fixture setup/teardown across scopes; plus `fork_permit`, `fork_plan`, `memory_governor` and
-  `safe_set_cache`.
+  `ExecResponse`, `read_frame`/`write_frame`); plus `safe_set_cache`. Fixture resolution is the
+  shim's (`py-shim/tiderace_shim/fixtures.py`); the Rust fixture graph was retired (TID-110).
 - **`runner`** — a run from "what to execute" to "how it was executed", shared by the CLI and the
   daemon: `run_plan.rs` (`RunPlan`, the configuration; `Learned`, what earlier runs recorded),
   `run.rs` (`run_parallel` and the warm-image variant: the tier claims what it runs itself, the
