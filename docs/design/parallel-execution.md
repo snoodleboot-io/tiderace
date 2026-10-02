@@ -34,8 +34,8 @@ flowchart TB
   it gives up ten seconds past the deadline: the worker is killed, the in-flight node is reported
   as the fault, the rest of its unit as not run, and the other workers finish the run (TID-93).
   Before that a test blocking on the in-process tier blocked the whole run, for good.
-- **WatermarkStack** — tracks fixture setup/teardown across scopes so finalizers run in the right
-  order as the engine moves between modules and classes.
+- **Fixture scopes** — the shim keeps wider-scope fixtures live in the warm image and tears them
+  down in reverse as a worker moves between modules and classes (`tiderace_shim/engine.py`).
 
 ## What the engine does not promise
 

@@ -1,12 +1,9 @@
-//! Shared helpers for the Phase 3 fixtures + watermarks acceptance suite.
+//! Shared helpers for the live fixtures acceptance suite.
 //!
 //! This module is `mod`-included by `fixtures_acceptance.rs`. It holds:
 //!   * venv / corpus / shim path discovery (mirroring `differential.rs`),
 //!   * a live runner that drives stock pytest over `fx_corpus` with an isolated
 //!     probe dir and parses the `fx_probe` artifacts (`events.log`, `counts.json`),
-//!   * small constructors for building `Fixture` / `FixtureGraph` inputs that mirror
-//!     the corpus topology, so the pure-Rust scenarios (cycle, scope-widen,
-//!     parametrization, override) can assert without Python.
 //!
 //! **No mocks at the python/sqlite boundary** (BINDING, test-mocking-rules): the
 //! live scenarios shell out to the real `.tiderace-fx-venv` interpreter running real
@@ -31,8 +28,6 @@ pub fn live_guard() -> MutexGuard<'static, ()> {
     LIVE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-use engine_core::domain::{NodeId, Scope, ScopePath};
-use engine_core::fixtures::{Fixture, ParamValue};
 use engine_core::testing::repo_root;
 
 /// The fixture-heavy conformance corpus root (511 pytest tests).
@@ -181,70 +176,3 @@ fn nonce() -> u128 {
 // --------------------------------------------------------------------------
 // Pure-Rust fixture-graph input builders (mirror the corpus topology).
 // --------------------------------------------------------------------------
-
-/// A `ScopePath` for a module (no class).
-pub fn module_path(module: &str) -> ScopePath {
-    ScopePath::module(module)
-}
-
-/// Build a plain (return-style, fork-safe) `Fixture` named `name` at `scope`,
-/// declared in `module`, depending on `deps` (by name).
-pub fn fx(name: &str, scope: Scope, module: &str, deps: &[&str]) -> Fixture {
-    Fixture::new(
-        NodeId::new(format!("{module}::{name}")),
-        name,
-        scope,
-        module_path(module),
-    )
-    .with_deps(deps.iter().map(|s| s.to_string()).collect())
-}
-
-/// The corpus's scope topology as a `Fixture` set, mirroring `fx_corpus`:
-/// `session_db (Session) -> pkg_resource (Package) -> module_fix (Module)
-///  -> class_fix (Class) -> func_fix (Function)`, plus a session autouse fixture.
-/// Built so the pure-Rust resolver scenarios can assert layering/closure without
-/// Python (scenarios that need real fork drive the live corpus instead).
-///
-/// Declaring locations use the **directory-ancestor** model the override table keys
-/// off (CONTRACT §2.7): the session conftest's fixtures are declared at the root
-/// (`""`, a prefix of every module), the package conftest's at `"tests"`, and the
-/// module fixtures at their own module path — so all are visible from a test in
-/// `tests/test_scopes.py` via longest-prefix resolution.
-pub fn corpus_scope_fixtures() -> Vec<Fixture> {
-    vec![
-        fx("session_db", Scope::Session, "", &[]),
-        fx("session_autouse", Scope::Session, "", &[]).autouse(),
-        fx("pkg_resource", Scope::Package, "tests", &["session_db"]),
-        fx(
-            "module_fix",
-            Scope::Module,
-            "tests/test_scopes.py",
-            &["pkg_resource"],
-        )
-        .yielding(),
-        fx(
-            "class_fix",
-            Scope::Class,
-            "tests/test_scopes.py",
-            &["module_fix"],
-        )
-        .yielding(),
-        fx(
-            "func_fix",
-            Scope::Function,
-            "tests/test_scopes.py",
-            &["class_fix"],
-        )
-        .yielding(),
-    ]
-}
-
-/// The three corpus param ids (`['a','b','c']`) as `ParamValue`s — mirrors
-/// `fx_corpus/tests/test_param.py`.
-pub fn corpus_param_values() -> Vec<ParamValue> {
-    vec![
-        ParamValue::new("a", 0),
-        ParamValue::new("b", 1),
-        ParamValue::new("c", 2),
-    ]
-}
