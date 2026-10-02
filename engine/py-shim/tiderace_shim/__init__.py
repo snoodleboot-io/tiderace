@@ -20,5 +20,6 @@ set), `selection.py` what it selects (`-k`, `-m`, `--strict-markers`, the declar
 `discovery.py`'s `Discovery` what discovery produced (the registry, the conftests, their options
 and ini declarations, the hooks' skips, the skipped and broken directories), `ProcessState` what
 the worker has done so far and `Caches` its memos, all on the engine; the node resolver takes the
-run root as a parameter; `log.py` is the one line to stderr.
+run root as a parameter; `invoke.py` calls a test once for sync and async (the sync tier drives
+the async implementation without a loop); `log.py` is the one line to stderr.
 """

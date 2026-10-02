@@ -60,6 +60,9 @@ from .discovery import Discovery
 from .log import warn as _warn
 from .selection import (Selection, plugin_marks as _plugin_marks, pytest_major as _pytest_major,
                         registered_marks as _registered_marks)
+from .invoke import (SKIP_EXCEPTIONS as _SKIP_EXCEPTIONS, Request as _Request, call_hook as _call_hook,
+                     call_with_hooks, classify_exception, run_finalizers as _run_finalizers, run_sync,
+                     setup_fixture, test_finalizers as _test_finalizers)
 from .isolation import Isolation, _restorable
 from .plan import Plan
 from .tiers import EngineOptions, Routing, Tier, VariantResult, assemble, route
@@ -118,25 +121,6 @@ class _ModuleChild:
 
 
 # --------------------------------------------------------------------------- node ids
-
-
-def _skip_exceptions() -> tuple[type[BaseException], ...]:
-    """Every exception type that means "skip this test", not "this test broke".
-
-    `unittest.SkipTest` is the obvious one. `pytest.skip()` and
-    `pytest.importorskip()` raise `_pytest.outcomes.Skipped`, which derives from
-    `BaseException` rather than `SkipTest` — so without it here a skip falls
-    through to the catch-all and is reported as an error. A suite that skips a
-    test because an optional backend is absent then shows up as broken.
-    """
-    try:
-        from _pytest.outcomes import Skipped
-    except Exception:  # noqa: BLE001 — pytest absent ⇒ unittest skips only
-        return (unittest.SkipTest,)
-    return (unittest.SkipTest, Skipped)
-
-
-_SKIP_EXCEPTIONS = _skip_exceptions()
 
 
 def _package_basedir(directory: str) -> str:
@@ -271,29 +255,6 @@ class FixtureDef:
         return "request" in inspect.signature(self.func).parameters
 
 
-def _owner_args(fdef) -> tuple:
-    """The positional `self` a class fixture is called with, or `()` for an ordinary one.
-
-    A fixture defined inside a test class is a plain function until it is looked up on an instance, so
-    it needs one. pytest binds it to the class's instance; a fresh one per setup matches what fixture
-    bodies actually use it for — reaching the class's own helpers — without tying fixture setup to the
-    instance the test body will later run on (TID-47)."""
-    return (fdef.owner(),) if fdef.owner is not None else ()
-
-
-def _run_finalizers(finalizers: list) -> None:
-    """Run `request.addfinalizer` callbacks newest-first, as pytest does (TID-44).
-
-    Guarded individually, matching `_teardown`: one finalizer raising must not stop the rest from
-    releasing what they hold."""
-    while finalizers:
-        fn = finalizers.pop()
-        try:
-            fn()
-        except Exception:  # noqa: BLE001 — a failing finalizer must not abort the remaining ones
-            pass
-
-
 @dataclasses.dataclass
 class XunitState:
     """The xunit setups this process has run (TID-60, TID-64): `done` holds `(kind, qualified
@@ -363,40 +324,6 @@ def _runtime_outcome(node, outcome: str, detail: str) -> tuple:
     if node is None or not node.own_markers:
         return outcome, detail
     return _fold_marks(_normalise_marks(node.iter_markers()), outcome, detail, runtime=True)
-
-
-class _Request:
-    """The minimal `request` object a fixture sees: `.param` and `.node`, plus `addfinalizer`."""
-
-    __slots__ = ("param", "node", "_finalizers")
-
-    def __init__(self, param, node=None):
-        self.param = param
-        self.node = node
-        self._finalizers: list = []
-
-    def addfinalizer(self, fn) -> None:
-        """Run `fn` when this fixture tears down (TID-44).
-
-        Tied to the fixture's own teardown handle, so a session-scoped fixture's finalizer runs at
-        session end rather than after the first test. flask's fixtures use this for app and
-        request-context cleanup; without it they raised `AttributeError` during setup."""
-        self._finalizers.append(fn)
-
-
-class _FinalizingHandle:
-    """A fixture teardown handle plus the finalizers its body registered (TID-44).
-
-    Only built when a fixture actually called `addfinalizer`, so every fixture that did not keeps the
-    exact handle it always had. pytest registers a yield fixture's own teardown *after* the body
-    returns, which makes it the newest finalizer: the yield teardown runs first, then the body's
-    `addfinalizer` callbacks, newest first."""
-
-    __slots__ = ("inner", "finalizers")
-
-    def __init__(self, inner, finalizers: list):
-        self.inner = inner
-        self.finalizers = finalizers
 
 
 def _ini_value(project: ProjectConfig, ini_declared: dict, name: str):
@@ -661,12 +588,6 @@ def _with_request(func, args: dict, node_id: str, config: _Config, state: Proces
         return args, None
     request = _TestRequest(node_id, func, config, state, instance)
     return {**args, "request": request}, request
-
-
-def _test_finalizers(request) -> None:
-    """A test request's finalizers — after the body has fully run, including an awaited one."""
-    if request is not None:
-        _run_finalizers(request._finalizers)
 
 
 def _fixture_marker(obj):
@@ -1346,13 +1267,16 @@ def _closure(reg: Registry, module_key: str, requested: dict, extra: list | None
 
 # --------------------------------------------------------------------------- execution engine
 class _Active:
-    __slots__ = ("fdef", "key", "value", "gen")
+    """A live wider-scope fixture: its definition, its scope-instance key, its value and the handle
+    that tears it down."""
 
-    def __init__(self, fdef, key, value, gen):
+    __slots__ = ("fdef", "key", "value", "handle")
+
+    def __init__(self, fdef, key, value, handle):
         self.fdef = fdef
         self.key = key
         self.value = value
-        self.gen = gen
+        self.handle = handle
 
 
 def _instance_key(fdef: FixtureDef, node_id: str):
@@ -1368,97 +1292,10 @@ def _instance_key(fdef: FixtureDef, node_id: str):
     return ("function", fdef.name, node_id)
 
 
-def _setup_fixture(fdef: FixtureDef, args: dict, param, node):
-    """Run a fixture body up to its first yield (or to completion). Returns (value, handle).
-    `node` is the test's `request.node`, shared with the test (TID-51)."""
-    call_args = dict(args)
-    request = _Request(param, node) if fdef.wants_request else None
-    if request is not None:
-        call_args["request"] = request
-    if fdef.is_yield:
-        gen = fdef.func(*_owner_args(fdef), **call_args)
-        value, handle = next(gen), gen
-    else:
-        value, handle = fdef.func(*_owner_args(fdef), **call_args), None
-    if request is not None:
-        # Wrapped whenever the fixture takes a `request`, not only when it registered a finalizer
-        # during its own body. A fixture that hands the test a callable — flask's `purge_module` is
-        # the canonical shape — registers nothing at setup time and everything later, from inside the
-        # test body. Deciding here whether to wrap therefore dropped exactly those finalizers, and a
-        # module a test asked to have purged stayed in `sys.modules` for its neighbours (TID-56).
-        # The list is shared by reference, so later appends are seen; an empty one tears down as
-        # cheaply as before.
-        handle = _FinalizingHandle(handle, request._finalizers)
-    return value, handle
-
-
-def _teardown(gen) -> None:
-    if isinstance(gen, _FinalizingHandle):
-        _teardown(gen.inner)  # the yield teardown is the newest finalizer, so it runs first
-        _run_finalizers(gen.finalizers)
-        return
-    if gen is None:
-        return
-    try:
-        next(gen)
-    except StopIteration:
-        pass
-    except Exception:  # noqa: BLE001 — a teardown error must not abort remaining finalizers
-        pass
-
-
 # --------------------------------------------------------------------------- async providers (B5)
-def _is_async_fixture(func) -> bool:
+def _async_provider(func) -> bool:
     """An `async def` provider (coroutine) or `async def ... yield` provider (async generator)."""
     return inspect.iscoroutinefunction(func) or inspect.isasyncgenfunction(func)
-
-
-async def _setup_fixture_async(fdef: FixtureDef, args: dict, param, node):
-    """Async-aware setup: drives sync *and* async providers up to their first (a)yield. Returns
-    `(value, handle)` where handle is `None` | `("gen", g)` | `("agen", ag)` for teardown."""
-    call_args = dict(args)
-    request = _Request(param, node) if fdef.wants_request else None
-    if request is not None:
-        call_args["request"] = request
-    if inspect.isasyncgenfunction(fdef.func):
-        ag = fdef.func(*_owner_args(fdef), **call_args)
-        value, handle = await ag.__anext__(), ("agen", ag)
-    elif inspect.iscoroutinefunction(fdef.func):
-        value, handle = await fdef.func(*_owner_args(fdef), **call_args), None
-    elif fdef.is_yield:  # a sync yield-fixture used alongside async ones
-        gen = fdef.func(*_owner_args(fdef), **call_args)
-        value, handle = next(gen), ("gen", gen)
-    else:
-        value, handle = fdef.func(*_owner_args(fdef), **call_args), None
-    if request is not None:
-        # Wrapped whenever the fixture takes a `request`, not only when it registered a finalizer
-        # during its own body. A fixture that hands the test a callable — flask's `purge_module` is
-        # the canonical shape — registers nothing at setup time and everything later, from inside the
-        # test body. Deciding here whether to wrap therefore dropped exactly those finalizers, and a
-        # module a test asked to have purged stayed in `sys.modules` for its neighbours (TID-56).
-        # The list is shared by reference, so later appends are seen; an empty one tears down as
-        # cheaply as before.
-        handle = _FinalizingHandle(handle, request._finalizers)
-    return value, handle
-
-
-async def _teardown_async(handle) -> None:
-    if isinstance(handle, _FinalizingHandle):
-        await _teardown_async(handle.inner)
-        _run_finalizers(handle.finalizers)
-        return
-    if handle is None:
-        return
-    kind, g = handle
-    try:
-        if kind == "agen":
-            await g.__anext__()
-        else:
-            next(g)
-    except (StopIteration, StopAsyncIteration):
-        pass
-    except Exception:  # noqa: BLE001 — a teardown error must not abort remaining finalizers
-        pass
 
 
 # --------------------------------------------------------------------------- static purity pre-filter
@@ -1603,7 +1440,7 @@ def _watched_packages(caches: Caches, root: str, module_key: str) -> tuple:
     return result
 
 
-def _drive_async(make_coro, backend=None, *, force_asyncio: bool = False):
+def _on_loop(make_coro, backend=None, *, auto_mode: bool = False):
     """Run an async body to completion on the backend the run asked for.
 
     `anyio_backend` carries either a name (`"trio"`) or a name and its options
@@ -1612,7 +1449,7 @@ def _drive_async(make_coro, backend=None, *, force_asyncio: bool = False):
     is only reached when the suite already depends on anyio.
 
     Everything else — the overwhelming majority — keeps the plain asyncio path it always had."""
-    if backend is None or force_asyncio:
+    if backend is None or auto_mode:
         return asyncio.run(make_coro())
     name, options = (backend, None)
     if isinstance(backend, (tuple, list)) and backend:
@@ -1632,66 +1469,13 @@ def _drive_async(make_coro, backend=None, *, force_asyncio: bool = False):
         return anyio.run(make_coro, backend=name)
 
 
-def _test_is_async(node_id: str, style: str, root: str) -> bool:
+def _awaited_test(node_id: str, style: str, root: str) -> bool:
     """Whether the test body is `async def` **and** tiderace is the thing that must await it.
 
     A `unittest` class drives its own coroutines — `IsolatedAsyncioTestCase.run()` builds the loop and
     calls `asyncSetUp` around the body — so those are never async-driven from here, however the
     collector labelled them."""
     return resolve_target(node_id, style, root, lenient=True).is_async
-
-
-async def _invoke_async(node_id: str, style: str, args: dict, config: _Config,
-                        state: ProcessState) -> tuple[str, str]:
-    """The async sibling of `_invoke`, with the same runtime-marker fold (TID-51)."""
-    outcome, detail = await _invoke_async_body(node_id, style, args, config, state)
-    return _runtime_outcome(state.current_node, outcome, detail)
-
-
-async def _invoke_async_body(node_id: str, style: str, args: dict, config: _Config,
-                             state: ProcessState) -> tuple[str, str]:
-    """The async sibling of `_invoke`: call the test, `await` it if it's a coroutine, and map the same
-    outcomes (incl. lazy RichDiff on `AssertionError`). Runs inside the per-test event loop, so it must
-    `await` directly — never `asyncio.run` (which can't nest)."""
-    node = resolve_target(node_id, style, config.run.root)
-    module = node.module
-    try:
-        if style == "class_method":
-            _xunit_class_setup(state.xunit, node.cls)
-            instance = node.cls()
-            bound = getattr(instance, node.name)
-            target = bound
-            call_args, request = _with_request(bound, args, node_id, config, state, instance)
-        else:
-            target = node.func
-            call_args, request = _with_request(target, args, node_id, config, state)
-        hooks = _xunit_test_hooks(module, style, node_id, target)
-        try:
-            _call_hook(*hooks[0]) if hooks[0] else None
-            result = target(**call_args)
-            if inspect.iscoroutine(result):
-                await result
-        finally:
-            if hooks[1]:
-                try:
-                    _call_hook(*hooks[1])
-                except Exception:  # noqa: BLE001 — teardown must not mask the body's outcome
-                    pass
-            _test_finalizers(request)  # after the await, or a coroutine's finalizers run before its body
-        return "passed", ""
-    except AssertionError as exc:
-        plain = "".join(traceback.format_exception_only(type(exc), exc))
-        rich = _introspect_assertion(exc)
-        return "failed", (rich + plain) if rich else plain
-    except _SKIP_EXCEPTIONS as exc:
-        return "skipped", str(exc)
-    except Exception as exc:  # noqa: BLE001 — a body that raises FAILED; it ran and came out wrong
-        # pytest reserves `error` for a test it could not attempt — a fixture that raised, a module
-        # that would not import — and calls anything the body raises a failure, assertion or not
-        # (TID-30, verified against pytest directly). tiderace split on exception type instead, so
-        # `raise RuntimeError` reported `error` where pytest reports `failed`. Both are red, but the
-        # taxonomy leaked into the reporters and made the two runners impossible to reconcile.
-        return "failed", "".join(traceback.format_exception_only(type(exc), exc))
 
 
 # An import statement starts a line, or follows `;` or a compound statement's `:` on one. `yield from`
@@ -2171,8 +1955,8 @@ class Engine:
                 continue
             mk = _module_key(node_id)
             args = {param: self._value(prov, mk) for param, prov in d.bindings.items()}
-            value, gen = _setup_fixture(d, args, None, self.state.current_node)
-            self.active.append(_Active(d, key, value, gen))
+            value, handle = run_sync(setup_fixture(d, args, None, self.state.current_node))
+            self.active.append(_Active(d, key, value, handle))
             live.add(key)
 
     def _teardown_stale(self, node_id: str) -> None:
@@ -2184,7 +1968,7 @@ class Engine:
             top = self.active[-1]
             if top.key == _instance_key(top.fdef, node_id):
                 break
-            _teardown(top.gen)
+            top.handle.close()
             self.active.pop()
         if self._guard is not None and self._guard.module_key != _module_key(node_id):
             self._leave_module()
@@ -2703,7 +2487,7 @@ class Engine:
             finally:
                 try:
                     while len(self.active) > inherited:
-                        _teardown(self.active.pop().gen)
+                        self.active.pop().handle.close()
                     for key in done_before:
                         self.state.xunit.done.discard(key)
                     _xunit_class_teardown(self.state.xunit)
@@ -2887,40 +2671,21 @@ class Engine:
 
     def _child_exec(self, node_id, style, requested, closure, combo, case_kwargs=None, variant_id=None,
                     tier: Tier = Tier.FORK) -> tuple:
-        """In the forked child: set up function-scope fixtures (incl. parametrized + reinit-after-fork
-        resources, which thus get a FRESH handle per child), run the body, tear down in reverse.
-        `case_kwargs` are the @tiderace.cases values bound to the test's bare params. Returns
-        `(outcome, detail, coverage)` where coverage is `{rel_path: [lines]}` (empty unless enabled)."""
+        """Set up the function-scope fixtures (incl. parametrized + reinit-after-fork resources,
+        which thus get a FRESH handle per child), run the body, tear down in reverse — in the
+        forked child, or in this process on the in-process tiers. `case_kwargs` are the
+        @tiderace.cases values bound to the test's bare params. Returns `(outcome, detail,
+        coverage, purity)` where coverage is `{rel_path: [lines]}` (empty unless enabled).
+
+        One path for sync and async (TID-124): `_run_case` is written once, as a coroutine. An
+        async test body, or any function-scope async provider, runs it on ONE event loop — objects
+        created on a loop must be awaited on the same loop (B5) — on the backend the run asked
+        for; everything else drives it with `run_sync`, where nothing ever suspends. So an async
+        test gets the same isolation measurement, the same module guard and the same
+        `request.node` as a sync one."""
         module_key = _module_key(node_id)
-        local: dict[str, object] = {}
-        gens: list = []
-
-        def value_of(name: str):
-            if name in local:
-                return local[name]
-            return self._value(name, module_key)
-
         cov = _Coverage(self.config.root, self.options.coverage, self.options.coverage_lines, self.caches)
         cov.start()  # capture the per-test footprint: fixture setup + body, this test only (ADR-E006)
-        # B5: async test body or any function-scope async provider ⇒ run setup+body+teardown on ONE
-        # event loop (objects created on a loop must be awaited on the same loop). Sync path untouched.
-        if _test_is_async(node_id, style, self.config.root) or any(
-            _is_async_fixture(d.func) for d in closure if d.rank == 0
-        ):
-            try:
-                outcome, detail = _drive_async(
-                    lambda: self._child_exec_async(node_id, style, requested, closure, combo,
-                                                   case_kwargs),
-                    combo.get("anyio_backend"),
-                    force_asyncio=self.config.force_asyncio,
-                )
-                cov.stop()
-                # Closure merged in here, not inside `_Coverage`, so the capture object stays purely
-                # about what executed and the module attribution is visible at the call site.
-                return (outcome, detail, cov.report_with_imports(module_key),
-                        _UNKNOWN_PURITY)  # async purity not measured
-            finally:
-                cov.stop()
         # Named as pytest names it, parametrize id included: a fixture keying a resource off
         # `request.node.name` needs `test_x[case]`, not `test_x`, or every case collides (TID-51).
         self.state.node_for(variant_id or node_id)
@@ -2929,13 +2694,46 @@ class Engine:
         # and without it every test in that file fails on the thing it was meant to provide (TID-60).
         _xunit_module_setup(self.state.xunit, _import_module(module_key, self.config.root))
         try:
+            awaited = _awaited_test(node_id, style, self.config.root) or any(
+                _async_provider(d.func) for d in closure if d.rank == 0)
+
+            def case():
+                return self._run_case(node_id, style, requested, closure, combo, case_kwargs, tier, cov,
+                                      on_loop=awaited)
+
+            if awaited:
+                outcome, detail, purity = _on_loop(case, combo.get("anyio_backend"),
+                                                   auto_mode=self.config.force_asyncio)
+            else:
+                outcome, detail, purity = run_sync(case())
+            # Closure merged in here, not inside `_Coverage`, so the capture object stays purely
+            # about what executed and the module attribution is visible at the call site.
+            return outcome, detail, cov.report_with_imports(module_key), purity
+        finally:
+            cov.stop()  # idempotent — frees the monitoring tool id even if setup raised
+
+    async def _run_case(self, node_id, style, requested, closure, combo, case_kwargs, tier: Tier,
+                        cov: "_Coverage", *, on_loop: bool) -> tuple:
+        """The case itself: function-scope fixtures up, the isolation snapshot the tier calls for,
+        the body, the verdict — the footprint stops there, before the fixtures come down in
+        reverse. Returns `(outcome, detail, purity)`."""
+        module_key = _module_key(node_id)
+        local: dict[str, object] = {}
+        handles: list = []
+
+        def value_of(name: str):
+            if name in local:
+                return local[name]
+            return self._value(name, module_key)
+
+        try:
             for d in closure:
                 if d.rank != 0:
                     continue  # wider scopes are already live in inherited parent memory
                 args = {param: value_of(prov) for param, prov in d.bindings.items()}
-                val, gen = _setup_fixture(d, args, combo.get(d.name), self.state.current_node)
+                val, handle = await setup_fixture(d, args, combo.get(d.name), self.state.current_node)
                 local[d.name] = val
-                gens.append(gen)
+                handles.append(handle)
             test_args = {param: value_of(prov) for param, prov in requested.items()}
             if case_kwargs:
                 test_args.update(case_kwargs)
@@ -2957,7 +2755,8 @@ class Engine:
             watched = _watched_packages(self.caches, self.config.root, module_key) if full else ()
             isolation = Isolation.before(module_key, mod, watched, measure=mod is not None, full=full,
                                          registry_cache=self.caches.registry_targets)
-            outcome, detail = _invoke(node_id, style, test_args, self._pytest_config, self.state)
+            outcome, detail = await _invoke(node_id, style, test_args, self._pytest_config, self.state,
+                                            on_loop=on_loop)
             # Everything below MEASURES; nothing here restores: the restore that stands in for a
             # fork happens when this worker leaves the module (`_leave_module`), against the
             # snapshot taken when it entered (TID-80, TID-81). The per-test verdict still says what
@@ -2968,41 +2767,10 @@ class Engine:
             if leaked is not None:
                 self._leaked = leaked
             cov.stop()
-            return outcome, detail, cov.report_with_imports(module_key), purity
-        finally:
-            cov.stop()  # idempotent — frees the monitoring tool id even if setup raised
-            for gen in reversed(gens):
-                _teardown(gen)
-
-    async def _child_exec_async(self, node_id, style, requested, closure, combo, case_kwargs=None) -> tuple:
-        """The async sibling of the function-scope portion of `_child_exec` (B5): sets up function-scope
-        fixtures (sync or async) on this loop, runs the (possibly async) body, tears down in reverse.
-        Wider-scope fixtures are inherited from the parent as usual; only function-scope async providers
-        are driven here (a wider-scope async provider is an unsupported edge — none in the corpus)."""
-        module_key = _module_key(node_id)
-        local: dict[str, object] = {}
-        handles: list = []
-
-        def value_of(name: str):
-            if name in local:
-                return local[name]
-            return self._value(name, module_key)
-
-        try:
-            for d in closure:
-                if d.rank != 0:
-                    continue
-                args = {param: value_of(prov) for param, prov in d.bindings.items()}
-                val, handle = await _setup_fixture_async(d, args, combo.get(d.name), self.state.current_node)
-                local[d.name] = val
-                handles.append(handle)
-            test_args = {param: value_of(prov) for param, prov in requested.items()}
-            if case_kwargs:
-                test_args.update(case_kwargs)
-            return await _invoke_async(node_id, style, test_args, self._pytest_config, self.state)
+            return outcome, detail, purity
         finally:
             for handle in reversed(handles):
-                await _teardown_async(handle)
+                await handle.aclose()
 
     def _is_fixture_node(self, node_id: str, style: str) -> bool:
         """Whether the object a node names is a fixture rather than a test (TID-88)."""
@@ -3102,7 +2870,7 @@ class Engine:
         _save_file_deps_cache(self.caches, self.config.root)  # what this worker parsed (TID-82)
         self._module_child_close()  # its module's tests are done: its fixtures, hooks and exit (TID-80)
         while self.active:
-            _teardown(self.active.pop().gen)
+            self.active.pop().handle.close()
         _xunit_class_teardown(self.state.xunit)  # tearDownClass / teardown_class, once per class (TID-64)
         _xunit_module_teardown(self.state.xunit)  # tearDownModule / teardown_module, once this worker is done
 
@@ -3326,73 +3094,31 @@ def _mark_names(node_id: str, style: str, root: str) -> set:
     return names
 
 
-def _invoke(node_id: str, style: str, args: dict, config: _Config, state: ProcessState) -> tuple[str, str]:
-    """Run the test, then fold in any marker it or its fixtures attached while running (TID-51)."""
-    outcome, detail = _invoke_body(node_id, style, args, config, state)
-    return _runtime_outcome(state.current_node, outcome, detail)
-
-
-def _invoke_body(node_id: str, style: str, args: dict, config: _Config,
-                 state: ProcessState) -> tuple[str, str]:
+async def _invoke(node_id: str, style: str, args: dict, config: _Config, state: ProcessState,
+                  *, on_loop: bool) -> tuple[str, str]:
+    """Call the test and say how it went, then fold in any marker it or its fixtures attached
+    while running (TID-51). Written once for both tiers (TID-124): on the async tier (`on_loop`)
+    the body is awaited if it is a coroutine; on the sync tier nothing ever suspends. A `unittest` method runs through its
+    own result handling; a pytest-style one through its class's `setup_class` (once per class per
+    process, TID-60) and its per-test xunit hooks."""
     node = resolve_target(node_id, style, config.run.root, lenient=style == "unittest_method")
-    module = node.module
     try:
         if node.is_unittest:
-            return _invoke_unittest(state.xunit, module, node_id)
-        if style == "class_method":
-            _xunit_class_setup(state.xunit, node.cls)  # `setup_class`, once per class per process (TID-60)
-            instance = node.cls()
-            bound = getattr(instance, node.name)
-            call_args, request = _with_request(bound, args, node_id, config, state, instance)
-            setup, teardown = _xunit_test_hooks(module, style, node_id, bound)
-            try:
-                if setup:
-                    _call_hook(*setup)  # `setup_method(self, method)`
-                _maybe_await(bound(**call_args))
-            finally:
-                if teardown:
-                    try:
-                        _call_hook(*teardown)
-                    except Exception:  # noqa: BLE001 — teardown must not mask the body's outcome
-                        pass
-                _test_finalizers(request)
-            return "passed", ""
-        func = node.func
-        call_args, request = _with_request(func, args, node_id, config, state)
-        setup, teardown = _xunit_test_hooks(module, style, node_id, func)
-        try:
-            if setup:
-                _call_hook(*setup)  # `setup_function(function)`
-            _maybe_await(func(**call_args))
-        finally:
-            if teardown:
-                try:
-                    _call_hook(*teardown)
-                except Exception:  # noqa: BLE001 — teardown must not mask the body's outcome
-                    pass
-            _test_finalizers(request)
-        return "passed", ""
-    except AssertionError as exc:
-        plain = "".join(traceback.format_exception_only(type(exc), exc))
-        rich = _introspect_assertion(exc)  # lazy: only a FAILED assert pays this (ADR-E009)
-        return "failed", (rich + plain) if rich else plain
-    except _SKIP_EXCEPTIONS as exc:
-        return "skipped", str(exc)
-    except Exception as exc:  # noqa: BLE001 — a body that raises FAILED; it ran and came out wrong
-        # pytest reserves `error` for a test it could not attempt — a fixture that raised, a module
-        # that would not import — and calls anything the body raises a failure, assertion or not
-        # (TID-30, verified against pytest directly). tiderace split on exception type instead, so
-        # `raise RuntimeError` reported `error` where pytest reports `failed`. Both are red, but the
-        # taxonomy leaked into the reporters and made the two runners impossible to reconcile.
-        return "failed", "".join(traceback.format_exception_only(type(exc), exc))
-
-
-def _maybe_await(result):
-    """Drive an `async def test_*` to completion (Phase 4). A sync test returns a plain value (passed
-    straight through); a coroutine is run on a fresh event loop per test — isolation is free since each
-    test is its own fork child. Async *providers* are deferred to Track B (B5)."""
-    if inspect.iscoroutine(result):
-        asyncio.run(result)
+            outcome, detail = _invoke_unittest(state.xunit, node.module, node_id)
+        else:
+            if style == "class_method":
+                _xunit_class_setup(state.xunit, node.cls)
+                instance = node.cls()
+                target = getattr(instance, node.name)
+            else:
+                instance, target = None, node.func
+            call_args, request = _with_request(target, args, node_id, config, state, instance)
+            hooks = _xunit_test_hooks(node.module, style, node_id, target)
+            await call_with_hooks(target, call_args, hooks, request, on_loop=on_loop)
+            outcome, detail = "passed", ""
+    except (Exception, *_SKIP_EXCEPTIONS) as exc:  # noqa: BLE001 — the body raised: pytest's taxonomy
+        outcome, detail = classify_exception(exc, _introspect_assertion)
+    return _runtime_outcome(state.current_node, outcome, detail)
 
 
 class _SkipAwareResult(unittest.TestResult):
@@ -3446,26 +3172,6 @@ def _note_import_history(result: dict, nodes_run: int, *, pristine: bool = False
 
 def _xunit_class_key(cls) -> tuple:
     return ("class", f"{_safe_getattr(cls, '__module__', '')}.{_safe_getattr(cls, '__name__', '')}")
-
-
-def _call_hook(owner, names: tuple, *args) -> bool:
-    """Call the first hook of `names` that `owner` defines, passing `args` if it accepts them.
-
-    Both dialects are looked for at every level, because a suite mid-migration has files in each:
-    unittest spells it `setUpModule`, pytest's xunit style spells it `setup_module`."""
-    for name in names:
-        hook = _safe_getattr(owner, name, None)
-        if hook is None or not callable(hook):
-            continue
-        try:
-            signature = inspect.signature(hook)
-            accepted = len([p for p in signature.parameters.values()
-                            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)])
-        except (TypeError, ValueError):  # a builtin or C-level callable
-            accepted = len(args)
-        hook(*args[:accepted])
-        return True
-    return False
 
 
 def _xunit_module_setup(xunit: XunitState, module) -> None:
@@ -4161,7 +3867,7 @@ class _in_process_deadline:
 
         def fire() -> None:
             self.fired = True
-            _set_async_exc(self.target, _InProcessTimeout)
+            _raise_in_thread(self.target, _InProcessTimeout)
 
         self.timer = threading.Timer(seconds, fire)
         try:
@@ -4181,11 +3887,11 @@ class _in_process_deadline:
             # Fired as the test was ending, with its exception not yet delivered: it would land in
             # the shim's own next bytecode. Withdraw it.
             if self.fired and exc_type is not _InProcessTimeout:
-                _set_async_exc(self.target, None)
+                _raise_in_thread(self.target, None)
         return False
 
 
-def _set_async_exc(thread_ident: int, exc_class) -> None:
+def _raise_in_thread(thread_ident: int, exc_class) -> None:
     """`PyThreadState_SetAsyncExc`: raise `exc_class` in the thread at its next bytecode boundary;
     `None` withdraws a raise still pending. The class is passed by address and stays alive — it
     is a module global — and `None` is the NULL the API documents."""

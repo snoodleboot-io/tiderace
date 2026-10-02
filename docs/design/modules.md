@@ -123,7 +123,10 @@ hooks' skips, the directories a conftest skipped or broke — on the engine and 
 `ProcessState` (the current node, the nodes run, the xunit setups, the clean room) and `Caches`
 (the per-process memos: watched packages, import closures, file dependencies) are the engine's,
 the node resolver takes the run root as a parameter and its name derivation no longer touches
-`sys.path`; `log.py` is the one line to stderr — TID-124). The engine launches the entry, `TIDERACE_SHIM` points
+`sys.path`; `invoke.py` is calling a test, written once for sync and async — one fixture setup and
+handle, one call with the xunit hooks, one exception ladder — which the sync tier drives without a
+loop, so an async test gets the same isolation measurement as a sync one; `log.py` is the one line
+to stderr — TID-124). The engine launches the entry, `TIDERACE_SHIM` points
 at it, and the wheel stages both into `tiderace/_shim/`. The only logic that runs inside CPython. Imports user code, invokes test bodies, and implements the
 **isolation ladder**: `static_impurity` (AST pre-filter), `_restorable` (can this module be snapshot
 + restored?), `_restore_shared` (snapshot/undo of module globals + `os.environ`), and `Engine.run`
