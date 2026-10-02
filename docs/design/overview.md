@@ -1,17 +1,16 @@
 # Design Overview
 
-tiderace is a **pure-Rust test engine for Python**. It owns test collection, the fixture graph,
-scheduling, isolation, coverage, and impact analysis in compiled Rust; a thin Python *shim* is the
-only code that runs inside CPython, and it exists solely to import your project and invoke test
-bodies. **There is no pytest at runtime** — tiderace is the runner, not a wrapper around one.
+tiderace is a **pure-Rust test engine for Python**. It owns test collection, scheduling, isolation,
+coverage, and impact analysis in compiled Rust; a Python *shim* is the only code that runs inside
+CPython — it imports your project, resolves fixtures and invokes test bodies. **There is no pytest at runtime** — tiderace is the runner, not a wrapper around one.
 
 The design rests on three pillars.
 
 ## Pillar 1 — Own the framework
 
 tiderace does not shell out to `pytest`. The engine *is* the framework: a `RegexCollector` finds
-tests, a Rust `FixtureGraph` resolves the fixture closure per test, a `LocalityScheduler` plans the
-work, and the engine drives execution itself. Python sees only one narrow request at a time — "run
+tests, a `LocalityScheduler` plans the work, the engine drives execution itself, and the shim resolves
+each test's fixture closure where the fixtures live (`tiderace_shim/fixtures.py`). Python sees only one narrow request at a time — "run
 this node id with this isolation style" — over a single swappable transport
 ([`ShimTransport`](modules.md), ADR-E011).
 

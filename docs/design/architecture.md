@@ -7,9 +7,9 @@
 ## System Overview
 
 tiderace is a **pure-Rust test engine for Python**. The Rust side owns everything that benefits from
-being fast, typed, and parallel — test collection, the fixture graph, scheduling, isolation, coverage,
-and impact analysis. The one thing that must run inside CPython — running Python — is a small *shim* that
-imports your tests and invokes their bodies. **There is no pytest at runtime.**
+being fast, typed, and parallel — test collection, scheduling, isolation, coverage, and impact
+analysis. The one thing that must run inside CPython — running Python — is a *shim* that imports
+your tests, resolves their fixtures and invokes their bodies. **There is no pytest at runtime.**
 
 ```mermaid
 flowchart LR
@@ -38,18 +38,16 @@ experimental embedded-CPython (FFI) backend. The engine never knows which.
 sequenceDiagram
     participant U as you (CLI)
     participant C as Collector (Rust)
-    participant F as FixtureGraph (Rust)
     participant S as Scheduler (Rust)
     participant W as Wellspring(s) (CPython + shim)
     participant R as Reporter (Rust)
 
     U->>C: run <path>
     C->>C: discover tests (regex collect)
-    C->>F: build fixture closure per test
-    F->>S: group by module (locality) + balance across N workers
+    C->>S: group by module (locality) + balance across N workers
     par one wellspring per core
         loop each test in batch
-            S->>W: ExecRequest (isolation ladder picks fork / no-fork)
+            S->>W: ExecRequest (the shim resolves fixtures; the isolation ladder picks fork / no-fork)
             W-->>S: outcome + coverage + purity
         end
     end
@@ -127,7 +125,7 @@ The parallel pool is platform-aware: fork-per-test on Unix, no-fork `SubprocessW
 
 tiderace runs ordinary pytest-style tests as-is. It also offers **native type-driven authoring** —
 `@tiderace.provides` / `@tiderace.cases` / `@tiderace.uses`, where fixtures resolve by *type* through the
-Rust fixture graph — so a suite can drop the pytest dependency entirely. `tiderace migrate` is an AST
+shim's registry — so a suite can drop the pytest dependency entirely. `tiderace migrate` is an AST
 codemod that converts an existing pytest suite to the native model (**91%** auto-mapped across the
 pinned click / flask / anyio suites; see [Migrating from pytest](../guides/migration.md)).
 

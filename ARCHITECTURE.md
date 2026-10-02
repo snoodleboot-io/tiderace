@@ -1,8 +1,8 @@
 # tiderace — Architecture
 
-**A pure-Rust test engine for Python.** tiderace owns test collection, the fixture graph, scheduling,
-isolation, coverage, and impact analysis in compiled Rust; a thin Python *shim* is the only thing that
-runs inside CPython, and it exists solely to import user code and invoke test bodies. There is **no
+**A pure-Rust test engine for Python.** tiderace owns test collection, scheduling, isolation, coverage,
+and impact analysis in compiled Rust; a Python *shim* is the only thing that runs inside CPython — it
+imports user code, resolves fixtures and invokes test bodies. There is **no
 pytest at runtime** — tiderace is the runner, not a wrapper around one.
 
 > **tiderace** is a pure-Rust test engine for Python: the binaries (`tiderace`, `tiderace-daemon`),
@@ -61,9 +61,8 @@ flowchart TB
     subgraph core["engine-core (library — the engine)"]
         COL["collection<br/>RegexCollector"]
         DOM["domain<br/>NodeId · Scope · Outcome<br/>TestItem · TestResult"]
-        FIX["fixtures<br/>FixtureGraph · resolver<br/>closure · finalizers · overrides"]
         SCH["scheduler<br/>LocalityScheduler<br/>WorkerBatch (LPT)"]
-        EXEC["exec<br/>Wellspring · ForkWorker<br/>WatermarkStack · transport<br/>shim_protocol"]
+        EXEC["exec<br/>Wellspring · ForkWorker<br/>tiers · transport<br/>shim_protocol"]
         COV["coverage<br/>DepGraph · CoverageReport"]
         IMP["impact<br/>ImpactAnalyzer · Selection"]
         CACHE["cache<br/>CacheKey · Tiered/Local/Null<br/>purity"]
@@ -111,7 +110,6 @@ One full run, end to end:
 sequenceDiagram
     participant U as user (CLI)
     participant C as Collector (Rust)
-    participant F as FixtureGraph (Rust)
     participant S as LocalityScheduler (Rust)
     participant P as Pool (Rust)
     participant W as Wellspring(s) (CPython + shim)
@@ -119,16 +117,14 @@ sequenceDiagram
 
     U->>C: run <path>
     C->>C: discover test files & node ids (regex collect)
-    C->>F: tests + requested params
-    F->>F: build fixture closure per test (scopes, overrides)
-    F->>S: ScheduledTest list (node, locality key, weight)
+    C->>S: ScheduledTest list (node, locality key, weight)
     S->>S: group by module (locality) + LPT-balance across N workers
     S->>P: WorkerBatches
     par one wellspring per core
         P->>W: launch (import project ONCE), then per test:
         loop each test in batch
             P->>W: ExecRequest{node, style, force_no_fork}
-            W->>W: isolate (pure / restore / fork) · run body · capture coverage+purity
+            W->>W: resolve fixtures · isolate (pure / restore / fork) · run body · capture coverage+purity
             W-->>P: ExecResponse{outcome, detail, coverage, pure}
         end
     end
@@ -160,8 +156,8 @@ flowchart TB
 
 - **Import once, fork many** — the warm import is the expensive part; COW children share it. (ADR-E003)
 - **Per-test deadline** — a child exceeding its deadline is killed and reported `Error`.
-- **WatermarkStack** — tracks fixture setup/teardown across scopes so finalizers run in the right order
-  as the engine moves between modules/classes.
+- **Fixture scopes** — the shim keeps wider-scope fixtures live in the warm image and tears them down in
+  reverse as a worker moves between modules and classes (`tiderace_shim/engine.py`).
 - **Parallelism** — the runner (`engine-core/runner/run.rs`) runs **N workers, one per core**, forked
   off one warm image on Unix (`exec/tiers/pool.rs`; the daemon keeps it in `warm_image.rs`); the [`LocalityScheduler`](#5-scheduling) keeps a module's tests on one worker.
 
@@ -369,7 +365,7 @@ native, type-driven authoring model so suites can drop the pytest dependency ent
 
 - **Native type-DI** (ADR-E012): `@tiderace.provides` (declare a provider by return type),
   `@tiderace.cases` (parametrization), `@tiderace.uses` (set up by type, not injected). Fixtures resolve by
-  **type**, built by the Rust fixture graph.
+  **type**, through the shim's registry (`tiderace_shim/fixtures.py`).
 - **`tiderace migrate`** — an AST codemod (`py-tiderace/tiderace/migrate.py`) that rewrites a pytest suite to
   the native model; conformance is tracked by auto-map % over pinned real-world repos.
 
@@ -404,7 +400,7 @@ The authoritative rationale lives in `planning/current/pure-rust-test-engine/des
 | You want… | Start here |
 |---|---|
 | How tests are found | `engine-core/src/collection/regex_collector.rs` |
-| The fixture graph | `engine-core/src/fixtures/fixture_graph.rs`, `layered_resolver.rs` |
+| Fixture resolution | `py-shim/tiderace_shim/fixtures.py` (the registry, the closure), `discovery.py` |
 | Scheduling | `engine-core/src/scheduler/locality_scheduler.rs` |
 | The fork model | `engine-core/src/exec/tiers/fork.rs`, `tiers/pool.rs`, `process/shim_process.rs` |
 | The transport seam | `engine-core/src/exec/transport.rs`, `shim_protocol.rs` |
