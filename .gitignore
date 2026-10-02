@@ -52,4 +52,8 @@ benchmarks/harness/parity.json
 benchmarks/harness/timing*.json
 benchmarks/harness/binab.json
 benchmarks/harness/second_run.json
+benchmarks/harness/shimab.json
+benchmarks/harness/ladder.json
+benchmarks/harness/platform-*.json
+benchmarks/harness/warm_vs_xdist*.json
 .tiderace-bench-snapshots/

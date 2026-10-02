@@ -9,6 +9,14 @@ the tests. Every module has one parametrized test (three cases) and one marked `
 and `-m` have something to decide, and a conftest at the root holds a session fixture half the
 tests take, so the fixture graph is not empty. Deterministic: the same arguments give the same
 bytes. A `pytest.ini` declares the mark, so `--strict-markers` passes.
+
+`--async-share 0.5` makes that share of each module's plain tests `async def` (awaiting one
+`asyncio.sleep(0)`), half of them taking an `async def` fixture and handing one call to
+`asyncio.to_thread`, so the runner's async path — the loop per test, the async fixture, its
+isolation, and the idle worker pool the loop's executor leaves behind (what cost anyio 2.5× in
+TID-125) — is exercised (TID-126). Bare `async def`
+tests need a plugin under pytest, which the fx venv does not carry: a suite with a non-zero
+share is for tiderace alone (`ladder_bench`), not for the pytest comparison.
 """
 import argparse, os
 
@@ -30,6 +38,20 @@ def test_{mod}_marked():
 
 TEST_PLAIN = "def test_{mod}_{i:03d}():\n    assert {i} + 1 == {j}\n\n\n"
 TEST_FIXTURE = "def test_{mod}_{i:03d}(session_counter):\n    assert session_counter >= 0\n\n\n"
+TEST_ASYNC = "async def test_{mod}_{i:03d}():\n    await asyncio.sleep(0)\n    assert {i} + 1 == {j}\n\n\n"
+TEST_ASYNC_FIXTURE = ("async def test_{mod}_{i:03d}(async_token):\n    await asyncio.to_thread(len, async_token)\n"
+                      "    assert async_token == 'token'\n\n\n")
+ASYNC_HEADER = '''\
+import asyncio
+
+
+@pytest.fixture
+async def async_token():
+    await asyncio.sleep(0)
+    return "token"
+
+
+'''
 
 CONFTEST = '''\
 import pytest
@@ -52,6 +74,7 @@ def main() -> None:
     ap.add_argument("--modules", type=int, default=20)
     ap.add_argument("--tests", type=int, default=50)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--async-share", type=float, default=0.0, help="share of each module's plain tests made async")
     a = ap.parse_args()
     root = os.path.abspath(a.out)
     tests = os.path.join(root, "tests")
@@ -67,8 +90,15 @@ def main() -> None:
         for m in range(a.modules):
             mod = f"p{p:02d}m{m:02d}"
             body = [MODULE.format(mod=mod)]
-            for i in range(a.tests - 4):  # the parametrized three and the marked one count too
-                tmpl = TEST_FIXTURE if i % 2 else TEST_PLAIN
+            plain = a.tests - 4  # the parametrized three and the marked one count too
+            async_from = plain - int(round(plain * a.async_share))
+            if a.async_share:
+                body.append(ASYNC_HEADER)  # after `import pytest`
+            for i in range(plain):
+                if i >= async_from:
+                    tmpl = TEST_ASYNC_FIXTURE if i % 2 else TEST_ASYNC
+                else:
+                    tmpl = TEST_FIXTURE if i % 2 else TEST_PLAIN
                 body.append(tmpl.format(mod=mod, i=i, j=i + 1))
             _write(os.path.join(pkg, f"test_{mod}.py"), "".join(body))
             total += a.tests

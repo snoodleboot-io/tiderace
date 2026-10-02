@@ -14,9 +14,12 @@ anything, checks that tiderace agrees with pytest on them test for test.
 | `nodediff.py` | per-node outcome diff for one corpus — the only sound comparison |
 | `selection_diff.py` | what `-k` / `-m` select, as node-id sets, against pytest's `--collect-only` (TID-100) |
 | `platform_bench.py` | cold timings on Windows / macOS / Linux for the corpora that need no snapshot, each tier the platform has; run by `bench-platforms.yml` (TID-13) |
-| `scale_corpus.py`, `scale_bench.py` | a synthetic suite of any size, and how the runners scale with it — full run, `-k` one test, with and without the daemon |
+| `scale_corpus.py`, `scale_bench.py` | a synthetic suite of any size (`--async-share` makes part of it `async def`, for tiderace alone), and how the runners scale with it — full run, `-k` one test, with and without the daemon |
 | `timing_rr.py` | pytest / `pytest -n auto` / tiderace, interleaved rounds, medians, load recorded |
 | `binab.py` | two tiderace binaries A/B'd on the same corpora, interleaved |
+| `shimab.py` | the shim at several git refs A/B'd with one binary, interleaved — **the gate every shim change runs against its merge base** (TID-126); exits 1 past the threshold |
+| `bench_diff.py` | two `timing_rr` passes side by side: medians, change, the ratios — read before any table is updated |
+| `ladder_bench.py` | the isolation ladder's cost per test, per tier, on a sync and an async synthetic suite |
 | `analyse_bins.py` | rebuild the scheduler's bins from a report and charge them measured durations |
 | `second_run.py` | the run after an edit: warm no-change, leaf edit, hub edit, injected failure (TID-65) |
 | `warm_vs_xdist.py` | tiderace on its second run (duration-ordered) against `pytest -n auto` (TID-52) |
@@ -62,3 +65,27 @@ project's dependency — is installed beside it and reached through `PYTHONPATH`
 ```bash
 uv pip install --python $PIRN_SNAPSHOT/.venv/bin/python --target .tiderace-bench-venvs/xdist pytest-xdist
 ```
+
+## The gate every shim or engine change runs
+
+The correctness gates (`parity`, `nodediff`, the live Rust suites) time nothing, and absolute
+timings from this shared box are not comparable across days — only an interleaved A/B is. So a
+change to the shim or the engine's hot path runs, before it merges:
+
+```bash
+benchmarks/harness/quiet_gate.sh 8 python -m benchmarks.harness.shimab base=origin/main cand=HEAD anyio pirn-core fx_corpus
+```
+
+`shimab` exports `engine/py-shim` and `engine/py-tiderace` at each ref (`git archive`), runs the
+one release binary with `TIDERACE_SHIM` and `PYTHONPATH` pointed at each tree, rotates the arms
+each round, discards the warm-up, reports the median and the load, writes `shimab.json`, and exits
+1 when an arm is more than `THRESHOLD` (10%) slower than the first. `ROUNDS` sets the rounds (4 is
+enough to see a 2× and to reject one load outlier). A Rust change runs `binab` with the two builds
+instead. A change to the isolation ladder also runs `ladder_bench --python .tiderace-fx-venv/bin/python`,
+the ladder's cost per test, per tier, sync and async.
+
+The pass that reproduces the finding this was built for: `shimab main=origin/main fix=HEAD step3=f04026f anyio`
+showed main at 27 s, the step-3 shim at 13 s, and the fix at 15 s (TID-125).
+`ladder_bench` reproduces it on the synthetic async suite, whose fixture tests hand one call to
+`asyncio.to_thread` so the loop's executor leaves an idle pool behind: the ladder cost 3,219 µs
+per async test before the fix and 933 after (one worker: 9,298 → 1,932); sync was flat at ~620.
