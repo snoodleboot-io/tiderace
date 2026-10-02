@@ -12,5 +12,6 @@ the one request loop, and the children the shim forks — TID-122), `pytest_comp
 dialects as one `Mark`, folded once; the marker API `request.node` and a hook item share),
 `isolation.py` (what an in-process test may have disturbed, measured and put back — the
 snapshots, verdicts and restores behind the no-fork tiers) and `safe.py` (attribute access that
-treats any exception as absent) — TID-123. Phases 6d–6e carry on splitting `_shim.py` by concern.
+treats any exception as absent) and `plan.py` (what a node's run will execute, decided before
+anything is set up) — TID-123. Phases 6d–6e carry on splitting `_shim.py` by concern.
 """

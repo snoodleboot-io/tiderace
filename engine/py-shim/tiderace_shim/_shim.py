@@ -55,6 +55,7 @@ import warnings
 
 from .config import NOTSET as _NOTSET, ProjectConfig, load_project_config, option as _argv_option
 from .isolation import Isolation, _restorable
+from .plan import Plan
 from .pytest_compat import (MarkerBearer, fold as _fold_marks, normalise_all as _normalise_marks,
                             skip_reason as _mark_skip_reason)
 from .protocol import (EXIT_UNREPORTABLE as _EXIT_UNREPORTABLE, Transport, end_child,
@@ -2454,13 +2455,12 @@ class Engine:
         if guard is not None:
             guard.restore()
 
-    def run(self, node_id: str, style: str, deadline_ms: int, force_no_fork: bool = False,
-            trusted_pure: bool = False, recorded_must_fork: bool = False) -> dict:
-        # `force_no_fork`: run THIS test in-process (no fork). On a trivial test that is ~90× cheaper than a
-        # fork; on a real suite the win is smaller and depends on the parent's size (TID-18, TID-41).
-        # The caller asserts it's pure (purity guard); the guard re-checks and flags any escapee.
-        global _NODES_RUN
-        _NODES_RUN += 1
+    def _gate(self, node_id: str, style: str, deadline_ms: int, force_no_fork: bool,
+              trusted_pure: bool, recorded_must_fork: bool):
+        """What ends a run before anything is built — a ready response — or the node's mark names
+        and its node-level `-k` verdict, for `_plan`. In pytest's order: a directory a conftest
+        skipped or broke, an inherited class (dispatched whole), a fixture the collector took for
+        a test, the module's own import skip, `--strict-markers`, `-m`, `-k`."""
         module_key = _module_key(node_id)
         # Under a directory whose conftest skipped itself (TID-48): pytest never collects these, so
         # nothing about the node — its class, its marks, its module — may be touched.
@@ -2527,6 +2527,13 @@ class Engine:
         keyword_verdict = _keyword_verdict(node_id, names, final=False) if _KEYWORD_EXPR is not None else True
         if keyword_verdict is False:
             return empty_expansion(node_id, keywords=_keyword_names(node_id, names))
+        return names, keyword_verdict
+
+    def _plan(self, node_id: str, style: str, names: set, keyword_verdict) -> "Plan | dict":
+        """The node's plan — or the response that stands in for one: a collection failure, every
+        case deselected by `-k`, or a whole-node skip (one skipped variant per selected case, as
+        pytest collects a skip-marked parametrized test — TID-88)."""
+        module_key = _module_key(node_id)
         try:
             node = resolve_target(node_id, style)
             requested = self._requested(node)
@@ -2645,19 +2652,7 @@ class Engine:
             combo_id_maps = [{}]
             combo_pos_maps = [{}]
 
-        outcomes: list[tuple[str, str]] = []
-        coverage: dict[str, set] = {}  # union of touched lines across all variants of this node
-        impurity = None  # first impurity reason across variants (any impure ⇒ the node is impure)
-        node_pure = None  # tri-state across variants: None (unmeasured), True (all measured pure), False
-        node_must_fork = False  # any case disturbed interpreter state ⇒ fork the whole node (TID-33)
-        # `--strategy subprocess` runs in-process by configuration; there the restore is the remedy
-        # and there is nothing better to hand the node to.
-        force_no_fork_only = self.no_fork
-        # Per-variant results, reported alongside the aggregate (TID-25). Each case already gets its
-        # own `_fork_run`, so collapsing them to one outcome discarded results that had already been
-        # paid for — the tally lost the passes, and a node with several failures kept one detail.
         parametrized_node = bool(combos != [{}] or case_kwargs_list != [{}])
-        variants: list[dict] = []
         # Ids are computed for the WHOLE node up front: pytest indexes every member of a colliding
         # group, which cannot be decided while walking the variants one at a time.
         specs = [
@@ -2691,6 +2686,40 @@ class Engine:
                            variants=[variant(vid, Outcome.SKIPPED, skip_reason, 0,
                                              keywords=_keyword_names(vid, names))
                                      for i, vid in enumerate(variant_ids) if i in selected])
+        return Plan(node, names, marks, requested, fixture_requested, closure, indirect,
+                    case_kwargs_list, combos, combo_id_maps, parametrized_node, variant_ids, selected)
+
+    def run(self, node_id: str, style: str, deadline_ms: int, force_no_fork: bool = False,
+            trusted_pure: bool = False, recorded_must_fork: bool = False) -> dict:
+        # `force_no_fork`: run THIS test in-process (no fork). On a trivial test that is ~90× cheaper than a
+        # fork; on a real suite the win is smaller and depends on the parent's size (TID-18, TID-41).
+        # The caller asserts it's pure (purity guard); the guard re-checks and flags any escapee.
+        global _NODES_RUN
+        _NODES_RUN += 1
+        module_key = _module_key(node_id)
+        gate = self._gate(node_id, style, deadline_ms, force_no_fork, trusted_pure, recorded_must_fork)
+        if isinstance(gate, dict):
+            return gate
+        names, keyword_verdict = gate
+        plan = self._plan(node_id, style, names, keyword_verdict)
+        if isinstance(plan, dict):
+            return plan
+        node, marks, fixture_requested, closure, indirect = (
+            plan.node, plan.marks, plan.fixture_requested, plan.closure, plan.indirect)
+        case_kwargs_list, combos, combo_id_maps = plan.case_kwargs_list, plan.combos, plan.combo_id_maps
+        parametrized_node, variant_ids, selected = plan.parametrized_node, plan.variant_ids, plan.selected
+        variants: list[dict] = []
+        outcomes: list[tuple[str, str]] = []
+        coverage: dict[str, set] = {}  # union of touched lines across all variants of this node
+        impurity = None  # first impurity reason across variants (any impure ⇒ the node is impure)
+        node_pure = None  # tri-state across variants: None (unmeasured), True (all measured pure), False
+        node_must_fork = False  # any case disturbed interpreter state ⇒ fork the whole node (TID-33)
+        # `--strategy subprocess` runs in-process by configuration; there the restore is the remedy
+        # and there is nothing better to hand the node to.
+        force_no_fork_only = self.no_fork
+        # Per-variant results, reported alongside the aggregate (TID-25). Each case already gets its
+        # own `_fork_run`, so collapsing them to one outcome discarded results that had already been
+        # paid for — the tally lost the passes, and a node with several failures kept one detail.
         # Only now — after `-k` has chosen and a whole-node skip has returned — does the node's
         # *route* get decided (TID-99). It used to sit above the case expansion, so every node
         # `-k` was about to deselect first paid the restorability snapshot (a deepcopy of its
@@ -2744,7 +2773,7 @@ class Engine:
         if must_fork and _FORK_AVAILABLE and not self._in_module_child:
             return self._module_child_run(node_id, style, deadline_ms)
         variant_index = 0
-        per_combo = len(case_kwargs_list)
+        per_combo = plan.per_combo
         for combo, combo_ids in zip(combos, combo_id_maps):
             if not any(i in selected for i in range(variant_index, variant_index + per_combo)):
                 variant_index += per_combo  # nothing here survives `-k`: build none of its fixtures
