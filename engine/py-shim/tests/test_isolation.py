@@ -98,6 +98,27 @@ def test_a_thread_left_running_leaks_and_the_verdict_says_so():
     iso.restore()
 
 
+def test_a_library_pools_idle_worker_is_not_a_leak():
+    """anyio / trio / concurrent.futures keep a worker alive after a test used it — a cache, like a
+    lazy import (TID-125). A thread the test started itself still counts."""
+    stop = threading.Event()
+    pooled = lambda: stop.wait()  # noqa: E731
+    pooled.__module__ = "trio._core._thread_cache"
+    own = lambda: stop.wait()  # noqa: E731
+    own.__module__ = "test_iso_mod"
+    before = isolation._live_threads()
+    threads = [threading.Thread(target=pooled, daemon=True), threading.Thread(target=own, daemon=True)]
+    for t in threads:
+        t.start()
+    try:
+        assert isolation._live_threads() == before + 1
+        assert isolation._thread_home(threads[0]) == "trio" and isolation._thread_home(threads[1]) == "test_iso_mod"
+    finally:
+        stop.set()
+        for t in threads:
+            t.join()
+
+
 def test_restorable_refuses_an_opaque_global():
     assert isolation._restorable(module_with(x=[1, 2], y={"k": 1}))
     assert not isolation._restorable(module_with(gen=(i for i in range(3))))
