@@ -21,7 +21,7 @@ import tomllib
 from dataclasses import dataclass, field
 from typing import Any
 
-from .selection import path_names
+
 
 NOTSET = object()
 
@@ -267,9 +267,12 @@ class RunConfig:
         isolation on pirn-agents before this was understood."""
         return self.modules is None or rel in self.modules
 
-    def keyword_names(self, node_id: str, marks) -> list:
-        """What pytest's `-k` matches against: the names its path gives the node (TID-100), every
-        `::` segment — class, function, the function with its parametrize id — and the node's mark
-        names."""
-        parts = node_id.split("::")
-        return [*path_names(parts[0], self.abs_root, self.project.dir), *parts[1:], *sorted(marks)]
+
+def _env(name: str, default: str | None = None) -> str | None:
+    """A `TIDERACE_*` setting from the environment — the one place the shim reads it (TID-115)."""
+    return os.environ.get(name, default)
+
+
+def _env_flag(name: str) -> bool:
+    """A `TIDERACE_*` switch: set to `1`."""
+    return os.environ.get(name) == "1"

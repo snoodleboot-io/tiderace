@@ -12,6 +12,7 @@ import enum
 from typing import Any
 
 
+
 class Outcome(str, enum.Enum):
     """A test's outcome on the wire. `str` so a value compares to, and serialises as, its text."""
 
@@ -89,3 +90,31 @@ def purity_from(result: dict) -> Any:
     if result["pure"]:
         return None
     return result.get("impurity") or "impure"
+
+
+_IMPORT_HISTORY_NOTE = (
+    "\n(tiderace) this assertion reads import history — which tests ran earlier in this process, and "
+    "in what order, is not pytest's file order and is not promised to be; a test that depends on it "
+    "is order-dependent under pytest too. See the execution-model docs, \"What the engine does not "
+    "promise\"."
+)
+
+
+def _note_import_history(result: dict, nodes_run: int, *, pristine: bool = False) -> dict:
+    """Append a one-line explanation to a failure that reads `sys.modules` (TID-70).
+
+    The one pirn-agents divergence in the whole benchmark was `assert "chromadb" not in sys.modules`
+    — true only if no earlier test in the same process imported it. That is not a defect in the
+    runner; it is a test asserting on something no runner promises, and pytest's own `-p randomly`
+    breaks it the same way. But a bare `AssertionError` against a runner the author has just
+    switched to reads as the runner's bug, so the failure now says what it depends on. Only when the
+    dependence is real: this process ran other tests before this one, or it is the clean room's
+    re-run of a demoted test, where the image is pristine and nothing was ever imported."""
+    if not pristine and nodes_run <= 1:
+        return result
+    for record in [result, *result.get("variants", ())]:
+        detail = record.get("detail") or ""
+        if record.get("outcome") in ("failed", "error") and "sys.modules" in detail \
+                and _IMPORT_HISTORY_NOTE not in detail:
+            record["detail"] = detail + _IMPORT_HISTORY_NOTE
+    return result

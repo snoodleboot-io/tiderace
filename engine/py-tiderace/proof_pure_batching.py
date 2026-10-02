@@ -21,7 +21,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, os.pardir, "py-shim"))
 
-import shim  # noqa: E402
+from tiderace_shim import config as _cfg, discovery as _disc, engine as _eng, modes as _modes  # noqa: E402,F401
 
 N = 200
 
@@ -34,11 +34,11 @@ def main() -> int:
         with open(os.path.join(root, "test_pure.py"), "w") as f:
             f.write(body)
         sys.path.insert(0, root)
-        run = shim.RunConfig.load(root)
-        shim._preimport(run)
-        disc = shim._discover(run)
+        run = _cfg.RunConfig.load(root)
+        _disc.preimport(run)
+        disc = _disc.discover(run)
         reg = disc.registry
-        engine = shim.Engine(disc, run, no_fork=False, purity_guard=True)
+        engine = _eng.Engine(disc, run, no_fork=False, purity_guard=True)
 
         nodes = [f"test_pure.py::test_{i}" for i in range(N)]
 

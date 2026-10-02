@@ -1,25 +1,27 @@
-"""The tiderace shim as a package (TID-116, option B).
+"""The tiderace shim as a package (TID-116, option B; the layout of TID-124).
 
-`_shim.py` is the execution substrate — the only Python the engine ships — and `main()` in it is
-the argv dispatch (`--probe`, `--subinterp`, else serve). The engine launches it through the
-entry file beside this package (`py-shim/shim.py`; `tiderace/_shim/shim.py` once installed), so
-`TIDERACE_SHIM` and `engine_core::default_shim` keep pointing at one file.
+The only Python the engine ships. The engine launches it through the entry file beside this
+package (`py-shim/shim.py`; `tiderace/_shim/shim.py` once installed), so `TIDERACE_SHIM` and
+`engine_core::default_shim` keep pointing at one file; `main()` in `modes.py` is the argv dispatch
+(`--probe`, `--subinterp`, else serve).
 
-The foundations the rest builds on (TID-121): `results.py` (the result frames, spelled once),
-`nodes.py` (what a node id names, resolved once into a `Target`; the module-name rule) and
-`config.py` (the project's pytest configuration, loaded once), and `protocol.py` (the frames,
-the one request loop, and the children the shim forks — TID-122), `pytest_compat.py` (both mark
-dialects as one `Mark`, folded once; the marker API `request.node` and a hook item share),
-`isolation.py` (what an in-process test may have disturbed, measured and put back — the
-snapshots, verdicts and restores behind the no-fork tiers) and `safe.py` (attribute access that
-treats any exception as absent), `plan.py` (what a node's run will execute, decided before
-anything is set up) and `tiers.py` (the isolation ladder's tiers: the one place the tier is chosen,
-and the node's response assembled from its variants) — TID-123. Phase 6e (TID-124) retires the
-shim's globals: `config.py`'s `RunConfig` is the run (root, project, ignores, the `--modules`
-set), `selection.py` what it selects (`-k`, `-m`, `--strict-markers`, the declared marks),
-`discovery.py`'s `Discovery` what discovery produced (the registry, the conftests, their options
-and ini declarations, the hooks' skips, the skipped and broken directories), `ProcessState` what
-the worker has done so far and `Caches` its memos, all on the engine; the node resolver takes the
-run root as a parameter; `invoke.py` calls a test once for sync and async (the sync tier drives
-the async implementation without a loop); `log.py` is the one line to stderr.
+Top to bottom — nothing imports upward, and `tests/test_layout.py` checks it:
+
+- `modes.py` — what the shim does when launched: the worker loop, alone or as a pool forked from
+  one imported image; the sub-interpreter probe and pool.
+- `engine.py` — one `Engine` per worker process: `run()` is gate → plan → route → execute →
+  assemble; the module child for an opaque module and the clean room for a demoted test.
+- `plan.py` (what a node's run will execute: its cases and ids, decided before anything is set
+  up), `tiers.py` (the isolation ladder's tiers, chosen once; the in-process deadline),
+  `discovery.py` (what the suite defines: the registry and everything the walk learned).
+- `invoke.py` (calling a test, written once for sync and async), `isolation.py` (what an
+  in-process test may have disturbed, measured and put back), `footprint.py` (what a test
+  touches: coverage, import closures, the process's memos), `fixtures.py` (the fixture model and
+  the registry), `selection.py` (`-k`, `-m`, `--strict-markers`), `pytest_compat.py` (both mark
+  dialects as one `Mark`; `request.node` and a hook item).
+- `config.py` (the project's pytest configuration and the run's), `nodes.py` (what a node id
+  names, resolved under the run root), `results.py` (the result frames, spelled once),
+  `protocol.py` (the frames, the one request loop, the children the shim forks).
+- `safe.py` (attribute access that treats any exception as absent), `log.py` (the one line to
+  stderr).
 """

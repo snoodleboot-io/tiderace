@@ -230,7 +230,7 @@ shape of each tier's overhead, not what a suite will see, and both halves of the
 Key properties:
 
 - **Sound by construction.** No-fork + restore *contains* mutation rather than predicting it; a
-  non-restorable module always falls back to fork (`shim._restorable()`). So correctness never depends on
+  non-restorable module always falls back to fork (`isolation._restorable()`). So correctness never depends on
   the purity verdict — the verdict is only an optimization (lets a known-pure test skip the snapshot).
 - **No learning pass.** Restore works on the very first run; the **purity guard** records verdicts as a
   free side effect of running, so subsequent runs can promote pure tests to the bare tier.
@@ -408,7 +408,7 @@ The authoritative rationale lives in `planning/current/pure-rust-test-engine/des
 | Scheduling | `engine-core/src/scheduler/locality_scheduler.rs` |
 | The fork model | `engine-core/src/exec/tiers/fork.rs`, `tiers/pool.rs`, `process/shim_process.rs` |
 | The transport seam | `engine-core/src/exec/transport.rs`, `shim_protocol.rs` |
-| The isolation ladder | `py-shim/tiderace_shim/_shim.py` (`static_impurity`, `_restorable`, `_restore_shared`, `Engine.run`) |
+| The isolation ladder | `py-shim/tiderace_shim/` — `footprint.static_impurity`, `isolation._restorable` / `Isolation`, `tiers.route` |
 | Impact-skip | `engine-daemon/src/state/plan.rs`, `impacted_run.rs` |
 | The cache | `engine-core/src/cache/` (`cache_key.rs`, `tiered_cache.rs`, `purity.rs`) |
 | Parallel pool | `engine-core/src/runner/run.rs`, `exec/tier.rs`, `exec/tiers/` |

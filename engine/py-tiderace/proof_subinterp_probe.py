@@ -14,7 +14,7 @@ import tempfile
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, os.pardir, "py-shim"))
 
-import shim  # noqa: E402
+from tiderace_shim import config as _cfg, discovery as _disc, engine as _eng, modes as _modes  # noqa: E402,F401
 
 
 def main() -> int:
@@ -28,7 +28,7 @@ def main() -> int:
         )
         paths = [root] + list(sys.path)
 
-        pure = shim._probe_module_safe(root, "test_pure.py", paths)
+        pure = _modes._probe_module_safe(root, "test_pure.py", paths)
         print(f"    pure module   → {pure}")
 
         if pure.get("safe") is None:
@@ -40,7 +40,7 @@ def main() -> int:
         # The unsafe case needs numpy present to import; test it only when available.
         try:
             import numpy  # noqa: F401
-            np = shim._probe_module_safe(root, "test_np.py", paths)
+            np = _modes._probe_module_safe(root, "test_np.py", paths)
             print(f"    numpy module  → {np}")
             checks.append(("numpy module is unsafe", np.get("safe") is False))
             checks.append(("reason names subinterpreters", "subinterp" in (np.get("reason") or "").lower()))

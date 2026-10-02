@@ -12,7 +12,7 @@ import types
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
-from tiderace_shim import _shim, discovery  # noqa: E402
+from tiderace_shim import discovery, engine  # noqa: E402
 from tiderace_shim.config import RunConfig  # noqa: E402
 from tiderace_shim.discovery import Discovery, dir_mark  # noqa: E402
 
@@ -75,7 +75,7 @@ def test_a_real_discovery_records_what_the_gate_and_the_config_read(tmp_path, mo
     importlib.invalidate_caches()
     try:
         run = RunConfig.load(root)
-        disc = _shim._discover(run)
+        disc = discovery.discover(run)
     finally:
         for name in ("test_disc_a", "test_disc_b", "_fx_conftest_root", "_fx_conftest_sub"):
             sys.modules.pop(name, None)
@@ -86,8 +86,8 @@ def test_a_real_discovery_records_what_the_gate_and_the_config_read(tmp_path, mo
     assert [loc for loc, _ in disc.conftest_scopes] == [""]  # sub's conftest skipped itself: not a scope
     assert disc.ancestors == [] and disc.dir_errors == {} and disc.hook_marks == {}
     assert "widget" in disc.registry.by_name
-    config = _shim._Config(run, disc)
+    config = discovery._Config(run, disc)
     assert config.getoption("--real") is False and config.getini("db_url") == "sqlite://"
     assert config.getini("nobody_declared") is None
-    engine = _shim.Engine(disc, run, no_fork=True)
-    assert engine.reg is disc.registry and engine.discovery is disc
+    eng = engine.Engine(disc, run, no_fork=True)
+    assert eng.reg is disc.registry and eng.discovery is disc

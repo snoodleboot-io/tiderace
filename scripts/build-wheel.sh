@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SHIM_SRC_DIR="$ROOT/engine/py-shim"
 SHIM_DST_DIR="$ROOT/engine/py-tiderace/tiderace/_shim"
 [ -f "$SHIM_SRC_DIR/shim.py" ] || { echo "error: canonical shim entry not found at $SHIM_SRC_DIR/shim.py" >&2; exit 1; }
-[ -f "$SHIM_SRC_DIR/tiderace_shim/_shim.py" ] || { echo "error: shim package not found at $SHIM_SRC_DIR/tiderace_shim" >&2; exit 1; }
+[ -f "$SHIM_SRC_DIR/tiderace_shim/modes.py" ] || { echo "error: shim package not found at $SHIM_SRC_DIR/tiderace_shim" >&2; exit 1; }
 mkdir -p "$SHIM_DST_DIR"
 rm -rf "$SHIM_DST_DIR/tiderace_shim"
 cp "$SHIM_SRC_DIR/shim.py" "$SHIM_DST_DIR/shim.py"

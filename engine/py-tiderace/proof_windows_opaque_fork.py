@@ -32,7 +32,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "py-shim"))
-import shim  # noqa: E402
+from tiderace_shim import config as _cfg, discovery as _disc, engine as _eng, modes as _modes  # noqa: E402,F401
 
 # An *opaque* module: a generator global that deepcopy can't reproduce, so `_restorable()` is False.
 # `test_a` advances it; `test_b` detects whether that advance leaked.
@@ -67,8 +67,8 @@ def run(root: str, node: str, *, no_fork: bool, force: bool) -> tuple[str, str]:
     for m in ("test_opaque", "test_pure"):
         sys.modules.pop(m, None)
     importlib.invalidate_caches()
-    run = shim.RunConfig.load(root)
-    eng = shim.Engine(shim._discover(run), run, no_fork=no_fork, restore=True)
+    run = _cfg.RunConfig.load(root)
+    eng = _eng.Engine(_disc.discover(run), run, no_fork=no_fork, restore=True)
     r = eng.run(node, "Function", 5000, force_no_fork=force)
     return r.get("outcome", "?"), r.get("detail", "")
 
@@ -99,7 +99,7 @@ def main() -> int:
     else:
         del os.fork
     # `_FORK_AVAILABLE` is computed at import; re-evaluate it for the simulation.
-    shim._FORK_AVAILABLE = hasattr(os, "fork")
+    _eng._FORK_AVAILABLE = hasattr(os, "fork")
     try:
         # ---- 2. WITHOUT fork, optimistic path: must not raise; must refuse ----
         print("\n[2] without fork, optimistic no-fork — refuses instead of crashing")
@@ -125,7 +125,7 @@ def main() -> int:
     finally:
         if saved is not None:
             os.fork = saved
-        shim._FORK_AVAILABLE = hasattr(os, "fork")
+        _eng._FORK_AVAILABLE = hasattr(os, "fork")
 
     print()
     if failures:

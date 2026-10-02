@@ -22,7 +22,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)  # the `tiderace` package (so the shim can `import tiderace.builtins`)
 sys.path.insert(0, os.path.join(_HERE, os.pardir, "py-shim"))  # `shim`
 
-import shim  # noqa: E402
+from tiderace_shim import config as _cfg, discovery as _disc, engine as _eng, modes as _modes  # noqa: E402,F401
 
 # TID-111: a builtin is registered by its decorator alone — `providers()` and `__all__` follow.
 import tiderace.builtins as _builtins  # noqa: E402
@@ -90,9 +90,9 @@ def main() -> int:
             f.write(CORPUS)
 
         sys.path.insert(0, root)
-        run = shim.RunConfig.load(root)
-        shim._preimport(run)
-        disc = shim._discover(run)
+        run = _cfg.RunConfig.load(root)
+        _disc.preimport(run)
+        disc = _disc.discover(run)
         reg = disc.registry
 
         builtin_names = sorted(n for n in reg.by_name if n in {"monkeypatch", "tmp_path", "capsys", "capfd"})
@@ -102,7 +102,7 @@ def main() -> int:
               f"{{ {', '.join(f'{t}->{by_type[t]}' for t in sorted(by_type) if t in {'MonkeyPatch','TmpPath','Capsys','Capfd'})} }}")
         registered_ok = builtin_names == ["capfd", "capsys", "monkeypatch", "tmp_path"]
 
-        engine = shim.Engine(disc, run, no_fork=True)
+        engine = _eng.Engine(disc, run, no_fork=True)
         order = [
             ("test_mp_mutates", "passed"),
             ("test_mp_restored", "passed"),

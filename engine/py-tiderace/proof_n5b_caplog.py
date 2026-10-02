@@ -32,7 +32,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)  # the `tiderace` package (so the shim can `import tiderace.builtins`)
 sys.path.insert(0, os.path.join(_HERE, os.pardir, "py-shim"))  # `shim`
 
-import shim  # noqa: E402
+from tiderace_shim import config as _cfg, discovery as _disc, engine as _eng, modes as _modes  # noqa: E402,F401
 
 CORPUS = textwrap.dedent(
     '''
@@ -95,9 +95,9 @@ def main() -> int:
             f.write(CORPUS)
 
         sys.path.insert(0, root)
-        run = shim.RunConfig.load(root)
-        shim._preimport(run)
-        disc = shim._discover(run)
+        run = _cfg.RunConfig.load(root)
+        _disc.preimport(run)
+        disc = _disc.discover(run)
         reg = disc.registry
 
         registered_ok = "caplog" in reg.by_name
@@ -108,7 +108,7 @@ def main() -> int:
 
         # `no_fork=True`: teardown effects have to be observable in THIS process for the
         # restore/cleanup assertions to mean anything.
-        engine = shim.Engine(disc, run, no_fork=True)
+        engine = _eng.Engine(disc, run, no_fork=True)
         order = [
             "test_records_are_captured",
             "test_record_message_is_populated",

@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping
 from .log import warn
 
 if TYPE_CHECKING:
-    from .config import ProjectConfig
+    from .config import ProjectConfig, RunConfig
 
 # pytest's identifier class for `-m` / `-k`: a keyword may be a parametrize id, `test_x[1-a]`.
 IDENT = re.compile(r"[\w.:+\-\[\]\\/]+")
@@ -195,6 +195,14 @@ def path_names(module_key: str, root: str, rootdir: str) -> tuple:
     if len(parts) > 1 and os.path.exists(os.path.join(os.path.dirname(module_path), "__init__.py")):
         return (parts[-2], parts[-1])
     return ("/".join(parts),)
+
+
+def keyword_names(run: RunConfig, node_id: str, marks) -> list:
+    """What pytest's `-k` matches against: the names its path gives the node under the run's
+    rootdir (TID-100), every `::` segment — class, function, the function with its parametrize
+    id — and the node's mark names."""
+    parts = node_id.split("::")
+    return [*path_names(parts[0], run.abs_root, run.project.dir), *parts[1:], *sorted(marks)]
 
 
 # ------------------------------------------------------------------------------ declared marks
