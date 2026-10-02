@@ -18,6 +18,7 @@ and the node's response assembled from its variants) — TID-123. Phase 6e (TID-
 shim's globals: `config.py`'s `RunConfig` is the run (root, project, ignores, the `--modules`
 set), `selection.py` what it selects (`-k`, `-m`, `--strict-markers`, the declared marks),
 `discovery.py`'s `Discovery` what discovery produced (the registry, the conftests, their options
-and ini declarations, the hooks' skips, the skipped and broken directories), all on the engine;
-`log.py` is the one line to stderr.
+and ini declarations, the hooks' skips, the skipped and broken directories), `ProcessState` what
+the worker has done so far and `Caches` its memos, all on the engine; the node resolver takes the
+run root as a parameter; `log.py` is the one line to stderr.
 """

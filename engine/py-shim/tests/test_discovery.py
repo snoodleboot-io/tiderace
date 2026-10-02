@@ -12,7 +12,7 @@ import types
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
-from tiderace_shim import _shim, discovery, nodes  # noqa: E402
+from tiderace_shim import _shim, discovery  # noqa: E402
 from tiderace_shim.config import RunConfig  # noqa: E402
 from tiderace_shim.discovery import Discovery, dir_mark  # noqa: E402
 
@@ -73,12 +73,10 @@ def test_a_real_discovery_records_what_the_gate_and_the_config_read(tmp_path, mo
     root = str(tmp_path)
     monkeypatch.syspath_prepend(root)
     importlib.invalidate_caches()
-    nodes.set_run_root(root)
     try:
         run = RunConfig.load(root)
         disc = _shim._discover(run)
     finally:
-        nodes.set_run_root("")
         for name in ("test_disc_a", "test_disc_b", "_fx_conftest_root", "_fx_conftest_sub"):
             sys.modules.pop(name, None)
     assert disc.cli_options["real"] is False  # (plus whatever installed plugins declare, TID-87)

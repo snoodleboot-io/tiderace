@@ -120,7 +120,10 @@ the `--modules` set — loaded once and handed to discovery and the engine, wher
 used to carry each piece; `discovery.py`'s `Discovery` is what discovery produced — the registry,
 the conftests and the directory each governs, their options and ini declarations, the collection
 hooks' skips, the directories a conftest skipped or broke — on the engine and `request.config`;
-`log.py` is the one line to stderr — TID-124). The engine launches the entry, `TIDERACE_SHIM` points
+`ProcessState` (the current node, the nodes run, the xunit setups, the clean room) and `Caches`
+(the per-process memos: watched packages, import closures, file dependencies) are the engine's,
+the node resolver takes the run root as a parameter and its name derivation no longer touches
+`sys.path`; `log.py` is the one line to stderr — TID-124). The engine launches the entry, `TIDERACE_SHIM` points
 at it, and the wheel stages both into `tiderace/_shim/`. The only logic that runs inside CPython. Imports user code, invokes test bodies, and implements the
 **isolation ladder**: `static_impurity` (AST pre-filter), `_restorable` (can this module be snapshot
 + restored?), `_restore_shared` (snapshot/undo of module globals + `os.environ`), and `Engine.run`

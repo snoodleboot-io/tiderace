@@ -84,22 +84,22 @@ def test_a_target_resolves_the_chain(tmp_path, monkeypatch):
                 pass
     '''))
     monkeypatch.chdir(tmp_path)
-    nodes.set_run_root(str(tmp_path))
+    root = str(tmp_path)
     nodes._module_name_walk.cache_clear()
-    t = nodes.resolve_target("test_t.py::test_plain", "function")
+    t = nodes.resolve_target("test_t.py::test_plain", "function", root)
     assert (t.module_key, t.name, t.cls, t.is_unittest, t.is_async) == ("test_t.py", "test_plain", None, False, False)
     assert t.owners == (t.module, t.func)
-    assert nodes.resolve_target("test_t.py::test_coro", "function").is_async
-    k = nodes.resolve_target("test_t.py::TestK::test_m", "class_method")
+    assert nodes.resolve_target("test_t.py::test_coro", "function", root).is_async
+    k = nodes.resolve_target("test_t.py::TestK::test_m", "class_method", root)
     assert k.cls.__name__ == "TestK" and k.name == "test_m" and not k.is_unittest
     assert k.owners == (k.module, k.cls, k.func)
     # A unittest class the collector labelled as a pytest class: the live class says otherwise,
     # and its coroutines are its own to drive (TID-51).
-    u = nodes.resolve_target("test_t.py::TestU::test_async", "class_method")
+    u = nodes.resolve_target("test_t.py::TestU::test_async", "class_method", root)
     assert u.is_unittest and not u.is_async
     with pytest.raises(AttributeError):
-        nodes.resolve_target("test_t.py::TestK::nope", "class_method")
-    lenient = nodes.resolve_target("test_t.py::Gone::nope", "class_method", lenient=True)
+        nodes.resolve_target("test_t.py::TestK::nope", "class_method", root)
+    lenient = nodes.resolve_target("test_t.py::Gone::nope", "class_method", root, lenient=True)
     assert lenient.cls is None and lenient.func is None and lenient.owners == (lenient.module,)
 
 

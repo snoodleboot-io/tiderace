@@ -51,6 +51,7 @@ import threading
 import time
 import traceback
 import typing
+from typing import Any
 import unittest
 import warnings
 
@@ -69,8 +70,7 @@ from .protocol import (EXIT_UNREPORTABLE as _EXIT_UNREPORTABLE, Transport, end_c
                        read_frame_by as _read_frame_by, reap, run_child, spawn,
                        write_frame as _write_frame)
 from .nodes import (Target, class_method as _class_method, import_module as _import_module,
-                    module_key as _module_key, module_name as _module_name, resolve_target,
-                    set_run_root)
+                    module_key as _module_key, module_name as _module_name, resolve_target)
 from .safe import MISSING as _MISSING, safe_getattr as _safe_getattr, safe_hasattr as _safe_hasattr
 from .results import (UNKNOWN_PURITY as _UNKNOWN_PURITY, Outcome, empty_expansion, errored,
                       expansion, purity_from, response, skipped, variant, with_purity)
@@ -294,20 +294,42 @@ def _run_finalizers(finalizers: list) -> None:
             pass
 
 
-_CURRENT_NODE = None  # the node the worker is running right now; fixtures and the test share it
+@dataclasses.dataclass
+class XunitState:
+    """The xunit setups this process has run (TID-60, TID-64): `done` holds `(kind, qualified
+    name)` of every module / class setup, `classes` the class objects whose teardown runs at
+    worker end, `failed` the `(outcome, detail)` of a class whose own setup did not complete — a
+    `setUpClass` that skips or raises decides the outcome of EVERY method in the class, not only
+    the one that happened to trigger it, which is what once-per-class means when the first attempt
+    fails. A forked child inherits all of it, so a class the parent set up is not set up again."""
+
+    done: set = dataclasses.field(default_factory=set)
+    classes: dict = dataclasses.field(default_factory=dict)
+    failed: dict = dataclasses.field(default_factory=dict)
 
 
-def _node_for(node_id: str, func=None, instance=None):
-    """The node object for `node_id`, reused for the whole test.
+@dataclasses.dataclass
+class ProcessState:
+    """What this worker process has done so far and holds (TID-124): the node it is running right
+    now — fixtures and the test share one object, so a marker a *fixture* attaches and one the
+    *test* attaches land in the same place, and the executor reads both when folding runtime
+    markers into the outcome; how many nodes it has run — whether a test here has neighbours
+    (TID-70); the xunit setups it has run; and the socket to its clean room, the pristine helper
+    that re-runs demoted tests (TID-50), `None` until started and in every process forked before."""
 
-    One object, so a marker a *fixture* attaches and one the *test* attaches land in the same place —
-    and so the executor can read both when folding runtime markers into the outcome."""
-    global _CURRENT_NODE
-    if _CURRENT_NODE is None or _CURRENT_NODE.nodeid != node_id:
-        _CURRENT_NODE = _Node(node_id, func, instance)
-    elif func is not None and _CURRENT_NODE.function is None:
-        _CURRENT_NODE.function = func
-    return _CURRENT_NODE
+    current_node: Any = None
+    nodes_run: int = 0
+    xunit: XunitState = dataclasses.field(default_factory=XunitState)
+    clean_room: Any = None
+
+    def node_for(self, node_id: str, func=None, instance=None):
+        """The node object for `node_id`, reused for the whole test."""
+        node = self.current_node
+        if node is None or node.nodeid != node_id:
+            node = self.current_node = _Node(node_id, func, instance)
+        elif func is not None and node.function is None:
+            node.function = func
+        return node
 
 
 class _Node(MarkerBearer):
@@ -611,9 +633,9 @@ class _TestRequest:
 
     __slots__ = ("config", "node", "function", "cls", "instance", "param", "fixturenames", "_finalizers")
 
-    def __init__(self, node_id: str, func, config: _Config, instance=None):
+    def __init__(self, node_id: str, func, config: _Config, state: ProcessState, instance=None):
         self.config = config
-        self.node = _node_for(node_id, func, instance)
+        self.node = state.node_for(node_id, func, instance)
         self.function = func
         self.instance = instance
         self.cls = type(instance) if instance is not None else None
@@ -627,7 +649,8 @@ class _TestRequest:
         self._finalizers.append(fn)
 
 
-def _with_request(func, args: dict, node_id: str, config: _Config, instance=None) -> tuple:
+def _with_request(func, args: dict, node_id: str, config: _Config, state: ProcessState,
+                  instance=None) -> tuple:
     """Add a `request` argument when the test asks for one (TID-14).
 
     `_bind_by_type` deliberately skips the name `request`, so it never resolves as a provider and
@@ -636,7 +659,7 @@ def _with_request(func, args: dict, node_id: str, config: _Config, instance=None
     only the call site has."""
     if "request" in args or "request" not in inspect.signature(func).parameters:
         return args, None
-    request = _TestRequest(node_id, func, config, instance)
+    request = _TestRequest(node_id, func, config, state, instance)
     return {**args, "request": request}, request
 
 
@@ -995,9 +1018,8 @@ def _discover(run: RunConfig, disc: Discovery | None = None, *,
                     if timer is not None:
                         timer.unselected += 1
                     continue  # this run will not execute it (TID-75)
-                rel = _module_name(location)
                 try:
-                    module = importlib.import_module(rel)
+                    module = _import_module(location, root)
                 except (Exception, *_SKIP_EXCEPTIONS):  # noqa: BLE001 — surfaces per-test, not at discovery
                     continue
                 test_modules.append((module, location))
@@ -1346,10 +1368,11 @@ def _instance_key(fdef: FixtureDef, node_id: str):
     return ("function", fdef.name, node_id)
 
 
-def _setup_fixture(fdef: FixtureDef, args: dict, param):
-    """Run a fixture body up to its first yield (or to completion). Returns (value, handle)."""
+def _setup_fixture(fdef: FixtureDef, args: dict, param, node):
+    """Run a fixture body up to its first yield (or to completion). Returns (value, handle).
+    `node` is the test's `request.node`, shared with the test (TID-51)."""
     call_args = dict(args)
-    request = _Request(param, _CURRENT_NODE) if fdef.wants_request else None
+    request = _Request(param, node) if fdef.wants_request else None
     if request is not None:
         call_args["request"] = request
     if fdef.is_yield:
@@ -1390,11 +1413,11 @@ def _is_async_fixture(func) -> bool:
     return inspect.iscoroutinefunction(func) or inspect.isasyncgenfunction(func)
 
 
-async def _setup_fixture_async(fdef: FixtureDef, args: dict, param):
+async def _setup_fixture_async(fdef: FixtureDef, args: dict, param, node):
     """Async-aware setup: drives sync *and* async providers up to their first (a)yield. Returns
     `(value, handle)` where handle is `None` | `("gen", g)` | `("agen", ag)` for teardown."""
     call_args = dict(args)
-    request = _Request(param, _CURRENT_NODE) if fdef.wants_request else None
+    request = _Request(param, node) if fdef.wants_request else None
     if request is not None:
         call_args["request"] = request
     if inspect.isasyncgenfunction(fdef.func):
@@ -1536,10 +1559,27 @@ def _child_fault_detail(exc: BaseException) -> str:
 # and pytest is large: including it made the scan below cost 7ms, more than the tests it wraps.
 _UNWATCHED_PACKAGES = frozenset({"pytest", "_pytest", "py", "tiderace", "unittest", "hypothesis"})
 
-_WATCHED_PACKAGES: dict = {}  # module key -> the third-party packages its imports reach
+@dataclasses.dataclass
+class Caches:
+    """The per-process memos (TID-124), built lazily and inherited by every forked child: the
+    third-party packages each test module imports (TID-46); the registry targets found in them
+    (TID-68); each module's static import closure, `module_key -> {rel_path, …}` (TID-40); per
+    source file the in-tree files it imports (TID-76), and the same carried across runs (TID-82) —
+    `path -> [mtime_ns, size, sys.path hash, deps]`, loaded by the pool parent before it forks and
+    extended by every worker at teardown, an entry used only when the file is unchanged and the
+    import roots are the ones it was resolved under; and the resolution of each dotted import."""
+
+    watched_packages: dict = dataclasses.field(default_factory=dict)  # module key -> packages
+    registry_targets: dict = dataclasses.field(default_factory=dict)  # module key -> (…, targets)
+    import_closure: dict = dataclasses.field(default_factory=dict)  # module key -> frozenset
+    file_deps: dict = dataclasses.field(default_factory=dict)  # source file -> in-tree imports
+    file_deps_cache: dict = dataclasses.field(default_factory=dict)  # earlier runs' entries
+    file_deps_new: dict = dataclasses.field(default_factory=dict)  # this process's, written at teardown
+    file_deps_stats: dict = dataclasses.field(default_factory=lambda: {"hits": 0, "parsed": 0})
+    resolved: dict = dataclasses.field(default_factory=dict)  # (dotted, level, importing dir) -> file
 
 
-def _watched_packages(root: str, module_key: str) -> tuple:
+def _watched_packages(caches: Caches, root: str, module_key: str) -> tuple:
     """Top-level **non-stdlib** packages a test module imports, for registry watching (TID-46).
 
     Scoped deliberately. Watching every module in `sys.modules` would cost more than the tests do,
@@ -1547,7 +1587,7 @@ def _watched_packages(root: str, module_key: str) -> tuple:
     module-level dict that grows the first time anything compiles a pattern, which is not a leak.
     A library the *test file itself* imports is where a registry mutation can plausibly come from —
     click's `_available_shells`, a codec or plugin table, a framework's app registry."""
-    cached = _WATCHED_PACKAGES.get(module_key)
+    cached = caches.watched_packages.get(module_key)
     if cached is not None:
         return cached
     roots: set = set()
@@ -1559,7 +1599,7 @@ def _watched_packages(root: str, module_key: str) -> tuple:
         if root and root not in sys.stdlib_module_names and root not in _UNWATCHED_PACKAGES:
             roots.add(root)
     result = tuple(sorted(roots))
-    _WATCHED_PACKAGES[module_key] = result
+    caches.watched_packages[module_key] = result
     return result
 
 
@@ -1592,37 +1632,39 @@ def _drive_async(make_coro, backend=None, *, force_asyncio: bool = False):
         return anyio.run(make_coro, backend=name)
 
 
-def _test_is_async(node_id: str, style: str) -> bool:
+def _test_is_async(node_id: str, style: str, root: str) -> bool:
     """Whether the test body is `async def` **and** tiderace is the thing that must await it.
 
     A `unittest` class drives its own coroutines — `IsolatedAsyncioTestCase.run()` builds the loop and
     calls `asyncSetUp` around the body — so those are never async-driven from here, however the
     collector labelled them."""
-    return resolve_target(node_id, style, lenient=True).is_async
+    return resolve_target(node_id, style, root, lenient=True).is_async
 
 
-async def _invoke_async(node_id: str, style: str, args: dict, config: _Config) -> tuple[str, str]:
+async def _invoke_async(node_id: str, style: str, args: dict, config: _Config,
+                        state: ProcessState) -> tuple[str, str]:
     """The async sibling of `_invoke`, with the same runtime-marker fold (TID-51)."""
-    outcome, detail = await _invoke_async_body(node_id, style, args, config)
-    return _runtime_outcome(_CURRENT_NODE, outcome, detail)
+    outcome, detail = await _invoke_async_body(node_id, style, args, config, state)
+    return _runtime_outcome(state.current_node, outcome, detail)
 
 
-async def _invoke_async_body(node_id: str, style: str, args: dict, config: _Config) -> tuple[str, str]:
+async def _invoke_async_body(node_id: str, style: str, args: dict, config: _Config,
+                             state: ProcessState) -> tuple[str, str]:
     """The async sibling of `_invoke`: call the test, `await` it if it's a coroutine, and map the same
     outcomes (incl. lazy RichDiff on `AssertionError`). Runs inside the per-test event loop, so it must
     `await` directly — never `asyncio.run` (which can't nest)."""
-    node = resolve_target(node_id, style)
+    node = resolve_target(node_id, style, config.run.root)
     module = node.module
     try:
         if style == "class_method":
-            _xunit_class_setup(node.cls)
+            _xunit_class_setup(state.xunit, node.cls)
             instance = node.cls()
             bound = getattr(instance, node.name)
             target = bound
-            call_args, request = _with_request(bound, args, node_id, config, instance)
+            call_args, request = _with_request(bound, args, node_id, config, state, instance)
         else:
             target = node.func
-            call_args, request = _with_request(target, args, node_id, config)
+            call_args, request = _with_request(target, args, node_id, config, state)
         hooks = _xunit_test_hooks(module, style, node_id, target)
         try:
             _call_hook(*hooks[0]) if hooks[0] else None
@@ -1652,17 +1694,6 @@ async def _invoke_async_body(node_id: str, style: str, args: dict, config: _Conf
         return "failed", "".join(traceback.format_exception_only(type(exc), exc))
 
 
-# Per-module static import closure: module_key -> {rel_path, …} (TID-40). Built lazily, memoised for
-# the process, and inherited by every forked child.
-_IMPORT_CLOSURE: dict[str, frozenset] = {}
-_FILE_DEPS: dict[str, tuple[str, ...]] = {}  # per source file: the in-tree files it imports (TID-76)
-# The same, carried across runs (TID-82): `path -> [mtime_ns, size, sys.path hash, deps]`, loaded by
-# the pool parent before it forks and extended by every worker at teardown. An entry is used only
-# when the file is unchanged and the import roots are the ones it was resolved under.
-_FILE_DEPS_CACHE: dict[str, list] = {}
-_FILE_DEPS_NEW: dict[str, list] = {}  # what this process computed, to be written at teardown
-_FILE_DEPS_STATS = {"hits": 0, "parsed": 0}
-_RESOLVED: dict[tuple, str | None] = {}  # (dotted, level, importing dir) → file, memoised (TID-76)
 # An import statement starts a line, or follows `;` or a compound statement's `:` on one. `yield from`
 # and `from_x = ...` do not match. What this finds is parsed as a statement, so names are exact.
 _IMPORT_STMT = re.compile(r"(?:^|[;:])[ \t]*(import|from)[ \t]")
@@ -1752,7 +1783,7 @@ def _import_names_in(nodes) -> list[tuple[str, int]]:
     return out
 
 
-def _resolve_module_file(dotted: str, level: int, from_file: str, root: str) -> str | None:
+def _resolve_module_file(caches: Caches, dotted: str, level: int, from_file: str, root: str) -> str | None:
     """The file a dotted import resolves to **inside the suite**, or None if it is external.
 
     Third-party and stdlib imports are deliberately dropped: a footprint exists to answer "did
@@ -1762,9 +1793,9 @@ def _resolve_module_file(dotted: str, level: int, from_file: str, root: str) -> 
     Memoised on (name, level, importing directory): the same `import os` or `from pirn.x import y`
     appears in hundreds of files, and each resolution probes every `sys.path` entry (TID-76)."""
     key = (dotted, level, os.path.dirname(from_file) if level else "")
-    if key in _RESOLVED:
-        return _RESOLVED[key]
-    resolved = _RESOLVED[key] = _resolve_module_file_uncached(dotted, level, from_file, root)
+    if key in caches.resolved:
+        return caches.resolved[key]
+    resolved = caches.resolved[key] = _resolve_module_file_uncached(dotted, level, from_file, root)
     return resolved
 
 
@@ -1787,7 +1818,7 @@ def _resolve_module_file_uncached(dotted: str, level: int, from_file: str, root:
     return None
 
 
-def _file_deps(path: str, root: str) -> tuple[str, ...]:
+def _file_deps(caches: Caches, path: str, root: str) -> tuple[str, ...]:
     """The in-tree files one source file imports, parsed and resolved once per process.
 
     The closures of different test modules overlap almost entirely — on pirn-core each one walks
@@ -1795,23 +1826,23 @@ def _file_deps(path: str, root: str) -> tuple[str, ...]:
     every module's closure re-parsed and re-resolved all of them: 230ms per module, 575 modules,
     once per worker, which was the whole of coverage's cost on a cold run (TID-76). `root` and
     `sys.path` are fixed for the life of a process, so the key is the file alone."""
-    cached = _FILE_DEPS.get(path)
+    cached = caches.file_deps.get(path)
     if cached is None:
-        cached = _file_deps_from_cache(path)
+        cached = _file_deps_from_cache(caches, path)
         if cached is None:
             deps: dict[str, None] = {}
             for dotted, level in _imported_names(path):
-                resolved = _resolve_module_file(dotted, level, path, root)
+                resolved = _resolve_module_file(caches, dotted, level, path, root)
                 if resolved:
                     deps[resolved] = None
             cached = tuple(deps)
-            _FILE_DEPS_STATS["parsed"] += 1
+            caches.file_deps_stats["parsed"] += 1
             try:
                 st = os.stat(path)
-                _FILE_DEPS_NEW[path] = [st.st_mtime_ns, st.st_size, _sys_path_key(), list(cached)]
+                caches.file_deps_new[path] = [st.st_mtime_ns, st.st_size, _sys_path_key(), list(cached)]
             except OSError:
                 pass
-        _FILE_DEPS[path] = cached
+        caches.file_deps[path] = cached
     return cached
 
 
@@ -1821,8 +1852,8 @@ def _sys_path_key() -> str:
     return hashlib.sha1("\n".join(p for p in sys.path if p).encode("utf-8", "replace")).hexdigest()[:16]
 
 
-def _file_deps_from_cache(path: str):
-    entry = _FILE_DEPS_CACHE.get(path)
+def _file_deps_from_cache(caches: Caches, path: str):
+    entry = caches.file_deps_cache.get(path)
     if entry is None:
         return None
     try:
@@ -1832,7 +1863,7 @@ def _file_deps_from_cache(path: str):
     mtime_ns, size, key, deps = entry
     if st.st_mtime_ns != mtime_ns or st.st_size != size or key != _sys_path_key():
         return None
-    _FILE_DEPS_STATS["hits"] += 1
+    caches.file_deps_stats["hits"] += 1
     return tuple(deps)
 
 
@@ -1840,7 +1871,7 @@ def _file_deps_cache_dir(root: str) -> str:
     return os.path.join(os.path.abspath(root), ".tiderace-cache", "file-deps")
 
 
-def _load_file_deps_cache(root: str) -> None:
+def _load_file_deps_cache(caches: Caches, root: str) -> None:
     """Read the index and every worker file left by earlier runs, fold them into one index, and
     drop the worker files. Called once per process that serves a run — in the pool that is the
     parent, and the workers inherit the result through the fork (TID-82). Any file that does not
@@ -1865,7 +1896,7 @@ def _load_file_deps_cache(root: str) -> None:
             pass
         if name != "index.json":
             worker_files.append(full)
-    _FILE_DEPS_CACHE.update(merged)
+    caches.file_deps_cache.update(merged)
     if worker_files:
         _write_file_deps_index(d, merged)
         for full in worker_files:
@@ -1889,26 +1920,26 @@ def _write_file_deps_index(d: str, files: dict) -> None:
             pass
 
 
-def _save_file_deps_cache(root: str) -> None:
+def _save_file_deps_cache(caches: Caches, root: str) -> None:
     """What this process parsed, to its own file under the cache dir; the next run's parent folds it
     in. Nothing to write is nothing written."""
-    if not _FILE_DEPS_NEW or not root:
+    if not caches.file_deps_new or not root:
         return
     d = _file_deps_cache_dir(root)
     try:
         os.makedirs(d, exist_ok=True)
         tmp = os.path.join(d, f".w-{os.getpid()}.tmp")
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump({"v": 1, "files": _FILE_DEPS_NEW}, fh)
+            json.dump({"v": 1, "files": caches.file_deps_new}, fh)
         os.replace(tmp, os.path.join(d, f"w-{os.getpid()}.json"))
     except OSError:
         pass
     if _env("TIDERACE_TIMING"):
-        _warn(f"closure cache: {_FILE_DEPS_STATS['hits']} files from cache, "
-              f"{_FILE_DEPS_STATS['parsed']} parsed")
+        _warn(f"closure cache: {caches.file_deps_stats['hits']} files from cache, "
+              f"{caches.file_deps_stats['parsed']} parsed")
 
 
-def _import_closure(module_key: str, root: str) -> frozenset:
+def _import_closure(caches: Caches, module_key: str, root: str) -> frozenset:
     """Every in-tree file a module transitively imports, plus the conftests above it.
 
     This is the half of a test's dependency footprint that runtime coverage cannot produce (TID-40).
@@ -1919,7 +1950,7 @@ def _import_closure(module_key: str, root: str) -> frozenset:
 
     Conftests are included because a change to one alters fixtures for everything beneath it, and
     nothing in the runtime footprint necessarily mentions the conftest at all."""
-    cached = _IMPORT_CLOSURE.get(module_key)
+    cached = caches.import_closure.get(module_key)
     if cached is not None:
         return cached
     root_abs = os.path.abspath(root)
@@ -1928,7 +1959,7 @@ def _import_closure(module_key: str, root: str) -> frozenset:
     queue = [start]
     while queue:
         current = queue.pop()
-        for resolved in _file_deps(current, root):
+        for resolved in _file_deps(caches, current, root):
             if resolved not in seen:
                 seen.add(resolved)
                 queue.append(resolved)
@@ -1942,7 +1973,7 @@ def _import_closure(module_key: str, root: str) -> frozenset:
             break
         directory = os.path.dirname(directory)
     closure = frozenset(os.path.relpath(p, root_abs).replace(os.sep, "/") for p in seen)
-    _IMPORT_CLOSURE[module_key] = closure
+    caches.import_closure[module_key] = closure
     return closure
 
 
@@ -1962,8 +1993,9 @@ class _Coverage:
 
     _TOOL_ID = 5  # sys.monitoring tool slot (0..5 available); 5 avoids coverage.py/profiler clashes
 
-    def __init__(self, root: str | None, enabled: bool, lines: bool = False):
+    def __init__(self, root: str | None, enabled: bool, lines: bool = False, caches: Caches | None = None):
         self.enabled = enabled and root is not None
+        self.caches = caches if caches is not None else Caches()
         self.lines = lines
         self.root = os.path.abspath(root) if root else ""
         self.touched: dict[str, set] = {}
@@ -2064,7 +2096,7 @@ class _Coverage:
         report = self._report()
         if not self.enabled:
             return report
-        for rel in _import_closure(module_key, self.root):
+        for rel in _import_closure(self.caches, module_key, self.root):
             report.setdefault(rel, [])
         return report
 
@@ -2073,15 +2105,20 @@ class Engine:
     """Parent-side scope state: wider-than-function fixtures live here, inherited by forked children."""
 
     def __init__(self, discovery: Discovery, config: RunConfig, *, options: EngineOptions | None = None,
-                 selection: Selection | None = None, no_fork: bool = False, coverage: bool = False,
+                 selection: Selection | None = None, state: ProcessState | None = None,
+                 caches: Caches | None = None, no_fork: bool = False, coverage: bool = False,
                  purity_guard: bool = False, restore: bool = False, coverage_lines: bool = False):
         """`discovery` is what discovery produced — the registry, the conftests, their options, the
         collection hooks' skips; `config` the run — root, project, what it ignores, the modules it executes (TID-124);
         `options` the engine's knobs (`EngineOptions`), and the keyword booleans the same five for
         the callers that spell them out (the proofs); `selection` this run's `-k` / `-m` /
         `--strict-markers` — by default the project's own and the environment's, read now, after
-        discovery, so a mark a conftest registered natively counts as declared."""
+        discovery, so a mark a conftest registered natively counts as declared; `state` what this
+        process has done so far (`ProcessState`) and `caches` its memos (`Caches`), fresh unless the
+        pool parent hands its own down."""
         self.discovery = discovery
+        self.state = state if state is not None else ProcessState()
+        self.caches = caches if caches is not None else Caches()
         self.reg = discovery.registry
         self.config = config
         self.selection = selection if selection is not None else Selection.load(config.project)
@@ -2113,9 +2150,9 @@ class Engine:
         raise KeyError(name)
 
     def _sync_wider(self, closure: list[FixtureDef], node_id: str) -> None:
-        _node_for(node_id)  # a wider-scope fixture is built for the test that first needed it
         """Tear down active wider fixtures whose scope-instance no longer matches this test, then set
         up any missing wider fixtures the test needs (each exactly once per scope-instance)."""
+        self.state.node_for(node_id)  # a wider-scope fixture is built for the test that first needed it
         self._teardown_stale(node_id)
         # pytest runs xunit `setup_module` / `setUpModule` as the first module-scoped autouse fixture,
         # so it precedes every module-scoped fixture of the file: a client a fixture builds sees what
@@ -2123,7 +2160,7 @@ class Engine:
         # test's own path here, after the wider fixtures were already live, and a moto mock started
         # in `setup_module` never reached the fixture-built client (TID-79). Before any wider fixture,
         # once per module per process; the later call on the test path is then a no-op.
-        _xunit_module_setup(_import_module(_module_key(node_id)))
+        _xunit_module_setup(self.state.xunit, _import_module(_module_key(node_id), self.config.root))
         # Set up missing wider fixtures in topo order.
         live = {a.key for a in self.active}
         for d in closure:
@@ -2134,7 +2171,7 @@ class Engine:
                 continue
             mk = _module_key(node_id)
             args = {param: self._value(prov, mk) for param, prov in d.bindings.items()}
-            value, gen = _setup_fixture(d, args, None)
+            value, gen = _setup_fixture(d, args, None, self.state.current_node)
             self.active.append(_Active(d, key, value, gen))
             live.add(key)
 
@@ -2161,11 +2198,12 @@ class Engine:
                 return
             self._leave_module()
         try:
-            mod = _import_module(module_key)
+            mod = _import_module(module_key, self.config.root)
         except Exception:  # noqa: BLE001 — nothing to snapshot; nothing to put back either
             return
-        self._guard = Isolation.before(module_key, mod, _watched_packages(self.config.root, module_key),
-                                       measure=True, full=True)
+        watched = _watched_packages(self.caches, self.config.root, module_key)
+        self._guard = Isolation.before(module_key, mod, watched, measure=True, full=True,
+                                       registry_cache=self.caches.registry_targets)
 
     def _leave_module(self) -> None:
         """Restore the entered module's snapshot: the next module on this worker starts from the
@@ -2216,14 +2254,14 @@ class Engine:
         # replaying the skip from its record (TID-102), reported them either way. The import is
         # the first thing now, as it is for pytest.
         try:
-            _import_module(module_key)
+            _import_module(module_key, self.config.root)
         except _SKIP_EXCEPTIONS as exc:
             return skipped(node_id, _skip_reason(exc), skip_origin=module_key)
         except Exception:  # noqa: BLE001 — an unimportable module surfaces per node, below
             pass
         # Always, `-k` or not (TID-102): the names `-k` would match against are reported with the
         # result, so the daemon can take the verdict itself next time for a node nothing touched.
-        names = _mark_names(node_id, style)
+        names = _mark_names(node_id, style, self.config.root)
         # `--strict-markers`: a mark the project never declared is a typo far more often than an
         # intention, and pytest errors the item rather than running it. Silently ignoring the flag
         # meant `@pytest.mark.slwo` quietly ran a test its author had filtered out (TID-59).
@@ -2248,7 +2286,7 @@ class Engine:
         pytest collects a skip-marked parametrized test — TID-88)."""
         module_key = _module_key(node_id)
         try:
-            node = resolve_target(node_id, style)
+            node = resolve_target(node_id, style, self.config.root)
             requested = self._requested(node)
             marks = self._marks(node)
             # Inside the same guard as its siblings. It used to sit outside, so a failure expanding this
@@ -2411,15 +2449,14 @@ class Engine:
             module_child_holds_module=child is not None and child.module_key == module_key,
             no_fork=self.options.no_fork, restore=self.options.restore, force_no_fork=force_no_fork,
             trusted_pure=trusted_pure, recorded_must_fork=recorded_must_fork,
-        ), lambda: _restorable(_import_module(module_key)))
+        ), lambda: _restorable(_import_module(module_key, self.config.root)))
 
     def run(self, node_id: str, style: str, deadline_ms: int, force_no_fork: bool = False,
             trusted_pure: bool = False, recorded_must_fork: bool = False) -> dict:
         # `force_no_fork`: run THIS test in-process (no fork). On a trivial test that is ~90× cheaper than a
         # fork; on a real suite the win is smaller and depends on the parent's size (TID-18, TID-41).
         # The caller asserts it's pure (purity guard); the guard re-checks and flags any escapee.
-        global _NODES_RUN
-        _NODES_RUN += 1
+        self.state.nodes_run += 1
         module_key = _module_key(node_id)
         gate = self._gate(node_id, style, deadline_ms, force_no_fork, trusted_pure, recorded_must_fork)
         if isinstance(gate, dict):
@@ -2452,8 +2489,8 @@ class Engine:
             clean = self._clean_room_handoff(node_id, style, deadline_ms)
             if clean is not None:
                 return clean
-        return _note_import_history(resp)
-        return _note_import_history(resp)
+        return _note_import_history(resp, self.state.nodes_run)
+        return _note_import_history(resp, self.state.nodes_run)
 
     def _execute(self, plan: Plan, tier: Tier, deadline_ms: int) -> "list[VariantResult] | dict":
         """Run every case `-k` kept on `tier`, each combo's wider fixtures synced first; a fixture
@@ -2510,10 +2547,10 @@ class Engine:
         clean room, `--strategy subprocess` (in-process by configuration; the restore is the whole
         remedy), or the deadline is what ended it (TID-93: a re-run would block again, cost a
         second deadline, and replace the timeout's own message)."""
-        if _CLEAN_ROOM is None or self.options.no_fork or self._timed_out:
+        if self.state.clean_room is None or self.options.no_fork or self._timed_out:
             return None
         _warn(f"re-running {node_id} from a clean image — it disturbed interpreter state")
-        clean = _clean_room_run(node_id, style, deadline_ms)
+        clean = _clean_room_run(self.state, node_id, style, deadline_ms)
         if clean is None:
             return None
         clean["must_fork"] = True
@@ -2523,7 +2560,7 @@ class Engine:
         clean["pure"] = False
         if self._disturbance:
             clean["impurity"] = f"disturbed interpreter state: {self._disturbance}"
-        return _note_import_history(clean, pristine=True)
+        return _note_import_history(clean, self.state.nodes_run, pristine=True)
 
     def _run_inherited(self, node_id: str, deadline_ms: int, force_no_fork: bool,
                        trusted_pure: bool, own_too: bool = False,
@@ -2542,7 +2579,7 @@ class Engine:
         module_key = _module_key(node_id)
         cls_name = node_id.partition("::")[2]
         try:
-            module = _import_module(module_key)
+            module = _import_module(module_key, self.config.root)
             cls = getattr(module, cls_name)
         except Exception as exc:  # noqa: BLE001 — a class we can't resolve contributes nothing
             return expansion(node_id, Outcome.ERROR,
@@ -2650,7 +2687,7 @@ class Engine:
             self.options = dataclasses.replace(self.options, restore=False, purity_guard=False)
             self._module_child = None
             inherited = len(self.active)  # the parent's fixtures: its to tear down, not ours
-            done_before = set(_XUNIT_DONE)  # likewise the parent's xunit hooks
+            done_before = set(self.state.xunit.done)  # likewise the parent's xunit hooks
             def handle(req: dict) -> dict:
                 try:
                     return self.run(req["node_id"], req["style"], req.get("deadline_ms", 5000),
@@ -2668,9 +2705,9 @@ class Engine:
                     while len(self.active) > inherited:
                         _teardown(self.active.pop().gen)
                     for key in done_before:
-                        _XUNIT_DONE.discard(key)
-                    _xunit_class_teardown()
-                    _xunit_module_teardown()
+                        self.state.xunit.done.discard(key)
+                    _xunit_class_teardown(self.state.xunit)
+                    _xunit_module_teardown(self.state.xunit)
                 except BaseException:  # noqa: BLE001 — a teardown fault must not mask the results
                     pass
             return code
@@ -2740,17 +2777,19 @@ class Engine:
             try:
                 # The deadline holds here too (TID-93): a forked child is killed when it overruns,
                 # but a test that blocks on this tier used to block the worker, and the run.
-                with _in_process_deadline(deadline_ms):
+                with _in_process_deadline(deadline_ms) as deadline:
                     result = self._child_exec(node_id, style, requested, closure, combo, case_kwargs,
                                               variant_id=variant_id, tier=tier)
             except _InProcessTimeout as exc:
                 # The test was interrupted mid-body: whatever it held is not torn down, so this
                 # process is not to be trusted with the next in-process test — the node forks from
                 # now on (TID-33's must-fork), where the deadline can kill instead of interrupt.
+                # The watchdog delivers the bare class (TID-98): the message is the deadline's.
+                detail = str(exc) if exc.args else deadline.message
                 self._state_disturbed = True
-                self._disturbance = str(exc)
+                self._disturbance = detail
                 self._timed_out = True
-                return "error", str(exc), {}, _UNKNOWN_PURITY
+                return "error", detail, {}, _UNKNOWN_PURITY
             except BaseException as exc:  # noqa: BLE001 — any in-process test error → Outcome::Error
                 return "error", "".join(traceback.format_exception_only(type(exc), exc)), {}, _UNKNOWN_PURITY
             # `_child_exec` sets this when the fingerprint moved in a way nothing undid (TID-33), so
@@ -2768,7 +2807,7 @@ class Engine:
                 # the test's *module* is unrestorable; this says the test disturbed the interpreter.
                 self._state_disturbed = True
                 self._disturbance = drift
-            if drift is not None and _CLEAN_ROOM is not None and not self.options.no_fork:
+            if drift is not None and self.state.clean_room is not None and not self.options.no_fork:
                 # The clean room re-runs the whole node from a pristine image; `run()` above does the
                 # handoff and reports THAT. Forking here would fork the process this test just
                 # dirtied — if what it leaked was a thread, straight into a deadlock (TID-50).
@@ -2861,11 +2900,11 @@ class Engine:
                 return local[name]
             return self._value(name, module_key)
 
-        cov = _Coverage(self.config.root, self.options.coverage, self.options.coverage_lines)
+        cov = _Coverage(self.config.root, self.options.coverage, self.options.coverage_lines, self.caches)
         cov.start()  # capture the per-test footprint: fixture setup + body, this test only (ADR-E006)
         # B5: async test body or any function-scope async provider ⇒ run setup+body+teardown on ONE
         # event loop (objects created on a loop must be awaited on the same loop). Sync path untouched.
-        if _test_is_async(node_id, style) or any(
+        if _test_is_async(node_id, style, self.config.root) or any(
             _is_async_fixture(d.func) for d in closure if d.rank == 0
         ):
             try:
@@ -2884,17 +2923,17 @@ class Engine:
                 cov.stop()
         # Named as pytest names it, parametrize id included: a fixture keying a resource off
         # `request.node.name` needs `test_x[case]`, not `test_x`, or every case collides (TID-51).
-        _node_for(variant_id or node_id)
+        self.state.node_for(variant_id or node_id)
         # `setUpModule` / `setup_module` before any fixture or test body: a suite uses it to put
         # something in place for the whole file — stubbing an optional SDK in `sys.modules`, say —
         # and without it every test in that file fails on the thing it was meant to provide (TID-60).
-        _xunit_module_setup(_import_module(module_key))
+        _xunit_module_setup(self.state.xunit, _import_module(module_key, self.config.root))
         try:
             for d in closure:
                 if d.rank != 0:
                     continue  # wider scopes are already live in inherited parent memory
                 args = {param: value_of(prov) for param, prov in d.bindings.items()}
-                val, gen = _setup_fixture(d, args, combo.get(d.name))
+                val, gen = _setup_fixture(d, args, combo.get(d.name), self.state.current_node)
                 local[d.name] = val
                 gens.append(gen)
             test_args = {param: value_of(prov) for param, prov in requested.items()}
@@ -2914,11 +2953,11 @@ class Engine:
             measure = tier is not Tier.BARE and (full or self.options.purity_guard)
             if full:
                 self._enter_module(module_key)
-            mod = _import_module(module_key) if measure else None
-            watched = _watched_packages(self.config.root, module_key) if full else ()
-            isolation = Isolation.before(module_key, mod, watched,
-                                         measure=mod is not None, full=full)
-            outcome, detail = _invoke(node_id, style, test_args, self._pytest_config)
+            mod = _import_module(module_key, self.config.root) if measure else None
+            watched = _watched_packages(self.caches, self.config.root, module_key) if full else ()
+            isolation = Isolation.before(module_key, mod, watched, measure=mod is not None, full=full,
+                                         registry_cache=self.caches.registry_targets)
+            outcome, detail = _invoke(node_id, style, test_args, self._pytest_config, self.state)
             # Everything below MEASURES; nothing here restores: the restore that stands in for a
             # fork happens when this worker leaves the module (`_leave_module`), against the
             # snapshot taken when it entered (TID-80, TID-81). The per-test verdict still says what
@@ -2954,13 +2993,13 @@ class Engine:
                 if d.rank != 0:
                     continue
                 args = {param: value_of(prov) for param, prov in d.bindings.items()}
-                val, handle = await _setup_fixture_async(d, args, combo.get(d.name))
+                val, handle = await _setup_fixture_async(d, args, combo.get(d.name), self.state.current_node)
                 local[d.name] = val
                 handles.append(handle)
             test_args = {param: value_of(prov) for param, prov in requested.items()}
             if case_kwargs:
                 test_args.update(case_kwargs)
-            return await _invoke_async(node_id, style, test_args, self._pytest_config)
+            return await _invoke_async(node_id, style, test_args, self._pytest_config, self.state)
         finally:
             for handle in reversed(handles):
                 await _teardown_async(handle)
@@ -2970,7 +3009,7 @@ class Engine:
         if style == "unittest_method":
             return False
         try:
-            obj = resolve_target(node_id, style).func
+            obj = resolve_target(node_id, style, self.config.root).func
         except (Exception, *_SKIP_EXCEPTIONS):  # noqa: BLE001 — a module that skips itself at
             return False  # import raises a BaseException here; the run below reports it (TID-48)
         return _is_fixture(obj)
@@ -3060,12 +3099,12 @@ class Engine:
                                      _own_markers(module, owner, func), self._pytest_config, self.discovery)
 
     def teardown_all(self) -> None:
-        _save_file_deps_cache(self.config.root)  # what this worker parsed, for the next run (TID-82)
+        _save_file_deps_cache(self.caches, self.config.root)  # what this worker parsed (TID-82)
         self._module_child_close()  # its module's tests are done: its fixtures, hooks and exit (TID-80)
         while self.active:
             _teardown(self.active.pop().gen)
-        _xunit_class_teardown()  # tearDownClass / teardown_class, once per class (TID-64)
-        _xunit_module_teardown()  # tearDownModule / teardown_module, once this worker is done
+        _xunit_class_teardown(self.state.xunit)  # tearDownClass / teardown_class, once per class (TID-64)
+        _xunit_module_teardown(self.state.xunit)  # tearDownModule / teardown_module, once this worker is done
 
 
 class _GenerateTestsError(Exception):
@@ -3268,7 +3307,7 @@ def _pytest_markers(node: Target) -> list:
     return list(_own_markers(*node.owners))
 
 
-def _mark_names(node_id: str, style: str) -> set:
+def _mark_names(node_id: str, style: str, root: str) -> set:
     """Every selectable mark name on a test — pytest's and tiderace's own.
 
     Selection has to mean the same thing in both dialects, so `-m "not slow"` deselects a
@@ -3276,7 +3315,7 @@ def _mark_names(node_id: str, style: str) -> set:
     module, the class and the function; native tags are read from the function's
     `__tiderace_marks__` (TID-59)."""
     try:
-        owners = resolve_target(node_id, style, lenient=True).owners
+        owners = resolve_target(node_id, style, root, lenient=True).owners
     except (Exception, *_SKIP_EXCEPTIONS):  # noqa: BLE001 — an unimportable module, or one that
         return set()  # skips at import (a BaseException), surfaces per node, not here (TID-102)
     names = {getattr(m, "name", "") for m in _own_markers(*owners)}
@@ -3287,23 +3326,24 @@ def _mark_names(node_id: str, style: str) -> set:
     return names
 
 
-def _invoke(node_id: str, style: str, args: dict, config: _Config) -> tuple[str, str]:
+def _invoke(node_id: str, style: str, args: dict, config: _Config, state: ProcessState) -> tuple[str, str]:
     """Run the test, then fold in any marker it or its fixtures attached while running (TID-51)."""
-    outcome, detail = _invoke_body(node_id, style, args, config)
-    return _runtime_outcome(_CURRENT_NODE, outcome, detail)
+    outcome, detail = _invoke_body(node_id, style, args, config, state)
+    return _runtime_outcome(state.current_node, outcome, detail)
 
 
-def _invoke_body(node_id: str, style: str, args: dict, config: _Config) -> tuple[str, str]:
-    node = resolve_target(node_id, style, lenient=style == "unittest_method")
+def _invoke_body(node_id: str, style: str, args: dict, config: _Config,
+                 state: ProcessState) -> tuple[str, str]:
+    node = resolve_target(node_id, style, config.run.root, lenient=style == "unittest_method")
     module = node.module
     try:
         if node.is_unittest:
-            return _invoke_unittest(module, node_id)
+            return _invoke_unittest(state.xunit, module, node_id)
         if style == "class_method":
-            _xunit_class_setup(node.cls)  # pytest's `setup_class`, once per class per process (TID-60)
+            _xunit_class_setup(state.xunit, node.cls)  # `setup_class`, once per class per process (TID-60)
             instance = node.cls()
             bound = getattr(instance, node.name)
-            call_args, request = _with_request(bound, args, node_id, config, instance)
+            call_args, request = _with_request(bound, args, node_id, config, state, instance)
             setup, teardown = _xunit_test_hooks(module, style, node_id, bound)
             try:
                 if setup:
@@ -3318,7 +3358,7 @@ def _invoke_body(node_id: str, style: str, args: dict, config: _Config) -> tuple
                 _test_finalizers(request)
             return "passed", ""
         func = node.func
-        call_args, request = _with_request(func, args, node_id, config)
+        call_args, request = _with_request(func, args, node_id, config, state)
         setup, teardown = _xunit_test_hooks(module, style, node_id, func)
         try:
             if setup:
@@ -3376,8 +3416,6 @@ class _SkipAwareResult(unittest.TestResult):
         super().addError(test, err)
 
 
-_NODES_RUN = 0  # how many nodes this process has run — whether a test here has neighbours (TID-70)
-
 _IMPORT_HISTORY_NOTE = (
     "\n(tiderace) this assertion reads import history — which tests ran earlier in this process, and "
     "in what order, is not pytest's file order and is not promised to be; a test that depends on it "
@@ -3386,7 +3424,7 @@ _IMPORT_HISTORY_NOTE = (
 )
 
 
-def _note_import_history(result: dict, *, pristine: bool = False) -> dict:
+def _note_import_history(result: dict, nodes_run: int, *, pristine: bool = False) -> dict:
     """Append a one-line explanation to a failure that reads `sys.modules` (TID-70).
 
     The one pirn-agents divergence in the whole benchmark was `assert "chromadb" not in sys.modules`
@@ -3396,7 +3434,7 @@ def _note_import_history(result: dict, *, pristine: bool = False) -> dict:
     switched to reads as the runner's bug, so the failure now says what it depends on. Only when the
     dependence is real: this process ran other tests before this one, or it is the clean room's
     re-run of a demoted test, where the image is pristine and nothing was ever imported."""
-    if not pristine and _NODES_RUN <= 1:
+    if not pristine and nodes_run <= 1:
         return result
     for record in [result, *result.get("variants", ())]:
         detail = record.get("detail") or ""
@@ -3404,14 +3442,6 @@ def _note_import_history(result: dict, *, pristine: bool = False) -> dict:
                 and _IMPORT_HISTORY_NOTE not in detail:
             record["detail"] = detail + _IMPORT_HISTORY_NOTE
     return result
-
-
-_XUNIT_DONE: set = set()  # (kind, qualified name) of module/class setups this process has run
-_XUNIT_CLASSES: dict = {}  # class key -> the class object, so its teardown can be found at worker end
-# class key -> (outcome, detail) when the class's own setup did not complete (TID-64). A setUpClass
-# that skips or raises decides the outcome of EVERY method in the class, not only the one that
-# happened to trigger it — which is what once-per-class means when the first attempt fails.
-_XUNIT_CLASS_FAILED: dict = {}
 
 
 def _xunit_class_key(cls) -> tuple:
@@ -3438,7 +3468,7 @@ def _call_hook(owner, names: tuple, *args) -> bool:
     return False
 
 
-def _xunit_module_setup(module) -> None:
+def _xunit_module_setup(xunit: XunitState, module) -> None:
     """`setUpModule` / `setup_module`, once per module per process.
 
     Once per *process*, not per test: a forked run re-enters it in each child, which is the right
@@ -3446,31 +3476,31 @@ def _xunit_module_setup(module) -> None:
     would run a non-idempotent hook many times. Its teardown runs when the worker finishes with the
     module, via `teardown_all` (TID-60)."""
     key = ("module", _safe_getattr(module, "__name__", ""))
-    if key in _XUNIT_DONE:
+    if key in xunit.done:
         return
-    _XUNIT_DONE.add(key)
+    xunit.done.add(key)
     _call_hook(module, ("setUpModule", "setup_module"), module)
 
 
-def _xunit_class_teardown() -> None:
+def _xunit_class_teardown(xunit: XunitState) -> None:
     """`tearDownClass` / `teardown_class` for every class this process set up, once each (TID-64).
 
     Runs before the module teardowns, since a class's teardown may still need its module. Only
     classes whose setup *completed* are torn down: one that skipped or raised never acquired
     whatever its teardown releases."""
-    for key, cls in list(_XUNIT_CLASSES.items()):
-        if key not in _XUNIT_CLASS_FAILED:
+    for key, cls in list(xunit.classes.items()):
+        if key not in xunit.failed:
             try:
                 _call_hook(cls, ("tearDownClass", "teardown_class"), cls)
             except Exception:  # noqa: BLE001 — a teardown fault must not mask the run's results
                 pass
-        _XUNIT_CLASSES.pop(key, None)
-        _XUNIT_DONE.discard(key)
+        xunit.classes.pop(key, None)
+        xunit.done.discard(key)
 
 
-def _xunit_module_teardown() -> None:
+def _xunit_module_teardown(xunit: XunitState) -> None:
     """`tearDownModule` / `teardown_module` for every module this process set up."""
-    for kind, name in list(_XUNIT_DONE):
+    for kind, name in list(xunit.done):
         if kind != "module":
             continue
         module = sys.modules.get(name)
@@ -3479,7 +3509,7 @@ def _xunit_module_teardown() -> None:
                 _call_hook(module, ("tearDownModule", "teardown_module"), module)
             except Exception:  # noqa: BLE001 — a teardown fault must not mask the run's results
                 pass
-        _XUNIT_DONE.discard((kind, name))
+        xunit.done.discard((kind, name))
 
 
 def _xunit_test_hooks(module, style: str, node_id: str, target) -> tuple:
@@ -3499,18 +3529,18 @@ def _xunit_test_hooks(module, style: str, node_id: str, target) -> tuple:
     return ((module, ("setup_function",), target), (module, ("teardown_function",), target))
 
 
-def _xunit_class_setup(cls) -> None:
+def _xunit_class_setup(xunit: XunitState, cls) -> None:
     """pytest's `setup_class`, once per class per process. unittest's `setUpClass` is run by
     `_invoke_unittest`, which needs it inside its own result handling."""
     key = _xunit_class_key(cls)
-    if key in _XUNIT_DONE:
+    if key in xunit.done:
         return
-    _XUNIT_DONE.add(key)
-    _XUNIT_CLASSES[key] = cls  # so `teardown_class` runs at worker end (TID-64) — it never did before
+    xunit.done.add(key)
+    xunit.classes[key] = cls  # so `teardown_class` runs at worker end (TID-64) — it never did before
     _call_hook(cls, ("setup_class",), cls)
 
 
-def _invoke_unittest(module, node_id: str) -> tuple[str, str]:
+def _invoke_unittest(xunit: XunitState, module, node_id: str) -> tuple[str, str]:
     """Run one `unittest.TestCase` method with fuller fidelity (Phase 4): honor `setUpClass`/
     `tearDownClass` (which `TestCase.run()` alone does NOT call), and map `@expectedFailure` /
     unexpected-success / `subTest` to the right node outcome.
@@ -3520,24 +3550,24 @@ def _invoke_unittest(module, node_id: str) -> tuple[str, str]:
     every test forked, since each child was its own process, and wrong under the in-process ladder,
     where a class's methods share one process: N× the setup cost, and a `setUpClass` that opens a
     database or counts its own calls behaved differently from `python -m unittest`. A forked child
-    inherits `_XUNIT_DONE`, so a class the parent set up is not set up again there either."""
+    inherits the xunit state, so a class the parent set up is not set up again there either."""
     cls_name, method = _class_method(node_id)
     cls = module.__dict__[cls_name]
     key = _xunit_class_key(cls)
-    if key in _XUNIT_CLASS_FAILED:
-        return _XUNIT_CLASS_FAILED[key]
-    if key not in _XUNIT_DONE:
-        _XUNIT_DONE.add(key)
-        _XUNIT_CLASSES[key] = cls
+    if key in xunit.failed:
+        return xunit.failed[key]
+    if key not in xunit.done:
+        xunit.done.add(key)
+        xunit.classes[key] = cls
         try:
             cls.setUpClass()
         except _SKIP_EXCEPTIONS as exc:  # setUpClass may skip the whole class
-            _XUNIT_CLASS_FAILED[key] = ("skipped", str(exc))
-            return _XUNIT_CLASS_FAILED[key]
+            xunit.failed[key] = ("skipped", str(exc))
+            return xunit.failed[key]
         except Exception as exc:  # noqa: BLE001 — unittest errors every method of the class
-            _XUNIT_CLASS_FAILED[key] = (
+            xunit.failed[key] = (
                 "error", "".join(traceback.format_exception_only(type(exc), exc)))
-            return _XUNIT_CLASS_FAILED[key]
+            return xunit.failed[key]
     result = _SkipAwareResult()
     try:
         cls(method).run(result)
@@ -3835,7 +3865,7 @@ def _preimport(run: RunConfig) -> None:
                 try:
                     # Named as `_discover` and execution name it (TID-37); a module-level
                     # `importorskip` is a skip, not a reason to take the pool parent down (TID-48).
-                    _import_module(rel)
+                    _import_module(rel, root)
                 except (Exception, *_SKIP_EXCEPTIONS):  # noqa: BLE001
                     pass
 
@@ -3846,7 +3876,7 @@ def _probe_module_safe(root: str, module_key: str, paths: list) -> dict:
     GIL); if it loads there the module is *safe* to run on the sub-interpreter tier, otherwise not (e.g.
     a single-phase-init C-extension like numpy: `... does not support loading in subinterpreters`).
     Reports `safe=None` when the API is unavailable (< CPython 3.14) so the caller falls back."""
-    module_name = _module_name(module_key)
+    module_name = _module_name(module_key, root)
     try:
         from concurrent import interpreters
     except Exception:  # noqa: BLE001 — no sub-interpreter API ⇒ undeterminable, caller falls back to fork
@@ -3903,7 +3933,6 @@ def probe() -> int:
     Same framed pipe as `serve`: reads `{"module": "<rel/path.py>"}` frames, replies
     `{"module", "safe": true|false|null, "reason"?}`. No tests run — this only decides eligibility."""
     root = sys.argv[1]
-    set_run_root(root)
     _insert_run_root(root)
     paths = list(sys.path)  # the sub-interpreter inherits the same import roots (root + site-packages + …)
     transport = Transport.stdio(redirect_stdout=False)
@@ -3950,7 +3979,6 @@ def subinterp() -> int:
     from concurrent import interpreters  # 3.14+; the caller probes first, so this is expected present
 
     root = sys.argv[1]
-    set_run_root(root)
     # As in `serve()` (TID-103): every sub-interpreter's `sys.stdout` is fd 1, so a test that
     # printed put its bytes into the engine's result stream — read as a frame length, waited on
     # forever; click's suite left the engine waiting on an idle pool (TID-104).
@@ -4007,9 +4035,6 @@ def subinterp() -> int:
             t.join(timeout=5)
 
 
-_CLEAN_ROOM = None  # socket to a pristine helper process that re-runs demoted tests (TID-50)
-
-
 def _start_clean_room(engine: "Engine") -> None:
     """Fork a helper that keeps a pristine copy of this worker's image, for re-running demoted tests.
 
@@ -4026,7 +4051,6 @@ def _start_clean_room(engine: "Engine") -> None:
     pristine for the life of the run no matter what the worker does to itself.
 
     Cheap by construction: one extra process per worker, copy-on-write, idle until something trips."""
-    global _CLEAN_ROOM
     if not _FORK_AVAILABLE:
         return
 
@@ -4039,7 +4063,7 @@ def _start_clean_room(engine: "Engine") -> None:
 
     spawn(helper)
     theirs.close()
-    _CLEAN_ROOM = ours
+    engine.state.clean_room = ours
 
 
 def _clean_room_serve(sock, engine: "Engine") -> None:
@@ -4051,7 +4075,7 @@ def _clean_room_serve(sock, engine: "Engine") -> None:
     def handle(req: dict) -> dict:
         def body() -> dict:  # ---- grandchild: has the clean image, may dirty itself freely ----
             try:
-                # `_CLEAN_ROOM` is None in here (it is set in the worker only, after this helper was
+                # `state.clean_room` is None in here (it is set in the worker only, after this helper was
                 # forked), so a demotion inside this run takes the ordinary local fork and cannot
                 # bounce back to us.
                 return engine.run(req["node_id"], req["style"], req.get("deadline_ms", 5000))
@@ -4071,14 +4095,11 @@ def _clean_room_serve(sock, engine: "Engine") -> None:
 class _InProcessTimeout(BaseException):
     """Raised in the main thread by the in-process deadline's signal handler (TID-93), or in the
     test's thread by its watchdog (TID-98). A `BaseException`, so a test's `except Exception`
-    cannot swallow it. The watchdog delivers the class, not an instance, so the message lives
-    beside it."""
+    cannot swallow it. The watchdog delivers the class, not an instance, so the message is the
+    deadline's (`_in_process_deadline.message`), read by the executor that catches this."""
 
     def __str__(self) -> str:
-        return self.args[0] if self.args else _WATCHDOG_MESSAGE
-
-
-_WATCHDOG_MESSAGE = "timeout on the in-process tier"
+        return self.args[0] if self.args else "timeout on the in-process tier"
 
 
 class _in_process_deadline:
@@ -4098,6 +4119,9 @@ class _in_process_deadline:
 
     def __init__(self, deadline_ms: int):
         self.seconds = max(deadline_ms, 0) / 1000.0
+        self.message = (
+            f"timeout after {self.seconds:g}s on the in-process tier — the test was still running; "
+            f"it forks from the next run on, where the deadline kills instead of interrupts")
         self.armed = False
         self.previous = None
         self.timer = None
@@ -4121,9 +4145,7 @@ class _in_process_deadline:
                 return self
 
         def on_alarm(_signum, _frame):
-            raise _InProcessTimeout(
-                f"timeout after {seconds:g}s on the in-process tier — the test was still running; "
-                f"it forks from the next run on, where the deadline kills instead of interrupts")
+            raise _InProcessTimeout(self.message)
 
         try:
             self.previous = signal.signal(signal.SIGALRM, on_alarm)
@@ -4134,10 +4156,6 @@ class _in_process_deadline:
         return self
 
     def _arm_watchdog(self, seconds: float):
-        global _WATCHDOG_MESSAGE
-        _WATCHDOG_MESSAGE = (
-            f"timeout after {seconds:g}s on the in-process tier — the test was still running; "
-            f"it forks from the next run on, where the deadline kills instead of interrupts")
         self.target = threading.get_ident()
         self.fired = False
 
@@ -4179,15 +4197,14 @@ def _set_async_exc(thread_ident: int, exc_class) -> None:
     api(ctypes.c_ulong(thread_ident), None if exc_class is None else id(exc_class))
 
 
-def _clean_room_run(node_id: str, style: str, deadline_ms: int) -> dict | None:
+def _clean_room_run(state: ProcessState, node_id: str, style: str, deadline_ms: int) -> dict | None:
     """Ask the clean room to run a node from a pristine image. `None` if it cannot (caller falls back).
 
     A helper that has died takes the channel with it; the caller then forks locally, which is what it
     would have done anyway before this existed."""
-    global _CLEAN_ROOM
-    if _CLEAN_ROOM is None:
+    if state.clean_room is None:
         return None
-    fd = _CLEAN_ROOM.fileno()
+    fd = state.clean_room.fileno()
     try:
         _write_frame(fd, {"node_id": node_id, "style": style, "deadline_ms": deadline_ms})
         resp = _read_frame(fd)
@@ -4195,10 +4212,10 @@ def _clean_room_run(node_id: str, style: str, deadline_ms: int) -> dict | None:
         resp = None
     if resp is None:
         try:
-            _CLEAN_ROOM.close()
+            state.clean_room.close()
         except BaseException:  # noqa: BLE001
             pass
-        _CLEAN_ROOM = None
+        state.clean_room = None
     return resp
 
 
@@ -4291,7 +4308,6 @@ def _fork_pool_workers(size: int, socket_path: str, engine_args: dict,
 
 def serve() -> int:
     root = sys.argv[1]
-    set_run_root(root)
     transport = Transport.stdio()  # fd 1 goes to stderr; the frames have a private fd (TID-103)
     no_fork = "--no-fork" in sys.argv[2:]
     coverage = "--coverage" in sys.argv[2:] or _env_flag("TIDERACE_COVERAGE")
@@ -4300,7 +4316,8 @@ def serve() -> int:
     purity = "--purity" in sys.argv[2:] or _env_flag("TIDERACE_PURITY")
     restore = "--restore" in sys.argv[2:] or _env_flag("TIDERACE_RESTORE")
     _insert_run_root(root)
-    _load_file_deps_cache(root)  # earlier runs' import closures, before anything computes one (TID-82)
+    caches = Caches()
+    _load_file_deps_cache(caches, root)  # earlier runs' closures, before anything computes one (TID-82)
     # Ancestor conftests before `_preimport` (TID-19): a root conftest exists to set things up that
     # must already be true when test modules import — env defaults, warning filters, `sys.path`. pytest
     # loads conftests first for the same reason. `_discover` reads the memoised result back.
@@ -4322,7 +4339,7 @@ def serve() -> int:
     _phase.mark("discover (conftests, fixtures, hooks, marks)")
     if _phase.on and _phase.unselected:
         _warn(f"start-up: {_phase.unselected} test modules not imported (unselected)")
-    engine_args = dict(discovery=disc, config=run, options=EngineOptions(
+    engine_args = dict(discovery=disc, config=run, caches=caches, options=EngineOptions(
         no_fork=no_fork, restore=restore, purity_guard=purity, coverage=coverage,
         coverage_lines=coverage_lines))
     # Pool mode (TID-4): fork the workers from this one imported image instead of importing per
