@@ -67,7 +67,8 @@ def run(root: str, node: str, *, no_fork: bool, force: bool) -> tuple[str, str]:
     for m in ("test_opaque", "test_pure"):
         sys.modules.pop(m, None)
     importlib.invalidate_caches()
-    eng = shim.Engine(shim._discover(root), root=root, no_fork=no_fork, restore=True)
+    run = shim.RunConfig.load(root)
+    eng = shim.Engine(shim._discover(run), run, no_fork=no_fork, restore=True)
     r = eng.run(node, "Function", 5000, force_no_fork=force)
     return r.get("outcome", "?"), r.get("detail", "")
 

@@ -51,9 +51,10 @@ def main() -> int:
         with open(os.path.join(root, "test_pp.py"), "w") as f:
             f.write(CORPUS)
         sys.path.insert(0, root)
-        shim._preimport(root)
-        reg = shim._discover(root)
-        engine = shim.Engine(reg, no_fork=True, root=root)
+        run = shim.RunConfig.load(root)
+        shim._preimport(run)
+        reg = shim._discover(run)
+        engine = shim.Engine(reg, run, no_fork=True)
 
         r1 = engine.run("test_pp.py::test_runs_per_backend", "function", 5000)
         from test_pp import SEEN  # type: ignore  # noqa: E402

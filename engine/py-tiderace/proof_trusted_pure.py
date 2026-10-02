@@ -41,9 +41,10 @@ def main() -> int:
         open(os.path.join(root, "test_pure.py"), "w").write(PURE)
         open(os.path.join(root, "test_impure.py"), "w").write(IMPURE)
         sys.path.insert(0, root)
-        shim._preimport(root)
-        reg = shim._discover(root)
-        e = shim.Engine(reg, no_fork=False, root=root, restore=True)
+        run = shim.RunConfig.load(root)
+        shim._preimport(run)
+        reg = shim._discover(run)
+        e = shim.Engine(reg, run, no_fork=False, restore=True)
 
         pure_nodes = [f"test_pure.py::test_p{i}" for i in range(N)]
         impure_nodes = [f"test_impure.py::test_m{i}" for i in range(N)]

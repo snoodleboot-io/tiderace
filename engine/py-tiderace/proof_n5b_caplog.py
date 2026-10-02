@@ -95,8 +95,9 @@ def main() -> int:
             f.write(CORPUS)
 
         sys.path.insert(0, root)
-        shim._preimport(root)
-        reg = shim._discover(root)
+        run = shim.RunConfig.load(root)
+        shim._preimport(run)
+        reg = shim._discover(run)
 
         registered_ok = "caplog" in reg.by_name
         typed = {t.__name__: ns for t, ns in reg.by_type.items()}
@@ -106,7 +107,7 @@ def main() -> int:
 
         # `no_fork=True`: teardown effects have to be observable in THIS process for the
         # restore/cleanup assertions to mean anything.
-        engine = shim.Engine(reg, no_fork=True)
+        engine = shim.Engine(reg, run, no_fork=True)
         order = [
             "test_records_are_captured",
             "test_record_message_is_populated",

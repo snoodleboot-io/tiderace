@@ -54,7 +54,10 @@ import typing
 import unittest
 import warnings
 
-from .config import NOTSET as _NOTSET, ProjectConfig, load_project_config, option as _argv_option
+from .config import NOTSET as _NOTSET, ProjectConfig, RunConfig, option as _argv_option
+from .log import warn as _warn
+from .selection import (Selection, plugin_marks as _plugin_marks, pytest_major as _pytest_major,
+                        registered_marks as _registered_marks)
 from .isolation import Isolation, _restorable
 from .plan import Plan
 from .tiers import EngineOptions, Routing, Tier, VariantResult, assemble, route
@@ -76,21 +79,15 @@ _SCOPE_RANK = {"function": 0, "class": 1, "module": 2, "package": 3, "session": 
 
 # --------------------------------------------------------------------------- framing: `protocol.py`
 
-# The modules this run will execute, suite-relative (`tests/x/test_y.py`), or None for all of them
-# (TID-75). Set from `--modules <file>` before anything is imported. `_preimport` and `_discover`
-# import only these and the conftests above them: a run that executes one test used to pay the
-# import of every test module in the suite — 4s on pirn-agents, which was the whole of a one-test
-# run after an edit. A full run passes every module and is unchanged.
-_SELECTED_MODULES: set | None = None
-_SKIPPED_AT_DISCOVERY = 0  # test modules discovery did not import, for `TIDERACE_TIMING=1`
-
 
 class _PhaseTimer:
-    """Start-up phase timings to stderr under `TIDERACE_TIMING=1`; silent otherwise."""
+    """Start-up phase timings to stderr under `TIDERACE_TIMING=1`; silent otherwise. Counts the
+    test modules discovery did not import — the ones `--modules` left out (TID-75)."""
 
     def __init__(self) -> None:
         self.on = _env_flag("TIDERACE_TIMING")
         self.last = time.perf_counter()
+        self.unselected = 0
 
     def mark(self, label: str) -> None:
         if not self.on:
@@ -98,23 +95,6 @@ class _PhaseTimer:
         now = time.perf_counter()
         _warn(f"start-up: {label}: {now - self.last:.2f}s")
         self.last = now
-
-
-def _select_modules(path: str) -> None:
-    global _SELECTED_MODULES
-    with open(path, encoding="utf-8") as fh:
-        _SELECTED_MODULES = {line.strip() for line in fh if line.strip()}
-    if _env_flag("TIDERACE_TIMING"):
-        _warn(f"start-up: {len(_SELECTED_MODULES)} modules selected")
-
-
-def _module_selected(rel: str) -> bool:
-    """Whether this run executes tests from `rel`. Only test *modules* are ever skipped: every
-    conftest in the tree is still imported, exactly as pytest imports every conftest at collection
-    whatever it later deselects — a conftest can carry a side effect the rest of the suite relies
-    on, and pruning the directories without selected modules cost 50 tests their isolation on
-    pirn-agents before this was understood."""
-    return _SELECTED_MODULES is None or rel in _SELECTED_MODULES
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -127,11 +107,6 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name) == "1"
 
 
-def _warn(message: str) -> None:
-    """A line for the user on stderr, flushed — stdout is the protocol (TID-103)."""
-    print(f"tiderace: {message}", file=sys.stderr, flush=True)
-
-
 class _ModuleChild:
     """The forked process running one opaque module's tests (TID-80)."""
 
@@ -142,7 +117,6 @@ class _ModuleChild:
 
 
 # --------------------------------------------------------------------------- node ids
-_ROOT = ""  # the run root (argv[1]); set by serve()/probe()/subinterp() before any import
 
 
 def _skip_exceptions() -> tuple[type[BaseException], ...]:
@@ -411,15 +385,14 @@ _CLI_OPTIONS: dict[str, object] = {}
 # value the project's config sets wins over the declared default; `getini` of a name nobody
 # declared is `None`, as before.
 _INI_DECLARED: dict[str, tuple] = {}
-_PROJECT: ProjectConfig | None = None  # the project's config, loaded once by `_discover` (TID-121)
 
 
-def _ini_value(name: str):
+def _ini_value(project: ProjectConfig, name: str):
     """`config.getini(name)`: the project's configured value if set, else the declared default,
     else `None`. Typed the way pytest types it — `bool` parses, list types split."""
     declared = _INI_DECLARED.get(name)
     ini_type = declared[0] if declared else None
-    values = _PROJECT.values(name) if _PROJECT is not None else []
+    values = project.values(name)
     if values:
         if ini_type == "bool":
             text = str(values[0]).strip().lower()
@@ -481,9 +454,13 @@ def _collect_addoption(module) -> None:
 
 
 class _Config:
-    """The slice of pytest's `config` that tests reach for through `request.config`."""
+    """The slice of pytest's `config` that tests reach for through `request.config` — one per run,
+    built by the engine (and by discovery, for the collection hooks) from the run's `RunConfig`."""
 
-    __slots__ = ()
+    __slots__ = ("run",)
+
+    def __init__(self, run: RunConfig) -> None:
+        self.run = run
 
     def getoption(self, name: str, default=_NOTSET, skip: bool = False):
         key = name.lstrip("-").replace("-", "_")
@@ -500,7 +477,7 @@ class _Config:
         return value
 
     def getini(self, name: str):
-        return _ini_value(name)
+        return _ini_value(self.run.project, name)
 
 
 # Node ids a collection hook (or a direct `@pytest.mark.skip`) decided to skip, as `node_id -> reason`
@@ -593,7 +570,7 @@ def _enumerate_items(test_modules: list) -> list:
     return items
 
 
-def _run_collection_hooks(conftests: list, test_modules: list) -> None:
+def _run_collection_hooks(conftests: list, test_modules: list, config: _Config) -> None:
     """Run every conftest's `pytest_collection_modifyitems`, then record the skips it produced.
 
     Suites gate optional backends here — `needs_postgres`, `needs_kuzu` — so without it those tests
@@ -609,7 +586,6 @@ def _run_collection_hooks(conftests: list, test_modules: list) -> None:
     hooks = [(m, h) for m, h in hooks if h is not None]
 
     items = _enumerate_items(test_modules)
-    config = _Config()
     for module, hook in hooks:
         try:
             hook(config=config, items=items)
@@ -643,8 +619,8 @@ class _TestRequest:
 
     __slots__ = ("config", "node", "function", "cls", "instance", "param", "fixturenames", "_finalizers")
 
-    def __init__(self, node_id: str, func, instance=None):
-        self.config = _Config()
+    def __init__(self, node_id: str, func, config: _Config, instance=None):
+        self.config = config
         self.node = _node_for(node_id, func, instance)
         self.function = func
         self.instance = instance
@@ -659,7 +635,7 @@ class _TestRequest:
         self._finalizers.append(fn)
 
 
-def _with_request(func, args: dict, node_id: str, instance=None) -> tuple:
+def _with_request(func, args: dict, node_id: str, config: _Config, instance=None) -> tuple:
     """Add a `request` argument when the test asks for one (TID-14).
 
     `_bind_by_type` deliberately skips the name `request`, so it never resolves as a provider and
@@ -668,7 +644,7 @@ def _with_request(func, args: dict, node_id: str, instance=None) -> tuple:
     only the call site has."""
     if "request" in args or "request" not in inspect.signature(func).parameters:
         return args, None
-    request = _TestRequest(node_id, func, instance)
+    request = _TestRequest(node_id, func, config, instance)
     return {**args, "request": request}, request
 
 
@@ -890,235 +866,6 @@ _ROOTDIR_MARKERS = ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "set
 _ANCESTOR_CONFTESTS: dict[str, list] = {}
 
 
-# The `-m` expression from the project's pytest config, or None when there is none (TID-32).
-# Populated once during discovery; consulted per node in `Engine.run`.
-_MARKER_EXPR = None
-_KEYWORD_EXPR = None  # `-k EXPR` as a parsed tree, or None when no name filter applies (TID-63)
-_FORCE_ASYNCIO = False  # pytest-asyncio's auto mode drives every async test, whatever anyio says
-_DECLARED_MARKS: frozenset = frozenset()  # names the project declared via `markers = [...]`
-_STRICT_MARKS = False  # --strict-markers: using an undeclared mark is an error, as in pytest
-
-
-_IGNORED: tuple = ()  # absolute paths the project's own `addopts` excludes from collection
-
-
-def _ignores(project: ProjectConfig) -> tuple:
-    """`--ignore` / `--ignore-glob` paths out of the project's `addopts`, resolved to absolute paths
-    against the config's own directory, as pytest resolves them.
-
-    A project that excludes a directory from its default run means it: pirn-core's `--ignore=tests/perf`
-    holds benchmarks that need the `pytest-benchmark` plugin, and collecting them anyway reported 23
-    failures for tests pytest never runs. Ignored here rather than in the Rust collector because this
-    is where the project's own config is already being read."""
-    return tuple((os.path.abspath(os.path.join(project.dir, value)), glob)
-                 for flag, glob in (("--ignore", False), ("--ignore-glob", True))
-                 for value in project.opt_values(flag) if value)
-
-
-def _is_ignored(path: str) -> bool:
-    """Is `path` (absolute) excluded by the project's own `--ignore` / `--ignore-glob`?"""
-    if not _IGNORED:
-        return False
-    # Absolute on both sides: the run root arrives as `.` as often as not, and a relative path never
-    # matches a target resolved against the config's directory.
-    path = os.path.abspath(path)
-    for target, glob in _IGNORED:
-        if glob:
-            if fnmatch.fnmatch(path, target):
-                return True
-        elif path == target or path.startswith(target + os.sep):
-            return True
-    return False
-
-
-# pytest's identifier class for `-m` / `-k`: a keyword may be a parametrize id, `test_x[1-a]`.
-_SELECTION_IDENT = re.compile(r"[\w.:+\-\[\]\\/]+")
-
-
-def _parse_selection_expr(expr: str):
-    """pytest's selection grammar — identifiers, `and`, `or`, `not`, parentheses — as a tree.
-
-    Shared by `-m` and `-k` (TID-63): it is one grammar over two predicates. Parsed by hand rather
-    than with `ast`, which the `-m` path used to use: an `ast` identifier cannot contain `-` or
-    `[`, and `-k "test_x[1-a]"` is the ordinary way to name one parametrize case. Raises
-    `ValueError` on anything outside the grammar, so a filter we cannot read is reported once and
-    selects everything rather than silently deselecting the wrong tests.
-
-    Tree shape: `("ident", s)`, `("not", t)`, `("and", [ts])`, `("or", [ts])`."""
-    tokens: list = []
-    i = 0
-    while i < len(expr):
-        c = expr[i]
-        if c.isspace():
-            i += 1
-            continue
-        if c in "()":
-            tokens.append(c)
-            i += 1
-            continue
-        m = _SELECTION_IDENT.match(expr, i)
-        if not m:
-            raise ValueError(f"unexpected character {c!r} at position {i}")
-        tokens.append(m.group(0))
-        i = m.end()
-    pos = 0
-
-    def peek():
-        return tokens[pos] if pos < len(tokens) else None
-
-    def take():
-        nonlocal pos
-        pos += 1
-        return tokens[pos - 1]
-
-    def parse_or():
-        items = [parse_and()]
-        while peek() == "or":
-            take()
-            items.append(parse_and())
-        return items[0] if len(items) == 1 else ("or", items)
-
-    def parse_and():
-        items = [parse_not()]
-        while peek() == "and":
-            take()
-            items.append(parse_not())
-        return items[0] if len(items) == 1 else ("and", items)
-
-    def parse_not():
-        if peek() == "not":
-            take()
-            return ("not", parse_not())
-        t = peek()
-        if t is None:
-            raise ValueError("expected an identifier")
-        if t == "(":
-            take()
-            inner = parse_or()
-            if peek() != ")":
-                raise ValueError("missing ')'")
-            take()
-            return inner
-        if t in (")", "and", "or"):
-            raise ValueError(f"unexpected {t!r}")
-        return ("ident", take())
-
-    tree = parse_or()
-    if pos != len(tokens):
-        raise ValueError(f"unexpected {tokens[pos]!r}")
-    return tree
-
-
-def _evaluate_selection(tree, resolve):
-    """Evaluate a selection tree; `resolve(ident)` is True, False, or None for "cannot tell yet".
-
-    Three-valued so a node can be decided *before* its parametrize cases exist (TID-63). A `-k`
-    identifier that does not match the plain node id might still match a case id — `-k 1-a` against
-    `test_x[1-a]` — so at node level a non-match is "unknown", not "no". Kleene's rules: `not` of
-    unknown is unknown; `and` is False on any False, else unknown on any unknown; `or` is True on
-    any True, else unknown on any unknown. A False here is a False for every case that node could
-    produce, which is what makes deselecting it up front — before any fixture is built — sound."""
-    kind = tree[0]
-    if kind == "ident":
-        return resolve(tree[1])
-    if kind == "not":
-        v = _evaluate_selection(tree[1], resolve)
-        return None if v is None else not v
-    values = [_evaluate_selection(t, resolve) for t in tree[1]]
-    if kind == "and":
-        if any(v is False for v in values):
-            return False
-        return None if any(v is None for v in values) else True
-    if any(v is True for v in values):
-        return True
-    return None if any(v is None for v in values) else False
-
-
-def _compile_selection_tree(expr: str, flag: str):
-    try:
-        return _parse_selection_expr(expr)
-    except ValueError as exc:
-        _warn(f"ignoring {flag} {expr!r}: {exc}")
-        return None
-
-
-def _keyword_path_names(module_key: str) -> tuple:
-    """The names pytest's `-k` takes from a module's *path* (TID-100).
-
-    pytest's `KeywordMatcher` takes the name of every node on the item's chain except the session
-    and the root `Directory`, and a node's name is its path relative to its parent node's. Since
-    pytest 8 every directory is a `Dir` / `Package` node, so the names are each directory below
-    the rootdir and the module's file name — `-k unit` selects everything under `tests/unit/`,
-    4,557 of pirn-core's tests, where matching the file and test names alone selected none.
-    pytest 7 nests nothing: a module whose own directory holds an `__init__.py` sits under that
-    one `Package`, named by its basename, and is named by its own; any other module sits under
-    the session, named by its whole path from the rootdir — `tests/test_arguments.py`, which is
-    how click's `-k tests` matches on 7. The rootdir — the directory the ini was read from, else
-    the run root — is the root `Directory`, whose name pytest leaves out."""
-    cached = _KEYWORD_PATH_NAMES.get(module_key)
-    if cached is not None:
-        return cached
-    root = os.path.abspath(_ROOT or ".")
-    rootdir = _PROJECT.dir if _PROJECT is not None else root
-    module_path = os.path.join(root, module_key)
-    try:
-        rel = os.path.relpath(module_path, rootdir)
-        if rel.startswith(os.pardir):  # the ini sits beside, not above: the run root is the rootdir
-            rootdir, rel = root, os.path.relpath(module_path, root)
-    except ValueError:  # Windows: the config and the run root on different drives — no common
-        rootdir, rel = root, module_key  # ancestor; the run root is the rootdir then
-    parts = [p for p in rel.replace("\\", "/").split("/") if p and p != os.curdir and p != os.pardir]
-    if _pytest_major() >= 8:
-        names = tuple(parts)
-    elif len(parts) > 1 and os.path.exists(os.path.join(os.path.dirname(module_path), "__init__.py")):
-        names = (parts[-2], parts[-1])
-    else:
-        names = ("/".join(parts),)
-    _KEYWORD_PATH_NAMES[module_key] = names
-    return names
-
-
-_KEYWORD_PATH_NAMES: dict[str, tuple] = {}  # per module: fixed for the life of the process
-
-
-def _keyword_names(node_id: str, marks: set) -> list:
-    """What pytest's `-k` matches against: the names its path gives the node (TID-100), every
-    `::` segment — class, function, the function with its parametrize id — and the node's mark
-    names."""
-    parts = node_id.split("::")
-    return [*_keyword_path_names(parts[0]), *parts[1:], *sorted(marks)]
-
-
-def _keyword_matches(ident: str, names: list) -> bool:
-    """pytest's rule: a case-insensitive substring of any of the names."""
-    needle = ident.lower()
-    return any(needle in name.lower() for name in names)
-
-
-def _keyword_verdict(node_id: str, marks: set, final: bool):
-    """`_KEYWORD_EXPR` applied to a node: True (run it), False (deselect it), or None (decide per
-    case). `final=True` — the id is a complete case id, or the node has no cases — turns every
-    non-match into a No."""
-    names = _keyword_names(node_id, marks)
-
-    def resolve(ident: str):
-        if _keyword_matches(ident, names):
-            return True
-        return False if final else None
-
-    return _evaluate_selection(_KEYWORD_EXPR, resolve)
-
-
-def _compile_marker_expr(expr: str):
-    """A predicate over a set of mark names for one pytest `-m` expression.
-
-    The same grammar `-k` uses (TID-63), over "is this identifier one of the node's marks"."""
-    tree = _compile_selection_tree(expr, "-m")
-    if tree is None:
-        return None
-    return lambda marks: bool(_evaluate_selection(tree, lambda ident: ident in marks))
-
-
 def _rootdir(root: str) -> str | None:
     """The nearest ancestor of `root` holding a project marker, or None if there is none.
 
@@ -1203,14 +950,12 @@ def _walk_suite(root: str):
         yield current, dirs, files
 
 
-def _discover(root: str) -> Registry:
+def _discover(run: RunConfig, *, timer: _PhaseTimer | None = None) -> Registry:
+    """The registry: every fixture and provider the run's conftests and selected test modules
+    define, the builtins' and the plugins', with the collection hooks run and the per-directory
+    skips recorded on the way. `timer` counts the test modules `--modules` left out."""
     reg = Registry()
-    # The project's own config, read before the walk: `--ignore` has to prune it, and the `-m` filter
-    # below is read from the same place.
-    project = load_project_config(root)
-    global _IGNORED, _PROJECT
-    _IGNORED = _ignores(project)
-    _PROJECT = project
+    root, project = run.root, run.project
     native: list[tuple] = []  # (provider obj, location) — resolved in a second pass (see below)
     conftests: list = []  # every conftest module, for the collection hooks (TID-20)
     _CONFTEST_SCOPES.clear()  # rebuilt with them: which directory each one governs (TID-85)
@@ -1231,7 +976,7 @@ def _discover(root: str) -> Registry:
         if _dir_skip(rel_dir) is not None:
             dirs[:] = []  # a skipped conftest's subtree is not collected at all, as in pytest
             continue
-        if _is_ignored(current):
+        if run.is_ignored(current):
             dirs[:] = []
             continue
         # The directory's conftest before its test modules: it may skip the directory, and `sorted`
@@ -1257,9 +1002,9 @@ def _discover(root: str) -> Registry:
                 # imported twice under two names, so a module-level fixture could register against
                 # one copy while the test ran against the other.
                 location = os.path.relpath(path, root).replace(os.sep, "/")
-                if not _module_selected(location):
-                    global _SKIPPED_AT_DISCOVERY
-                    _SKIPPED_AT_DISCOVERY += 1
+                if not run.module_selected(location):
+                    if timer is not None:
+                        timer.unselected += 1
                     continue  # this run will not execute it (TID-75)
                 rel = _module_name(location)
                 try:
@@ -1285,38 +1030,15 @@ def _discover(root: str) -> Registry:
 
     # After every conftest is loaded and every test module imported — the hooks need both, and the
     # marks they inspect only exist once the decorators have run.
-    _run_collection_hooks(conftests, test_modules)
+    _run_collection_hooks(conftests, test_modules, _Config(run))
 
-    # The project's own `-m` filter (TID-32). Read here rather than at each node so a malformed
-    # expression is reported once.
-    global _MARKER_EXPR, _DECLARED_MARKS, _STRICT_MARKS
-    # The command line wins over the project's own `addopts`, as it does in pytest: a config filter is
-    # the project's default, and `-m` on the command line is this run's intent (TID-59).
-    expr = _env("TIDERACE_MARKER_EXPR") or project.opt("-m")
-    _MARKER_EXPR = _compile_marker_expr(expr) if expr else None
-    _DECLARED_MARKS, _STRICT_MARKS = _registered_marks(project)
-    if _STRICT_MARKS:
-        # Ask pytest for the plugins' marks *now*, in the process every worker is forked from: the
-        # answer was fetched lazily by the first strict node each worker met, a 0.5s subprocess
-        # per worker per run — and the largest single cost of a `-k` run on pirn-core (TID-91).
-        _plugin_marks()
-    # `-k EXPR`, same precedence (TID-63): the command line over the project's own `addopts`.
-    global _KEYWORD_EXPR
-    kexpr = _env("TIDERACE_KEYWORD_EXPR") or project.opt("-k")
-    _KEYWORD_EXPR = _compile_selection_tree(kexpr, "-k") if kexpr else None
-    # `asyncio_mode = "auto"` means pytest-asyncio claims *every* async test, including ones carrying
-    # `@pytest.mark.anyio`. In that configuration pytest runs even a `[trio]`-labelled variant on an
-    # asyncio loop — the id says trio and the loop never is. Emulating the suite's configured
-    # toolchain is the job here, so the same thing happens: the expansion still produces one variant
-    # per backend, as pytest's ids do, and they all run where pytest runs them (TID-54).
-    global _FORCE_ASYNCIO
-    _FORCE_ASYNCIO = False
-    if any(str(v).strip().strip('"\'') == "auto" for v in project.values("asyncio_mode")):
-        try:
-            import pytest_asyncio  # noqa: F401 — only its presence matters
-            _FORCE_ASYNCIO = True
-        except Exception:  # noqa: BLE001 — declared but not installed: nothing claims the tests
-            pass
+    # `--strict-markers` (TID-59): ask pytest for the plugins' marks *now*, in the process every
+    # worker is forked from. The answer was fetched lazily by the first strict node each worker
+    # met, a 0.5s subprocess per worker per run — the largest single cost of a `-k` run on
+    # pirn-core (TID-91). The selection itself is the engine's (`Selection.load`), read once every
+    # conftest has imported: a native `tiderace.mark.register` in one of them counts as declared.
+    if _registered_marks(project)[1]:
+        _plugin_marks(root)
 
     # Native providers wire by type, so provider→provider deps need the FULL type set first: build the
     # type index, then build the defs (a two-pass the name-DI pytest path doesn't need).
@@ -1326,7 +1048,7 @@ def _discover(root: str) -> Registry:
         type_index.setdefault(spec.provides, []).append(spec.name)
     for obj, location in native:
         reg.add(_native_fixture_def(obj, location, type_index))
-    _register_builtins(reg)
+    _register_builtins(reg, run)
     # Last, so everything above — a conftest at any depth, the builtins, the native anyio_backend —
     # takes precedence over a plugin's fixture of the same name, as in pytest (TID-87).
     _register_plugin_fixtures(reg, project, conftests)
@@ -1439,7 +1161,28 @@ def _register_class_fixtures(reg: Registry, cls: type, module_key: str) -> None:
             reg.add(fdef)
 
 
-def _register_builtins(reg: Registry) -> None:
+class _BuiltinsContext:
+    """What the builtins see of the run — the `RunContext` the authoring package defines (TID-111):
+    the root, the options conftests declared, the ini values."""
+
+    __slots__ = ("run",)
+
+    def __init__(self, run: RunConfig) -> None:
+        self.run = run
+
+    @property
+    def rootdir(self) -> str:
+        return self.run.root or os.getcwd()
+
+    @property
+    def options(self) -> dict:
+        return dict(_CLI_OPTIONS)
+
+    def ini(self, name: str):
+        return _ini_value(self.run.project, name)
+
+
+def _register_builtins(reg: Registry, run: RunConfig) -> None:
     """Register tiderace's always-available builtin resources (ROADMAP-v2 B1: monkeypatch/tmp_path/
     capsys/capfd/caplog) at the root location (""), so every test can request them — by type (the
     migrated form, `mp: MonkeyPatch`) or by name (the pytest form, `monkeypatch`), with no per-tree
@@ -1458,9 +1201,8 @@ def _register_builtins(reg: Registry) -> None:
               f"engine/py-tiderace on PYTHONPATH.")
         return
     # The builtins read the run root, the declared options and the ini values through one
-    # accessor (TID-111); hand them this module, whose globals they used to reach with
-    # `import shim`. Per interpreter: a sub-interpreter registers its own copy.
-    builtins_pkg.set_context(builtins_pkg._runtime.ModuleContext(sys.modules[__name__]))
+    # accessor (TID-111); hand them the run. Per interpreter: a sub-interpreter registers its own.
+    builtins_pkg.set_context(_BuiltinsContext(run))
     for obj in builtins_pkg.providers():
         reg.add(_native_fixture_def(obj, "", {}))
     _register_anyio_backend(reg)
@@ -1837,7 +1579,7 @@ _UNWATCHED_PACKAGES = frozenset({"pytest", "_pytest", "py", "tiderace", "unittes
 _WATCHED_PACKAGES: dict = {}  # module key -> the third-party packages its imports reach
 
 
-def _watched_packages(module_key: str) -> tuple:
+def _watched_packages(root: str, module_key: str) -> tuple:
     """Top-level **non-stdlib** packages a test module imports, for registry watching (TID-46).
 
     Scoped deliberately. Watching every module in `sys.modules` would cost more than the tests do,
@@ -1849,7 +1591,7 @@ def _watched_packages(module_key: str) -> tuple:
     if cached is not None:
         return cached
     roots: set = set()
-    path = os.path.join(_ROOT or ".", module_key)
+    path = os.path.join(root or ".", module_key)
     for name, level in _imported_names(path):
         if level or not name:
             continue  # a relative import is the suite's own code, covered by the module snapshot
@@ -1861,7 +1603,7 @@ def _watched_packages(module_key: str) -> tuple:
     return result
 
 
-def _drive_async(make_coro, backend=None):
+def _drive_async(make_coro, backend=None, *, force_asyncio: bool = False):
     """Run an async body to completion on the backend the run asked for.
 
     `anyio_backend` carries either a name (`"trio"`) or a name and its options
@@ -1870,7 +1612,7 @@ def _drive_async(make_coro, backend=None):
     is only reached when the suite already depends on anyio.
 
     Everything else — the overwhelming majority — keeps the plain asyncio path it always had."""
-    if backend is None or _FORCE_ASYNCIO:
+    if backend is None or force_asyncio:
         return asyncio.run(make_coro())
     name, options = (backend, None)
     if isinstance(backend, (tuple, list)) and backend:
@@ -1899,13 +1641,13 @@ def _test_is_async(node_id: str, style: str) -> bool:
     return resolve_target(node_id, style, lenient=True).is_async
 
 
-async def _invoke_async(node_id: str, style: str, args: dict) -> tuple[str, str]:
+async def _invoke_async(node_id: str, style: str, args: dict, config: _Config) -> tuple[str, str]:
     """The async sibling of `_invoke`, with the same runtime-marker fold (TID-51)."""
-    outcome, detail = await _invoke_async_body(node_id, style, args)
+    outcome, detail = await _invoke_async_body(node_id, style, args, config)
     return _runtime_outcome(_CURRENT_NODE, outcome, detail)
 
 
-async def _invoke_async_body(node_id: str, style: str, args: dict) -> tuple[str, str]:
+async def _invoke_async_body(node_id: str, style: str, args: dict, config: _Config) -> tuple[str, str]:
     """The async sibling of `_invoke`: call the test, `await` it if it's a coroutine, and map the same
     outcomes (incl. lazy RichDiff on `AssertionError`). Runs inside the per-test event loop, so it must
     `await` directly — never `asyncio.run` (which can't nest)."""
@@ -1917,10 +1659,10 @@ async def _invoke_async_body(node_id: str, style: str, args: dict) -> tuple[str,
             instance = node.cls()
             bound = getattr(instance, node.name)
             target = bound
-            call_args, request = _with_request(bound, args, node_id, instance)
+            call_args, request = _with_request(bound, args, node_id, config, instance)
         else:
             target = node.func
-            call_args, request = _with_request(target, args, node_id)
+            call_args, request = _with_request(target, args, node_id, config)
         hooks = _xunit_test_hooks(module, style, node_id, target)
         try:
             _call_hook(*hooks[0]) if hooks[0] else None
@@ -2187,12 +1929,12 @@ def _write_file_deps_index(d: str, files: dict) -> None:
             pass
 
 
-def _save_file_deps_cache() -> None:
+def _save_file_deps_cache(root: str) -> None:
     """What this process parsed, to its own file under the cache dir; the next run's parent folds it
     in. Nothing to write is nothing written."""
-    if not _FILE_DEPS_NEW or not _ROOT:
+    if not _FILE_DEPS_NEW or not root:
         return
-    d = _file_deps_cache_dir(_ROOT)
+    d = _file_deps_cache_dir(root)
     try:
         os.makedirs(d, exist_ok=True)
         tmp = os.path.join(d, f".w-{os.getpid()}.tmp")
@@ -2370,15 +2112,20 @@ class _Coverage:
 class Engine:
     """Parent-side scope state: wider-than-function fixtures live here, inherited by forked children."""
 
-    def __init__(self, reg: Registry, no_fork: bool = False, root: str | None = None,
-                 coverage: bool = False, purity_guard: bool = False, restore: bool = False,
-                 coverage_lines: bool = False, *, options: EngineOptions | None = None):
-        """`options` is the run's configuration (`EngineOptions`); the keyword booleans are the
-        same five, for the callers that spell them out (the proofs, the conformance runthrough)."""
+    def __init__(self, reg: Registry, config: RunConfig, *, options: EngineOptions | None = None,
+                 selection: Selection | None = None, no_fork: bool = False, coverage: bool = False,
+                 purity_guard: bool = False, restore: bool = False, coverage_lines: bool = False):
+        """`config` is the run — root, project, what it ignores, the modules it executes (TID-124);
+        `options` the engine's knobs (`EngineOptions`), and the keyword booleans the same five for
+        the callers that spell them out (the proofs); `selection` this run's `-k` / `-m` /
+        `--strict-markers` — by default the project's own and the environment's, read now, after
+        discovery, so a mark a conftest registered natively counts as declared."""
         self.reg = reg
+        self.config = config
+        self.selection = selection if selection is not None else Selection.load(config.project)
+        self._pytest_config = _Config(config)  # `request.config`: one per run
         self.options = options or EngineOptions(no_fork=no_fork, restore=restore, purity_guard=purity_guard,
                                                 coverage=coverage, coverage_lines=coverage_lines)
-        self.root = root  # corpus root, for coverage path relativization
         self._leaked = None          # this test's unmodelled state drift, if any (TID-33)
         self._state_disturbed = False  # …and whether the node should be forked from now on
         self._disturbance = None  # what moved, kept for the verdict the clean-room handoff reports
@@ -2387,6 +2134,14 @@ class Engine:
         self._guard = None  # the in-process module's entry snapshot, restored when we leave it (TID-81)
         self._in_module_child = False  # set in that child: run everything in-process, never fork
         self.active: list[_Active] = []  # in setup order (widest → narrowest)
+
+    def apply_selection(self, patch: dict | None) -> None:
+        """This run's `-k` / `-m` / `--strict-markers`, in a worker forked off a warm image (TID-90).
+
+        The image read its selection at start-up — the project's own `addopts`, since a persistent
+        parent is launched with none of this run's — and the gate consults it per node, so
+        replacing it after the fork is the whole job (`Selection.override`)."""
+        self.selection = self.selection.override(patch)
 
     def _value(self, name: str, module_key: str):
         # The most-recently set-up active instance of `name` is the one in scope for this test.
@@ -2447,7 +2202,8 @@ class Engine:
             mod = _import_module(module_key)
         except Exception:  # noqa: BLE001 — nothing to snapshot; nothing to put back either
             return
-        self._guard = Isolation.before(module_key, mod, _watched_packages(module_key), measure=True, full=True)
+        self._guard = Isolation.before(module_key, mod, _watched_packages(self.config.root, module_key),
+                                       measure=True, full=True)
 
     def _leave_module(self) -> None:
         """Restore the entered module's snapshot: the next module on this worker starts from the
@@ -2465,7 +2221,7 @@ class Engine:
         module_key = _module_key(node_id)
         # Under a directory whose conftest skipped itself (TID-48): pytest never collects these, so
         # nothing about the node — its class, its marks, its module — may be touched.
-        if _is_ignored(os.path.join(_ROOT or ".", module_key)):
+        if self.config.module_ignored(module_key):
             return empty_expansion(node_id)
         # A conftest that did not import (TID-72), before the skip: a directory whose setup is broken
         # is broken for every test in it, and that is an error pytest would have stopped on.
@@ -2506,28 +2262,22 @@ class Engine:
         # Always, `-k` or not (TID-102): the names `-k` would match against are reported with the
         # result, so the daemon can take the verdict itself next time for a node nothing touched.
         names = _mark_names(node_id, style)
-        if _STRICT_MARKS:
-            # `--strict-markers`: a mark the project never declared is a typo far more often than an
-            # intention, and pytest errors the item rather than running it. Silently ignoring the flag
-            # meant `@pytest.mark.slwo` quietly ran a test its author had filtered out (TID-59).
-            unknown = sorted(n for n in names if n and n not in _DECLARED_MARKS and n not in _BUILTIN_MARKS)
-            if unknown:
-                # Everything a plugin registered counts as declared — ask pytest rather than guess.
-                # If it cannot tell us, enforce nothing: a false error on a valid mark fails a correct
-                # suite, which is worse than missing a typo (TID-60).
-                registered = _plugin_marks()
-                unknown = [n for n in unknown if n not in registered] if registered is not None else []
-            if unknown:
-                return errored(node_id, f"{', '.join(unknown)} not found in `markers` configuration option")
-        if _MARKER_EXPR is not None and not _MARKER_EXPR(names):
+        # `--strict-markers`: a mark the project never declared is a typo far more often than an
+        # intention, and pytest errors the item rather than running it. Silently ignoring the flag
+        # meant `@pytest.mark.slwo` quietly ran a test its author had filtered out (TID-59).
+        unknown = self.selection.unknown_marks(names, self.config.root)
+        if unknown:
+            return errored(node_id, f"{', '.join(unknown)} not found in `markers` configuration option")
+        if not self.selection.marker_allows(names):
             return empty_expansion(node_id)
         # `-k` (TID-63), decided here when it can be: a No at node level is a No for every case the
         # node could produce, so it is deselected before a fixture is built or a skip mark is read —
         # pytest deselects at collection, and a deselected `@pytest.mark.skip` test is not a skip.
         # An "unknown" is settled per case once the case ids exist, below.
-        keyword_verdict = _keyword_verdict(node_id, names, final=False) if _KEYWORD_EXPR is not None else True
+        keywords = self.config.keyword_names(node_id, names)
+        keyword_verdict = self.selection.keyword_verdict(keywords, final=False)
         if keyword_verdict is False:
-            return empty_expansion(node_id, keywords=_keyword_names(node_id, names))
+            return empty_expansion(node_id, keywords=keywords)
         return names, keyword_verdict
 
     def _plan(self, node_id: str, style: str, names: set, keyword_verdict) -> "Plan | dict":
@@ -2677,15 +2427,15 @@ class Engine:
         selected = set(range(len(variant_ids)))
         if keyword_verdict is None:
             selected = {i for i, vid in enumerate(variant_ids)
-                        if _keyword_verdict(vid, names, final=True)}
+                        if self.selection.keyword_verdict(self.config.keyword_names(vid, names), final=True)}
             if not selected:
-                return empty_expansion(node_id, keywords=_keyword_names(node_id, names))
+                return empty_expansion(node_id, keywords=self.config.keyword_names(node_id, names))
         if skip_reason is not None:  # the skip deferred above, one per selected variant (TID-88)
             if not parametrized_node:
-                return skipped(node_id, skip_reason, keywords=_keyword_names(node_id, names))
-            return skipped(node_id, skip_reason, keywords=_keyword_names(node_id, names),
+                return skipped(node_id, skip_reason, keywords=self.config.keyword_names(node_id, names))
+            return skipped(node_id, skip_reason, keywords=self.config.keyword_names(node_id, names),
                            variants=[variant(vid, Outcome.SKIPPED, skip_reason, 0,
-                                             keywords=_keyword_names(vid, names))
+                                             keywords=self.config.keyword_names(vid, names))
                                      for i, vid in enumerate(variant_ids) if i in selected])
         return Plan(node, names, marks, requested, fixture_requested, closure, indirect,
                     case_kwargs_list, combos, combo_id_maps, parametrized_node, variant_ids, selected)
@@ -2735,7 +2485,7 @@ class Engine:
         resp = assemble(node_id, results, parametrized=plan.parametrized_node,
                         native_marks=_normalise_marks(plan.marks),
                         pytest_marks=_normalise_marks(reversed(_pytest_markers(plan.node))),
-                        keywords=lambda nid: _keyword_names(nid, names))
+                        keywords=lambda nid: self.config.keyword_names(nid, names))
         if any(r.disturbed for r in results):
             clean = self._clean_room_handoff(node_id, style, deadline_ms)
             if clean is not None:
@@ -3149,7 +2899,7 @@ class Engine:
                 return local[name]
             return self._value(name, module_key)
 
-        cov = _Coverage(self.root, self.options.coverage, self.options.coverage_lines)
+        cov = _Coverage(self.config.root, self.options.coverage, self.options.coverage_lines)
         cov.start()  # capture the per-test footprint: fixture setup + body, this test only (ADR-E006)
         # B5: async test body or any function-scope async provider ⇒ run setup+body+teardown on ONE
         # event loop (objects created on a loop must be awaited on the same loop). Sync path untouched.
@@ -3161,6 +2911,7 @@ class Engine:
                     lambda: self._child_exec_async(node_id, style, requested, closure, combo,
                                                    case_kwargs),
                     combo.get("anyio_backend"),
+                    force_asyncio=self.config.force_asyncio,
                 )
                 cov.stop()
                 # Closure merged in here, not inside `_Coverage`, so the capture object stays purely
@@ -3202,9 +2953,10 @@ class Engine:
             if full:
                 self._enter_module(module_key)
             mod = _import_module(module_key) if measure else None
-            isolation = Isolation.before(module_key, mod, _watched_packages(module_key) if full else (),
+            watched = _watched_packages(self.config.root, module_key) if full else ()
+            isolation = Isolation.before(module_key, mod, watched,
                                          measure=mod is not None, full=full)
-            outcome, detail = _invoke(node_id, style, test_args)
+            outcome, detail = _invoke(node_id, style, test_args, self._pytest_config)
             # Everything below MEASURES; nothing here restores: the restore that stands in for a
             # fork happens when this worker leaves the module (`_leave_module`), against the
             # snapshot taken when it entered (TID-80, TID-81). The per-test verdict still says what
@@ -3246,7 +2998,7 @@ class Engine:
             test_args = {param: value_of(prov) for param, prov in requested.items()}
             if case_kwargs:
                 test_args.update(case_kwargs)
-            return await _invoke_async(node_id, style, test_args)
+            return await _invoke_async(node_id, style, test_args, self._pytest_config)
         finally:
             for handle in reversed(handles):
                 await _teardown_async(handle)
@@ -3342,10 +3094,10 @@ class Engine:
         except Exception:  # noqa: BLE001 — an unresolvable request is the test's problem, later
             pass
         return _generate_tests_marks(node_id, func, module, owner, names,
-                                     _own_markers(module, owner, func))
+                                     _own_markers(module, owner, func), self._pytest_config)
 
     def teardown_all(self) -> None:
-        _save_file_deps_cache()  # what this worker parsed, for the next run (TID-82)
+        _save_file_deps_cache(self.config.root)  # what this worker parsed, for the next run (TID-82)
         self._module_child_close()  # its module's tests are done: its fixtures, hooks and exit (TID-80)
         while self.active:
             _teardown(self.active.pop().gen)
@@ -3380,12 +3132,13 @@ class _MetaFunc:
     its function/module/class, a `definition` that answers marker queries, a `config`, and
     `parametrize`, which records an axis for the test exactly as a `@pytest.mark.parametrize` would."""
 
-    def __init__(self, node_id: str, func, module, cls, fixturenames: list, markers: list):
+    def __init__(self, node_id: str, func, module, cls, fixturenames: list, markers: list,
+                 config: _Config):
         self.function = func
         self.module = module
         self.cls = cls
         self.fixturenames = list(fixturenames)
-        self.config = _Config()
+        self.config = config
         self.definition = _HookItem(node_id, node_id.rsplit("::", 1)[-1], markers)
         self._marks: list = []
 
@@ -3418,7 +3171,8 @@ def _conftests_governing(module_key: str) -> list:
     return [m for _, m in governing]
 
 
-def _generate_tests_marks(node_id: str, func, module, cls, fixturenames: list, markers: list) -> list:
+def _generate_tests_marks(node_id: str, func, module, cls, fixturenames: list, markers: list,
+                          config: _Config) -> list:
     """Run the `pytest_generate_tests` hooks that apply to this test — its module's own first, then
     its conftests deepest to root — and return the parametrize marks they declared, in pytest's
     order (which is the order their ids appear in the node id). Cached per node: hooks are
@@ -3436,7 +3190,7 @@ def _generate_tests_marks(node_id: str, func, module, cls, fixturenames: list, m
             hooks.append(hook)
     marks: list = []
     if hooks:
-        metafunc = _MetaFunc(node_id, func, module, cls, fixturenames, markers)
+        metafunc = _MetaFunc(node_id, func, module, cls, fixturenames, markers, config)
         for hook in hooks:
             hook(metafunc)
         marks = metafunc._marks
@@ -3594,85 +3348,13 @@ def _mark_names(node_id: str, style: str) -> set:
     return names
 
 
-# Marks pytest itself defines; `--strict-markers` never complains about these.
-_BUILTIN_MARKS = frozenset({
-    "skip", "skipif", "xfail", "parametrize", "usefixtures", "filterwarnings", "tryfirst", "trylast",
-})
-_PLUGIN_MARKS: frozenset | None = None  # markers the installed plugins register; None = not asked yet
-_PLUGIN_MARKS_ASKED = False  # `_plugin_marks` asks pytest once per process, whatever it answers
-
-
-def _plugin_marks() -> frozenset | None:
-    """Every marker the installed pytest plugins register, or `None` if we could not find out.
-
-    A plugin registers its markers at runtime — pytest-timeout's `timeout`, pytest-benchmark's
-    `benchmark`, pytest-django's `django_db` — by calling `addinivalue_line("markers", ...)` from
-    `pytest_configure`. None of that is in the project's own `markers` list, and tiderace does not run
-    plugins, so a hand-written allowlist would flag every one of them as a typo. pirn-core showed
-    exactly that: 60 tests erroring on `@pytest.mark.timeout`, which pytest accepts without comment
-    (TID-60).
-
-    So ask pytest, which already knows: `--markers` prints the registered set, plugins included. One
-    subprocess, only when a project has turned strict checking on, cached for the run.
-
-    `None` means we could not get an answer, and the caller must then **not** enforce: a false error
-    on a valid mark is worse than a missed typo, because it fails a suite that is correct."""
-    global _PLUGIN_MARKS, _PLUGIN_MARKS_ASKED
-    if _PLUGIN_MARKS_ASKED:
-        return _PLUGIN_MARKS  # asked once per process — a "could not find out" included (TID-91)
-    _PLUGIN_MARKS_ASKED = True
-    try:
-        out = subprocess.run(
-            [sys.executable, "-m", "pytest", "--markers"],
-            capture_output=True, text=True, timeout=60, cwd=_ROOT or None,
-        ).stdout
-    except Exception:  # noqa: BLE001 — no pytest, or it refused to start
-        return None
-    names = frozenset(re.findall(r"^@pytest\.mark\.(\w+)", out, re.M))
-    if not names:
-        return None  # an empty answer is not an answer
-    _PLUGIN_MARKS = names
-    return _PLUGIN_MARKS
-
-
-def _registered_marks(project: ProjectConfig) -> tuple:
-    """`(declared names, strict)` — which marks the project declared, and whether it wants them checked.
-
-    pytest projects declare marks as `markers = ["slow: ...", ...]` in their config and opt into
-    validation with `--strict-markers`; a tiderace-native project says the same thing under
-    `[tool.tiderace]`. Both are read, because a suite mid-migration has both kinds of test in it."""
-    names: set = set()
-    strict = project.flag("--strict-markers") or project.flag("--strict")
-    for raw in project.values("markers"):
-        # pytest's spelling is "name: description" or a bare name; only the name selects.
-        name = str(raw).split(":", 1)[0].strip()
-        if name:
-            names.add(name.partition("(")[0].strip())  # `name(args)` in a few suites
-    if project.values("strict_markers"):
-        strict = True
-    # The native declaration surface (TID-67): `tiderace.mark.register("slow", ...)` in a conftest.
-    # Every conftest has been imported by the time this runs, so whatever they registered is here.
-    # Without it a suite written natively — no `import pytest` anywhere — still needed a *pytest*
-    # config block to declare its own marks, or strict checking rejected them.
-    try:
-        import tiderace
-        names.update(tiderace.mark.registered())
-    except Exception:  # noqa: BLE001 — no native package on this interpreter ⇒ no native marks
-        pass
-    # `--strict-markers` on the command line (TID-67), for the same reason `-m` and `-k` travel
-    # this way: a project with no config file at all has nowhere else to say it.
-    if _env_flag("TIDERACE_STRICT_MARKERS"):
-        strict = True
-    return frozenset(names), strict
-
-
-def _invoke(node_id: str, style: str, args: dict) -> tuple[str, str]:
+def _invoke(node_id: str, style: str, args: dict, config: _Config) -> tuple[str, str]:
     """Run the test, then fold in any marker it or its fixtures attached while running (TID-51)."""
-    outcome, detail = _invoke_body(node_id, style, args)
+    outcome, detail = _invoke_body(node_id, style, args, config)
     return _runtime_outcome(_CURRENT_NODE, outcome, detail)
 
 
-def _invoke_body(node_id: str, style: str, args: dict) -> tuple[str, str]:
+def _invoke_body(node_id: str, style: str, args: dict, config: _Config) -> tuple[str, str]:
     node = resolve_target(node_id, style, lenient=style == "unittest_method")
     module = node.module
     try:
@@ -3682,7 +3364,7 @@ def _invoke_body(node_id: str, style: str, args: dict) -> tuple[str, str]:
             _xunit_class_setup(node.cls)  # pytest's `setup_class`, once per class per process (TID-60)
             instance = node.cls()
             bound = getattr(instance, node.name)
-            call_args, request = _with_request(bound, args, node_id, instance)
+            call_args, request = _with_request(bound, args, node_id, config, instance)
             setup, teardown = _xunit_test_hooks(module, style, node_id, bound)
             try:
                 if setup:
@@ -3697,7 +3379,7 @@ def _invoke_body(node_id: str, style: str, args: dict) -> tuple[str, str]:
                 _test_finalizers(request)
             return "passed", ""
         func = node.func
-        call_args, request = _with_request(func, args, node_id)
+        call_args, request = _with_request(func, args, node_id, config)
         setup, teardown = _xunit_test_hooks(module, style, node_id, func)
         try:
             if setup:
@@ -4201,14 +3883,15 @@ def _aggregate(outcomes: list[tuple[str, str]]) -> tuple[str, str]:
 
 
 # --------------------------------------------------------------------------- serve loop
-def _preimport(root: str) -> None:
+def _preimport(run: RunConfig) -> None:
+    root = run.root
     for current, _dirs, files in _walk_suite(root):  # never warm a dependency's own suite
         for name in files:
             if name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py")):
-                if _is_ignored(os.path.join(current, name)):
+                if run.is_ignored(os.path.join(current, name)):
                     continue
                 rel = os.path.relpath(os.path.join(current, name), root).replace(os.sep, "/")
-                if not _module_selected(rel):
+                if not run.module_selected(rel):
                     continue  # this run will not execute it (TID-75)
                 try:
                     # Named as `_discover` and execution name it (TID-37); a module-level
@@ -4218,7 +3901,7 @@ def _preimport(root: str) -> None:
                     pass
 
 
-def _probe_module_safe(module_key: str, paths: list) -> dict:
+def _probe_module_safe(root: str, module_key: str, paths: list) -> dict:
     """Sub-interpreter safety probe (ADR-E015, TID-9). Import the module (and thus its transitive
     closure) in a **fresh isolated sub-interpreter** (`concurrent.interpreters`, PEP 734 / per-interpreter
     GIL); if it loads there the module is *safe* to run on the sub-interpreter tier, otherwise not (e.g.
@@ -4235,7 +3918,7 @@ def _probe_module_safe(module_key: str, paths: list) -> dict:
     # that another interpreter's teardown then removed left every other interpreter with no
     # working directory at all, 306 errors and a hung pool (TID-104). Found by text, since the
     # import probe cannot see what a test body will do.
-    global_touch = _touches_process_globals(module_key)
+    global_touch = _touches_process_globals(root, module_key)
     if global_touch:
         return {"module": module_key, "safe": False,
                 "reason": f"touches process-global state ({global_touch}), shared across sub-interpreters"}
@@ -4258,10 +3941,10 @@ _PROCESS_GLOBAL_CALLS = ("chdir(", "isolated_filesystem(", "putenv(", "unsetenv(
                          "delenv(", "os.environ[", "signal.signal(", "umask(")
 
 
-def _touches_process_globals(module_key: str) -> str:
+def _touches_process_globals(root: str, module_key: str) -> str:
     """The first process-global call named in a test module's source, or in the `conftest.py`
     beside it, or `""` — the text check behind the sub-interpreter probe (TID-104)."""
-    root = os.path.abspath(_ROOT or ".")
+    root = os.path.abspath(root or ".")
     candidates = [os.path.join(root, module_key),
                   os.path.join(root, os.path.dirname(module_key), "conftest.py")]
     for path in candidates:
@@ -4281,14 +3964,12 @@ def probe() -> int:
     Same framed pipe as `serve`: reads `{"module": "<rel/path.py>"}` frames, replies
     `{"module", "safe": true|false|null, "reason"?}`. No tests run — this only decides eligibility."""
     root = sys.argv[1]
-    global _ROOT
-    _ROOT = root
     set_run_root(root)
     _insert_run_root(root)
     paths = list(sys.path)  # the sub-interpreter inherits the same import roots (root + site-packages + …)
     transport = Transport.stdio(redirect_stdout=False)
     transport.ready()
-    transport.serve(lambda req: _probe_module_safe(req["module"], paths))
+    transport.serve(lambda req: _probe_module_safe(root, req["module"], paths))
     return 0
 
 
@@ -4299,7 +3980,8 @@ _SUBINTERP_WORKER_LOOP = """
 import sys
 sys.path[:0] = list(_paths)
 from tiderace_shim import _shim
-_eng = _shim.Engine(_shim._discover(_root), root=_root, no_fork=True, restore=True)
+_run = _shim.RunConfig.load(_root)
+_eng = _shim.Engine(_shim._discover(_run), _run, no_fork=True, restore=True)
 try:
     while True:
         _task = _in_q.get()
@@ -4329,8 +4011,6 @@ def subinterp() -> int:
     from concurrent import interpreters  # 3.14+; the caller probes first, so this is expected present
 
     root = sys.argv[1]
-    global _ROOT
-    _ROOT = root
     set_run_root(root)
     # As in `serve()` (TID-103): every sub-interpreter's `sys.stdout` is fd 1, so a test that
     # printed put its bytes into the engine's result stream — read as a frame length, waited on
@@ -4642,30 +4322,6 @@ def _serve_pool_persistent(transport: Transport, engine_args: dict) -> int:
     return 0
 
 
-def _apply_selection(selection: dict | None) -> None:
-    """This run's `-k` / `-m` / `--strict-markers`, in a worker forked off a warm image (TID-90).
-
-    The image read its selection from the environment at start-up — the project's own `addopts`,
-    since a persistent parent is launched with none of this run's — and the three are consulted
-    per node in `run()`, so setting them after the fork is the whole job. A field left out keeps
-    the image's value; an explicit empty string clears it (a `-k ""`)."""
-    global _KEYWORD_EXPR, _MARKER_EXPR, _STRICT_MARKS
-    if not selection:
-        return
-    # A field that is absent *or null* keeps the image's value: the daemon serialises the run's
-    # selection with every field present, `null` for the ones the run did not give, and reading
-    # `null` as "clear it" dropped the project's own `addopts -m` on every `-k` run through the
-    # daemon — 32 tests pirn-core's config deselects ran (TID-102).
-    if selection.get("keyword") is not None:
-        kexpr = selection["keyword"]
-        _KEYWORD_EXPR = _compile_selection_tree(kexpr, "-k") if kexpr else None
-    if selection.get("marker") is not None:
-        expr = selection["marker"]
-        _MARKER_EXPR = _compile_marker_expr(expr) if expr else None
-    if selection.get("strict_markers"):
-        _STRICT_MARKS = True
-
-
 def _fork_pool_workers(size: int, socket_path: str, engine_args: dict,
                        selection: dict | None = None) -> list:
     """Fork `size` workers off this (imported) process, each connecting to `socket_path` and
@@ -4680,8 +4336,8 @@ def _fork_pool_workers(size: int, socket_path: str, engine_args: dict,
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.connect(socket_path)
             transport = Transport.over(sock)
-            _apply_selection(selection)
             engine = Engine(**engine_args)
+            engine.apply_selection(selection)
             _start_clean_room(engine)  # before a single test runs: the image is pristine now (TID-50)
             transport.ready()
             try:
@@ -4696,8 +4352,6 @@ def _fork_pool_workers(size: int, socket_path: str, engine_args: dict,
 
 def serve() -> int:
     root = sys.argv[1]
-    global _ROOT
-    _ROOT = root
     set_run_root(root)
     transport = Transport.stdio()  # fd 1 goes to stderr; the frames have a private fd (TID-103)
     no_fork = "--no-fork" in sys.argv[2:]
@@ -4711,22 +4365,24 @@ def serve() -> int:
     # Ancestor conftests before `_preimport` (TID-19): a root conftest exists to set things up that
     # must already be true when test modules import — env defaults, warning filters, `sys.path`. pytest
     # loads conftests first for the same reason. `_discover` reads the memoised result back.
-    modules_file = _argv_option(sys.argv[2:], "--modules")
-    if modules_file:
-        _select_modules(modules_file)  # before anything is imported (TID-75)
+    # The run's configuration — the project's own, and the modules `--modules` names — before
+    # anything is imported (TID-75).
+    run = RunConfig.load(root, modules_file=_argv_option(sys.argv[2:], "--modules"))
     # `TIDERACE_TIMING=1` prints how long each start-up phase took, to stderr. The start-up is a
     # fixed cost every run pays before a worker exists; knowing which phase is the cost is what
     # decides what to do about it (TID-75).
     _phase = _PhaseTimer()
+    if _phase.on and run.modules is not None:
+        _warn(f"start-up: {len(run.modules)} modules selected")
     _load_ancestor_conftests(root)
     _phase.mark("ancestor conftests")
-    _preimport(root)
+    _preimport(run)
     _phase.mark("pre-import test modules")
-    reg = _discover(root)
+    reg = _discover(run, timer=_phase)
     _phase.mark("discover (conftests, fixtures, hooks, marks)")
-    if _phase.on and _SKIPPED_AT_DISCOVERY:
-        _warn(f"start-up: {_SKIPPED_AT_DISCOVERY} test modules not imported (unselected)")
-    engine_args = dict(reg=reg, root=root, options=EngineOptions(
+    if _phase.on and _phase.unselected:
+        _warn(f"start-up: {_phase.unselected} test modules not imported (unselected)")
+    engine_args = dict(reg=reg, config=run, options=EngineOptions(
         no_fork=no_fork, restore=restore, purity_guard=purity, coverage=coverage,
         coverage_lines=coverage_lines))
     # Pool mode (TID-4): fork the workers from this one imported image instead of importing per

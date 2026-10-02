@@ -86,8 +86,9 @@ def main() -> int:
             f.write(CORPUS)
 
         sys.path.insert(0, root)
-        shim._preimport(root)
-        reg = shim._discover(root)
+        run = shim.RunConfig.load(root)
+        shim._preimport(run)
+        reg = shim._discover(run)
 
         # The shim discovered native providers and indexed them BY TYPE (not pytest markers).
         from test_native import Db, Repo  # type: ignore  # noqa: E402
@@ -97,7 +98,7 @@ def main() -> int:
               f"{{ {', '.join(f'{t.__name__}->{ns}' for t, ns in reg.by_type.items())} }}")
         type_di_ok = reg.by_type.get(Db) == ["database"] and reg.by_type.get(Repo) == ["repo"]
 
-        engine = shim.Engine(reg, no_fork=True)
+        engine = shim.Engine(reg, run, no_fork=True)
         # (node, expected outcome) — type-DI passes + the four native marks.
         expected = {
             "test_by_type": "passed",

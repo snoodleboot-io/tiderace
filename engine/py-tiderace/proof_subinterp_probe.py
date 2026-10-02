@@ -28,7 +28,7 @@ def main() -> int:
         )
         paths = [root] + list(sys.path)
 
-        pure = shim._probe_module_safe("test_pure.py", paths)
+        pure = shim._probe_module_safe(root, "test_pure.py", paths)
         print(f"    pure module   → {pure}")
 
         if pure.get("safe") is None:
@@ -40,7 +40,7 @@ def main() -> int:
         # The unsafe case needs numpy present to import; test it only when available.
         try:
             import numpy  # noqa: F401
-            np = shim._probe_module_safe("test_np.py", paths)
+            np = shim._probe_module_safe(root, "test_np.py", paths)
             print(f"    numpy module  → {np}")
             checks.append(("numpy module is unsafe", np.get("safe") is False))
             checks.append(("reason names subinterpreters", "subinterp" in (np.get("reason") or "").lower()))
