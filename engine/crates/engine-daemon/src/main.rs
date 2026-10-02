@@ -4,7 +4,9 @@
 //! Modes:
 //!   - `run <root>`   — one-shot: discover + run all through a warm wellspring, print a report.
 //!   - `serve <root>` — bind the per-project Unix socket and serve RPC clients until Shutdown (unix).
-//!   - `watch <root>` — block, and on each save re-run only the impacted tests (the inner loop).
+//!   - `watch <root>` — block, and on each save run what the change reaches (the inner loop).
+//!   - `probe <root>` — classify each module for the sub-interpreter tier (ADR-E015).
+//!   - `bench <root> [iters]` — cold-vs-warm timing of the whole corpus on one warm handler.
 //!
 //! Env: `TIDERACE_SHIM` (path to `py-shim/shim.py`, required); `TIDERACE_PYTHON` (default `python3`,
 //! or `python` on Windows, whose venvs create no `python3.exe` — see `engine_core::default_python`);
@@ -14,15 +16,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use engine_core::cache::LocalCache;
-use engine_core::coverage::DepGraph;
-use engine_core::domain::NodeId;
-use engine_daemon::{EngineHandler, RpcHandler, RpcRequest, RpcResponse, Session};
+use engine_daemon::{EngineHandler, RpcHandler, RpcRequest, RpcResponse};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: tiderace-daemon <run|serve|watch> <root>");
+        eprintln!("usage: tiderace-daemon <run [--all]|serve|watch|probe|bench [iters]> <root>");
         return ExitCode::from(64);
     }
     let mode = args[1].as_str();
@@ -208,32 +207,11 @@ fn cmd_probe(python: &str, shim: &Path, root: &Path) -> ExitCode {
 }
 
 fn cmd_watch(root: &Path, handler: &mut EngineHandler) -> ExitCode {
-    // Cold start: collect the candidate node set; the DepGraph is empty until coverage runs accrue,
-    // so the first edits conservatively re-run all (correct), tightening as coverage populates it.
-    let candidates: Vec<NodeId> = match handler.handle(RpcRequest::Discover) {
-        RpcResponse::Discovered { node_ids } => node_ids.into_iter().map(NodeId::new).collect(),
-        RpcResponse::Error { message } => {
-            eprintln!("error: {message}");
-            return ExitCode::FAILURE;
-        }
-        _ => Vec::new(),
-    };
-    let mut session = Session::new(
-        DepGraph::new(),
-        LocalCache::new(),
-        candidates,
-        env!("CARGO_PKG_VERSION"),
-        "python",
-        std::env::consts::OS,
-    );
     eprintln!("watching {} (Ctrl-C to stop)…", root.display());
-    let result = engine_daemon::watch_loop(
-        root,
-        &mut session,
-        handler,
-        Duration::from_millis(50),
-        |path, action| println!("{}: {:?}", path.display(), action),
-    );
+    let result =
+        engine_daemon::watch_loop(root, handler, Duration::from_millis(50), |path, action| {
+            println!("{}: {:?}", path.display(), action)
+        });
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

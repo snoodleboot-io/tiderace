@@ -3,7 +3,7 @@
 
 use engine_core::cache::{CacheKey, CacheKeyBuilder};
 
-use crate::watch::content_hash;
+use engine_core::runner::digest as content_hash;
 
 use crate::EngineHandler;
 
