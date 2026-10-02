@@ -216,7 +216,6 @@ impl crate::exec::tier::LaneSeed for SubprocessLane {
 mod tests {
     use super::*;
 
-
     #[test]
     fn run_without_target_is_an_error_not_a_panic() {
         let mut w = SubprocessWorker::new(5_000, 1);
