@@ -17,6 +17,18 @@ from .pytest_compat import Mark, fold
 from .results import UNKNOWN_PURITY, Outcome, response, variant, with_purity
 
 
+@dataclass(frozen=True)
+class EngineOptions:
+    """A run's configuration, read by the route and the executor — the six booleans the engine
+    used to carry as attributes, in one place."""
+
+    no_fork: bool = False  # in-process by configuration: `--no-fork`, the SubprocessWorker, Windows
+    restore: bool = False  # snapshot/restore shared state around in-process tests (isolation w/o fork)
+    purity_guard: bool = False  # measure shared-state mutation per test (→ pure-test batching)
+    coverage: bool = False  # capture the per-test executed-source footprint (ADR-E006)
+    coverage_lines: bool = False  # line numbers in the footprint (opt-in, TID-76)
+
+
 class Tier(str, enum.Enum):
     BARE = "bare"  # in-process, no snapshot: recorded pure and unchanged (TID-1)
     RESTORE = "restore"  # in-process, snapshot/restore around the test (the ladder's default)

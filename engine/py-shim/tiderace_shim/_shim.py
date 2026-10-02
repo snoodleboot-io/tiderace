@@ -25,6 +25,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import copy
+import dataclasses
 import difflib
 import enum
 import fnmatch
@@ -56,7 +57,7 @@ import warnings
 from .config import NOTSET as _NOTSET, ProjectConfig, load_project_config, option as _argv_option
 from .isolation import Isolation, _restorable
 from .plan import Plan
-from .tiers import Routing, Tier, VariantResult, assemble, route
+from .tiers import EngineOptions, Routing, Tier, VariantResult, assemble, route
 from .pytest_compat import (MarkerBearer, fold as _fold_marks, normalise_all as _normalise_marks,
                             skip_reason as _mark_skip_reason)
 from .protocol import (EXIT_UNREPORTABLE as _EXIT_UNREPORTABLE, Transport, end_child,
@@ -2371,18 +2372,17 @@ class Engine:
 
     def __init__(self, reg: Registry, no_fork: bool = False, root: str | None = None,
                  coverage: bool = False, purity_guard: bool = False, restore: bool = False,
-                 coverage_lines: bool = False):
+                 coverage_lines: bool = False, *, options: EngineOptions | None = None):
+        """`options` is the run's configuration (`EngineOptions`); the keyword booleans are the
+        same five, for the callers that spell them out (the proofs, the conformance runthrough)."""
         self.reg = reg
-        self.no_fork = no_fork  # no-COW fallback path (SubprocessWorker / Windows / --no-fork)
+        self.options = options or EngineOptions(no_fork=no_fork, restore=restore, purity_guard=purity_guard,
+                                                coverage=coverage, coverage_lines=coverage_lines)
         self.root = root  # corpus root, for coverage path relativization
-        self.coverage = coverage  # ADR-E006: capture per-test executed-source footprint
-        self.coverage_lines = coverage_lines  # line numbers in the footprint (opt-in, TID-76)
-        self.purity_guard = purity_guard  # detect shared-state mutation per test (→ pure-test batching)
         self._leaked = None          # this test's unmodelled state drift, if any (TID-33)
         self._state_disturbed = False  # …and whether the node should be forked from now on
         self._disturbance = None  # what moved, kept for the verdict the clean-room handoff reports
         self._timed_out = False  # the in-process deadline ended the case (TID-93): no re-run
-        self.restore = restore  # snapshot/restore shared state around no-fork tests (isolation w/o fork)
         self._module_child = None  # the live child running an opaque module's tests, if any (TID-80)
         self._guard = None  # the in-process module's entry snapshot, restored when we leave it (TID-81)
         self._in_module_child = False  # set in that child: run everything in-process, never fork
@@ -2697,7 +2697,7 @@ class Engine:
         return route(Routing(
             fork_available=_FORK_AVAILABLE, in_module_child=self._in_module_child,
             module_child_holds_module=child is not None and child.module_key == module_key,
-            no_fork=self.no_fork, restore=self.restore, force_no_fork=force_no_fork,
+            no_fork=self.options.no_fork, restore=self.options.restore, force_no_fork=force_no_fork,
             trusted_pure=trusted_pure, recorded_must_fork=recorded_must_fork,
         ), lambda: _restorable(_import_module(module_key)))
 
@@ -2716,13 +2716,6 @@ class Engine:
         plan = self._plan(node_id, style, names, keyword_verdict)
         if isinstance(plan, dict):
             return plan
-        node, marks, fixture_requested, closure, indirect = (
-            plan.node, plan.marks, plan.fixture_requested, plan.closure, plan.indirect)
-        case_kwargs_list, combos = plan.case_kwargs_list, plan.combos
-        parametrized_node, variant_ids, selected = plan.parametrized_node, plan.variant_ids, plan.selected
-        # `--strategy subprocess` runs in-process by configuration; there the restore is the remedy
-        # and there is nothing better to hand the node to.
-        force_no_fork_only = self.no_fork
         # Only now — after `-k` has chosen and a whole-node skip has returned — does the node's
         # *route* get decided (TID-99): nothing above set anything up, so a node `-k` was about to
         # deselect never pays the restorability snapshot. `_route` is the one place the tier is
@@ -2732,15 +2725,37 @@ class Engine:
         tier = self._route(module_key, force_no_fork, trusted_pure, recorded_must_fork)
         if tier is Tier.MODULE_CHILD:
             return self._module_child_run(node_id, style, deadline_ms)
+        results = self._execute(plan, tier, deadline_ms)
+        if isinstance(results, dict):
+            return results
+        # The native marks first, then pytest's own `@pytest.mark.xfail` / `skip`, closest first
+        # — both through one fold (TID-123). Without the second a test the author marked as
+        # expected-to-fail was reported as a failure — one of click's two remaining divergences
+        # (TID-63).
+        resp = assemble(node_id, results, parametrized=plan.parametrized_node,
+                        native_marks=_normalise_marks(plan.marks),
+                        pytest_marks=_normalise_marks(reversed(_pytest_markers(plan.node))),
+                        keywords=lambda nid: _keyword_names(nid, names))
+        if any(r.disturbed for r in results):
+            clean = self._clean_room_handoff(node_id, style, deadline_ms)
+            if clean is not None:
+                return clean
+        return _note_import_history(resp)
+        return _note_import_history(resp)
+
+    def _execute(self, plan: Plan, tier: Tier, deadline_ms: int) -> "list[VariantResult] | dict":
+        """Run every case `-k` kept on `tier`, each combo's wider fixtures synced first; a fixture
+        that cannot be set up ends the node with an error (TID-34), else the variants' results."""
+        node_id, style = plan.node.node_id, plan.node.style
         results: list[VariantResult] = []
         variant_index = 0
         per_combo = plan.per_combo
-        for combo in combos:
-            if not any(i in selected for i in range(variant_index, variant_index + per_combo)):
+        for combo in plan.combos:
+            if not any(i in plan.selected for i in range(variant_index, variant_index + per_combo)):
                 variant_index += per_combo  # nothing here survives `-k`: build none of its fixtures
                 continue
             try:
-                self._sync_wider(closure, node_id)
+                self._sync_wider(plan.closure, node_id)
             except BaseException as exc:  # noqa: BLE001
                 # A fixture that cannot be set up is an ordinary condition — pytest errors that test
                 # and carries on. Letting it escape here killed the whole worker: every *other* test
@@ -2748,8 +2763,8 @@ class Engine:
                 # rather than the fixture (TID-34). Same lesson as TID-15, one level up.
                 return errored(node_id, "error setting up fixtures: "
                                + "".join(traceback.format_exception_only(type(exc), exc)))
-            for case_kwargs in case_kwargs_list:
-                if variant_index not in selected:
+            for case_kwargs in plan.case_kwargs_list:
+                if variant_index not in plan.selected:
                     variant_index += 1  # deselected by `-k`: absent from the tally, as in pytest
                     continue
                 started = time.perf_counter()
@@ -2761,49 +2776,42 @@ class Engine:
                 # map is what `combo` already is, so an indirect value simply joins it — and must be
                 # kept out of the test's own kwargs, or the raw value would shadow the fixture's.
                 case_combo, test_kwargs = combo, case_kwargs
-                if indirect and case_kwargs:
-                    routed = {k: v for k, v in case_kwargs.items() if k in indirect}
+                if plan.indirect and case_kwargs:
+                    routed = {k: v for k, v in case_kwargs.items() if k in plan.indirect}
                     if routed:
                         case_combo = {**combo, **routed}
-                        test_kwargs = {k: v for k, v in case_kwargs.items() if k not in indirect}
+                        test_kwargs = {k: v for k, v in case_kwargs.items() if k not in plan.indirect}
                 oc, detail, cov, purity = self._run_variant(
-                    node_id, style, fixture_requested, closure, case_combo, deadline_ms, test_kwargs,
-                    tier, variant_ids[variant_index])
+                    node_id, style, plan.fixture_requested, plan.closure, case_combo, deadline_ms,
+                    test_kwargs, tier, plan.variant_ids[variant_index])
                 # Per case, because only some cases of a parametrized node may trip (TID-33).
-                results.append(VariantResult(variant_ids[variant_index], oc, detail, cov, purity,
+                results.append(VariantResult(plan.variant_ids[variant_index], oc, detail, cov, purity,
                                              self._state_disturbed,
                                              int((time.perf_counter() - started) * 1000)))
                 variant_index += 1
-        # The native marks first, then pytest's own `@pytest.mark.xfail` / `skip`, closest first
-        # — both through one fold (TID-123). Without the second a test the author marked as
-        # expected-to-fail was reported as a failure — one of click's two remaining divergences
-        # (TID-63).
-        resp = assemble(node_id, results, parametrized=parametrized_node,
-                        native_marks=_normalise_marks(marks),
-                        pytest_marks=_normalise_marks(reversed(_pytest_markers(node))),
-                        keywords=lambda nid: _keyword_names(nid, names))
-        node_must_fork = any(r.disturbed for r in results)
-        # A node that disturbed interpreter state has an in-process result nobody should trust, and
-        # this process is no longer a safe thing to fork. Re-run it in the clean room and report that
-        # instead — the pristine image is the only place the answer is both correct and reachable
-        # without deadlocking (TID-50).
-        # …unless the deadline is what ended it (TID-93): a re-run would block again, cost a second
-        # deadline, and replace the timeout's own message with the child path's; the error stands,
-        # and the must-fork verdict is what changes the next run.
-        if (node_must_fork and _CLEAN_ROOM is not None and not self.no_fork
-                and not force_no_fork_only and not self._timed_out):
-            _warn(f"re-running {node_id} from a clean image — it disturbed interpreter state")
-            clean = _clean_room_run(node_id, style, deadline_ms)
-            if clean is not None:
-                clean["must_fork"] = True
-                # The clean run cannot observe what the first attempt did, and the verdict is about
-                # the test, not about where it finally ran: it disturbed state, so it is impure and
-                # must not take the in-process path again.
-                clean["pure"] = False
-                if self._disturbance:
-                    clean["impurity"] = f"disturbed interpreter state: {self._disturbance}"
-                return _note_import_history(clean, pristine=True)
-        return _note_import_history(resp)
+        return results
+
+    def _clean_room_handoff(self, node_id: str, style: str, deadline_ms: int) -> dict | None:
+        """Re-run a node that disturbed interpreter state from the clean room's pristine image,
+        and report THAT: its in-process result is not to be trusted, and this process is no longer
+        a safe thing to fork (TID-50). `None` when there is nothing better to hand it to — no
+        clean room, `--strategy subprocess` (in-process by configuration; the restore is the whole
+        remedy), or the deadline is what ended it (TID-93: a re-run would block again, cost a
+        second deadline, and replace the timeout's own message)."""
+        if _CLEAN_ROOM is None or self.options.no_fork or self._timed_out:
+            return None
+        _warn(f"re-running {node_id} from a clean image — it disturbed interpreter state")
+        clean = _clean_room_run(node_id, style, deadline_ms)
+        if clean is None:
+            return None
+        clean["must_fork"] = True
+        # The clean run cannot observe what the first attempt did, and the verdict is about the
+        # test, not about where it finally ran: it disturbed state, so it is impure and must not
+        # take the in-process path again.
+        clean["pure"] = False
+        if self._disturbance:
+            clean["impurity"] = f"disturbed interpreter state: {self._disturbance}"
+        return _note_import_history(clean, pristine=True)
 
     def _run_inherited(self, node_id: str, deadline_ms: int, force_no_fork: bool,
                        trusted_pure: bool, own_too: bool = False,
@@ -2926,8 +2934,8 @@ class Engine:
             os.close(req_w)
             os.close(resp_r)
             self._in_module_child = True
-            self.restore = False  # pytest's semantics inside the file: nothing is undone between tests
-            self.purity_guard = False
+            # pytest's semantics inside the file: nothing is undone between tests, nothing measured.
+            self.options = dataclasses.replace(self.options, restore=False, purity_guard=False)
             self._module_child = None
             inherited = len(self.active)  # the parent's fixtures: its to tear down, not ours
             done_before = set(_XUNIT_DONE)  # likewise the parent's xunit hooks
@@ -3048,12 +3056,12 @@ class Engine:
                 # the test's *module* is unrestorable; this says the test disturbed the interpreter.
                 self._state_disturbed = True
                 self._disturbance = drift
-            if drift is not None and _CLEAN_ROOM is not None and not self.no_fork:
+            if drift is not None and _CLEAN_ROOM is not None and not self.options.no_fork:
                 # The clean room re-runs the whole node from a pristine image; `run()` above does the
                 # handoff and reports THAT. Forking here would fork the process this test just
                 # dirtied — if what it leaked was a thread, straight into a deadlock (TID-50).
                 return result
-            if drift is not None and _FORK_AVAILABLE and not self.no_fork:
+            if drift is not None and _FORK_AVAILABLE and not self.options.no_fork:
                 _warn(f"re-running {node_id} in a fork — it {drift}")
                 oc, detail, cov, _ = self._run_variant(
                     node_id, style, requested, closure, combo, deadline_ms, case_kwargs,
@@ -3141,7 +3149,7 @@ class Engine:
                 return local[name]
             return self._value(name, module_key)
 
-        cov = _Coverage(self.root, self.coverage, self.coverage_lines)
+        cov = _Coverage(self.root, self.options.coverage, self.options.coverage_lines)
         cov.start()  # capture the per-test footprint: fixture setup + body, this test only (ADR-E006)
         # B5: async test body or any function-scope async provider ⇒ run setup+body+teardown on ONE
         # event loop (objects created on a loop must be awaited on the same loop). Sync path untouched.
@@ -3189,8 +3197,8 @@ class Engine:
             # The isolation level follows from the tier: an in-process test under restore enters
             # the module guard and takes the full set of snapshots (TID-81); the bare tier measures
             # nothing (TID-1); otherwise the purity guard decides whether to measure.
-            full = self.restore and tier.in_process
-            measure = tier is not Tier.BARE and (full or self.purity_guard)
+            full = self.options.restore and tier.in_process
+            measure = tier is not Tier.BARE and (full or self.options.purity_guard)
             if full:
                 self._enter_module(module_key)
             mod = _import_module(module_key) if measure else None
@@ -4718,9 +4726,9 @@ def serve() -> int:
     _phase.mark("discover (conftests, fixtures, hooks, marks)")
     if _phase.on and _SKIPPED_AT_DISCOVERY:
         _warn(f"start-up: {_SKIPPED_AT_DISCOVERY} test modules not imported (unselected)")
-    engine_args = dict(reg=reg, no_fork=no_fork, root=root, coverage=coverage,
-                       coverage_lines=coverage_lines,
-                       purity_guard=purity, restore=restore)
+    engine_args = dict(reg=reg, root=root, options=EngineOptions(
+        no_fork=no_fork, restore=restore, purity_guard=purity, coverage=coverage,
+        coverage_lines=coverage_lines))
     # Pool mode (TID-4): fork the workers from this one imported image instead of importing per
     # worker. Every worker below is created *after* the fork, so its fixture state is its own and
     # the semantics match N separate wellsprings exactly.
