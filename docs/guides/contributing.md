@@ -5,7 +5,7 @@ tiderace's engine lives in the `engine/` Cargo workspace. This is where you buil
 ## Prerequisites
 
 - **Rust toolchain** (stable) — `rustup install stable`.
-- **Python 3.12+** — required for the `sys.monitoring` coverage path and the shim proofs.
+- **Python 3.12+** — required for the `sys.monitoring` coverage path.
 
 No pytest or coverage.py needed: tiderace is its own runner.
 
@@ -93,24 +93,19 @@ TIDERACE_REQUIRE_LIVE=1 cargo llvm-cov --workspace --ignore-filename-regex '(mai
 `main.rs` (CLI entry) and `socket.rs` (the socket serve loop) are excluded — binary glue with no logic
 that a killed process can't flush coverage for.
 
-## The Python shim proofs
+## The Python shim's own tests
 
-The shim and the native authoring package carry standalone **proof scripts** that demonstrate
-specific behaviours (isolation tiers, purity, coverage, type-DI). They run directly with `python3`
-(3.12+) — no Rust, no test framework:
+The shim (`engine/py-shim/tiderace_shim/`, entered through `engine/py-shim/shim.py`) has unit tests
+beside it — the result frames, the node resolver, the selection grammar, discovery over a scratch
+suite, the invoke path, the isolation object, the package layout. They run with the fx venv:
 
 ```bash
-cd engine/py-tiderace
-
-python3 proof_static_purity.py      # static AST impurity pre-filter
-python3 proof_snapshot_restore.py   # no-fork + restore isolation
-python3 proof_purity_guard.py       # purity verdict recording
-python3 proof_n6_coverage.py        # sys.monitoring coverage capture
-python3 proof_type_di.py            # native @provides / @uses type resolution
-# …other proof_*.py in the same directory
+.tiderace-fx-venv/bin/python -m pytest engine/py-shim/tests -q
 ```
 
-The shim itself is `engine/py-shim/shim.py` — the only code that runs inside CPython.
+Everything that needs a live interpreter is an acceptance suite under `engine/crates/*/tests/`
+(above). The proof scripts that once demonstrated the isolation tiers, purity, coverage and type-DI
+are archived under `planning/proofs/` with a note of which suite covers each now.
 
 ## Repository layout
 
@@ -123,8 +118,8 @@ tiderace/
 │   │   ├── engine-cli/     # → tiderace (collect, run)
 │   │   ├── engine-daemon/  # → tiderace-daemon (run, serve, watch, bench)
 │   │   └── engine-inproc/  # → inproc-probe (experimental embedded-CPython / FFI backend)
-│   ├── py-shim/            # shim.py — the execution substrate (import, invoke, isolate, coverage)
-│   └── py-tiderace/         # native authoring pkg (tiderace/) + proof_*.py + migrate
+│   ├── py-shim/            # shim.py + tiderace_shim/ — the execution substrate (import, invoke, isolate, coverage)
+│   └── py-tiderace/         # native authoring pkg (tiderace/) + migrate
 ├── benchmarks/             # bench_3way.sh, real_world.sh, RESULTS-*.md, fixtures/
 ├── docs/                   # MkDocs source — user guides + whole-system design
 ├── planning/               # per-feature planning (PRD / ADR / design)

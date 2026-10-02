@@ -230,9 +230,6 @@ Key properties:
   the purity verdict — the verdict is only an optimization (lets a known-pure test skip the snapshot).
 - **No learning pass.** Restore works on the very first run; the **purity guard** records verdicts as a
   free side effect of running, so subsequent runs can promote pure tests to the bare tier.
-- **Static pre-filter** (`shim.static_impurity`) is a cheap AST scan that flags obvious mutators (`global`,
-  writes to free/module names, `os.environ`/`os.chdir`/`random.seed`-style calls) without running — a
-  sufficient (conservative) impurity test that seeds the tier decision.
 
 Both front ends enable this by default: the daemon sets `TIDERACE_RESTORE=1` and requests no-fork on every
 test, and `tiderace run` does the same (the in-process ladder has been its default since the TID-33 state
@@ -404,7 +401,7 @@ The authoritative rationale lives in `planning/current/pure-rust-test-engine/des
 | Scheduling | `engine-core/src/scheduler/locality_scheduler.rs` |
 | The fork model | `engine-core/src/exec/tiers/fork.rs`, `tiers/pool.rs`, `process/shim_process.rs` |
 | The transport seam | `engine-core/src/exec/transport.rs`, `shim_protocol.rs` |
-| The isolation ladder | `py-shim/tiderace_shim/` — `footprint.static_impurity`, `isolation._restorable` / `Isolation`, `tiers.route` |
+| The isolation ladder | `py-shim/tiderace_shim/` — `isolation._restorable` / `Isolation`, `tiers.route`, `engine.py` |
 | Impact-skip | `engine-daemon/src/state/plan.rs`, `impacted_run.rs` |
 | The cache | `engine-core/src/cache/` (`cache_key.rs`, `tiered_cache.rs`, `purity.rs`) |
 | Parallel pool | `engine-core/src/runner/run.rs`, `exec/tier.rs`, `exec/tiers/` |

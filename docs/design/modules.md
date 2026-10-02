@@ -115,8 +115,7 @@ dialects as one `Mark`) → `config.py` (the project's configuration and the run
 `nodes.py` (what a node id names), `results.py` (the result frames), `protocol.py` (the frames, the
 request loop, the forked children) → `safe.py`, `log.py`. The engine launches the entry, `TIDERACE_SHIM` points at it, and the wheel stages both into
 `tiderace/_shim/`. The only logic that runs inside CPython: it imports user code, invokes test
-bodies, and implements the **isolation ladder** — `footprint.static_impurity` (AST pre-filter),
-`isolation._restorable` (can this module be snapshot + restored?), `Isolation` (snapshot / verdict /
+bodies, and implements the **isolation ladder** — `isolation._restorable` (can this module be snapshot + restored?), `Isolation` (snapshot / verdict /
 restore of module globals, `os.environ`, the registries), and `tiers.route` (bare no-fork / no-fork +
 restore / `os.fork()` / the module child, decided once). It also captures coverage via
 `sys.monitoring` and records purity verdicts. Reads `TIDERACE_COVERAGE`, `TIDERACE_RESTORE`,
