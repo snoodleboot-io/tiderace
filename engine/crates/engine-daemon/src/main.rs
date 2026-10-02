@@ -173,7 +173,7 @@ fn cmd_probe(python: &str, shim: &Path, root: &Path) -> ExitCode {
     modules.sort();
     modules.dedup();
 
-    match engine_daemon::probe_modules(python, shim, root, &modules) {
+    match engine_core::exec::probe_modules(python, shim, root, &modules) {
         Ok(verdicts) => {
             let (mut safe, mut unsafe_n, mut unknown) = (0usize, 0usize, 0usize);
             for (m, v) in &verdicts {

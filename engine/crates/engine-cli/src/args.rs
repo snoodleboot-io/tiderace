@@ -34,7 +34,6 @@ Options for `run`:
       --scheduler <KIND>  batch packing: locality | round-robin (default: locality)
       --timeout <MS>      per-test deadline in milliseconds (default: 60000)
       --no-fork           alias for --strategy subprocess
-      --optimistic        let restorable tests skip the fork (the default; kept for scripts)
       --no-optimistic     fork every test, even the restorable ones (see the note below)
       --shared-import     import the project once and fork the workers from it (the default)
       --shard-modules     split a module heavier than one worker's share across workers; a file

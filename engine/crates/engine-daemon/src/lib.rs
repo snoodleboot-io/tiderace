@@ -29,9 +29,6 @@ pub(crate) use engine_handler::to_rpc;
 pub use engine_handler::{EngineHandler, ImpactSummary};
 pub use error::DaemonError;
 pub use fs_watcher::{Debouncer, FsWatcher};
-// Moved to `engine-core` (TID-17) so the CLI can reach the sub-interpreter tier too;
-// re-exported here to keep the daemon's public surface unchanged.
-pub use engine_core::exec::probe_modules;
 pub use rpc::client::{DaemonClient, Healthy, Started};
 pub use rpc::method::{RpcRequest, RpcResponse, RpcResult};
 pub use rpc::server::{read_frame, serve_connection, write_frame, RpcHandler};
