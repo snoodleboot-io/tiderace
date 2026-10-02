@@ -104,7 +104,7 @@ def test_a_run_config_ignores_what_the_project_ignores_and_selects_the_modules_f
 def test_keyword_names_are_the_path_below_the_rootdir_then_the_segments_then_the_marks(tmp_path):
     project(tmp_path, "", {"tests/unit/test_a.py": ""})
     run = RunConfig.load(str(tmp_path))
-    names = run.keyword_names("tests/unit/test_a.py::TestC::test_x[1-a]", {"slow", "db"})
+    names = selection.keyword_names(run, "tests/unit/test_a.py::TestC::test_x[1-a]", {"slow", "db"})
     if selection.pytest_major() >= 8:
         assert names == ["tests", "unit", "test_a.py", "TestC", "test_x[1-a]", "db", "slow"]
     else:
@@ -112,4 +112,4 @@ def test_keyword_names_are_the_path_below_the_rootdir_then_the_segments_then_the
     # The run root below the rootdir: the names still start at the rootdir (TID-100).
     below = RunConfig.load(str(tmp_path / "tests"))
     assert below.project.dir == str(tmp_path)
-    assert below.keyword_names("unit/test_a.py::t", set())[:1] == (["tests"] if selection.pytest_major() >= 8 else ["tests/unit/test_a.py"])
+    assert selection.keyword_names(below, "unit/test_a.py::t", set())[:1] == (["tests"] if selection.pytest_major() >= 8 else ["tests/unit/test_a.py"])

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
+from .nodes import Target
+from .safe import safe_getattr as _safe_getattr
 
 
 @dataclass(frozen=True)
@@ -133,3 +135,94 @@ class MarkerBearer:
 
     def get_closest_marker(self, name: str, default: Any = None) -> Any:
         return next(self.iter_markers(name), default)
+
+
+class _Node(MarkerBearer):
+    """`request.node` — what pytest calls the item under test.
+
+    Fixtures reach for it to name the thing they are building for (`request.node.name` in a temp-file
+    or database-name prefix) and, less often, to attach a marker while the run is in flight. Both
+    were `AttributeError` before: the fixture request had no `node` at all, and the test request had
+    the node *id string* rather than an object (TID-51)."""
+
+    __slots__ = ("nodeid", "name", "originalname", "cls", "function", "own_markers")
+
+    def __init__(self, node_id: str, func=None, instance=None):
+        self.nodeid = node_id
+        # pytest's `name` is the last component, parametrize id included: `test_x[case]`.
+        self.name = node_id.rpartition("::")[2] or node_id
+        self.originalname = self.name.partition("[")[0]
+        self.cls = type(instance) if instance is not None else None
+        self.function = func
+        self.own_markers: list = []
+
+    def __repr__(self) -> str:
+        return f"<Node {self.nodeid}>"
+
+
+def _runtime_outcome(node, outcome: str, detail: str) -> tuple:
+    """Fold markers added during the run into the outcome (`xfail`, `skip`).
+
+    Applied here rather than beside the static marks because a marker added at runtime exists only in
+    the process that ran the test."""
+    if node is None or not node.own_markers:
+        return outcome, detail
+    return fold(normalise_all(node.iter_markers()), outcome, detail, runtime=True)
+
+
+def _own_markers(*owners) -> list:
+    """The `@pytest.mark.*` marks on a chain of owners, widest first (module → class → function).
+
+    pytest stores them as a `pytestmark` list on whatever they decorate, so gathering them is just
+    reading that attribute at each level. `__tiderace_marks__` is the native analogue and is read
+    separately by `_marks`; this is the pytest-compat side."""
+    out = []
+    for owner in owners:
+        if owner is None:
+            continue
+        marks = _safe_getattr(owner, "pytestmark", None)  # owners can carry a raising metaclass
+        if not marks:
+            continue
+        # pytest accepts both spellings — `pytestmark = pytest.mark.slow` and
+        # `pytestmark = [pytest.mark.slow, ...]` — and a bare `MarkDecorator` is not iterable, so
+        # extending on it raises `TypeError` and takes the whole discovery pass down with it.
+        out.extend(marks if isinstance(marks, (list, tuple)) else [marks])
+    return out
+
+
+class _HookItem(MarkerBearer):
+    """The `item` a `pytest_collection_modifyitems` hook is handed (TID-20).
+
+    Only the surface real conftests use: `nodeid` / `name` to identify it, `keywords` and
+    `own_markers` / `iter_markers` / `get_closest_marker` to inspect it, and `add_marker` to change
+    it. The overwhelmingly common shape — the one this ticket was filed for — is
+
+        for item in items:
+            if "needs_kuzu" in item.keywords:
+                item.add_marker(pytest.mark.skip(reason="pass --real to run Kuzu tests"))
+
+    which needs exactly `keywords` and `add_marker`."""
+
+    __slots__ = ("nodeid", "name", "own_markers", "keywords")
+
+    def __init__(self, nodeid: str, name: str, markers: list):
+        self.nodeid = nodeid
+        self.name = name
+        self.own_markers = list(markers)
+        # pytest's `keywords` is a mapping that answers `in` for mark names, the node name, and the
+        # module. Membership is what conftests actually use it for.
+        self.keywords = {getattr(m, "name", str(m)): m for m in self.own_markers}
+        self.keywords[name] = True
+        self.keywords[nodeid] = True
+
+    def add_marker(self, marker, append: bool = True) -> None:
+        super().add_marker(marker, append)
+        self.keywords[getattr(marker, "name", str(marker))] = marker
+
+    def __repr__(self) -> str:  # a hook that logs its items should print something useful
+        return f"<Item {self.nodeid}>"
+
+
+def _pytest_markers(node: Target) -> list:
+    """The `@pytest.mark.*` objects on a test, from its module, class and function."""
+    return list(_own_markers(*node.owners))

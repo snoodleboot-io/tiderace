@@ -16,7 +16,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, os.pardir, "py-shim"))
 
-import shim  # noqa: E402
+from tiderace_shim import config as _cfg, discovery as _disc, engine as _eng, modes as _modes  # noqa: E402,F401
 
 N = 50
 # Each test mutates a shared module global and asserts it STARTED clean — so without isolation they
@@ -41,19 +41,19 @@ def main() -> int:
         with open(os.path.join(root, "test_restore.py"), "w") as f:
             f.write(CORPUS)
         sys.path.insert(0, root)
-        run = shim.RunConfig.load(root)
-        shim._preimport(run)
-        disc = shim._discover(run)
+        run = _cfg.RunConfig.load(root)
+        _disc.preimport(run)
+        disc = _disc.discover(run)
         reg = disc.registry
         nodes = [f"test_restore.py::test_{i}" for i in range(N)]
 
         # 1. No fork, NO restore → contamination (n accumulates ⇒ most fail).
-        e = shim.Engine(disc, run, no_fork=False)
+        e = _eng.Engine(disc, run, no_fork=False)
         reset()
         no_restore_pass = run_all(e, nodes, force_no_fork=True)
 
         # 2. No fork, WITH restore → isolated (each starts clean ⇒ all pass), and time it.
-        e_r = shim.Engine(disc, run, no_fork=False, restore=True)
+        e_r = _eng.Engine(disc, run, no_fork=False, restore=True)
         reset()
         t0 = time.perf_counter()
         restore_pass = run_all(e_r, nodes, force_no_fork=True)

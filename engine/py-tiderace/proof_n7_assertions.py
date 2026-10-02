@@ -17,7 +17,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, os.pardir, "py-shim"))
 
-import shim  # noqa: E402
+from tiderace_shim import config as _cfg, discovery as _disc, engine as _eng, modes as _modes  # noqa: E402,F401
 
 CORPUS = textwrap.dedent(
     '''
@@ -55,11 +55,11 @@ def main() -> int:
         with open(os.path.join(root, "test_asserts.py"), "w") as f:
             f.write(CORPUS)
         sys.path.insert(0, root)
-        run = shim.RunConfig.load(root)
-        shim._preimport(run)
-        disc = shim._discover(run)
+        run = _cfg.RunConfig.load(root)
+        _disc.preimport(run)
+        disc = _disc.discover(run)
         reg = disc.registry
-        engine = shim.Engine(disc, run, no_fork=True)
+        engine = _eng.Engine(disc, run, no_fork=True)
 
         def run(name):
             return engine.run(f"test_asserts.py::{name}", "function", 5000)

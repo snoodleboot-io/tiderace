@@ -106,32 +106,26 @@ import-once + parallel fork; not the production path.
 
 ## `py-shim/` — the execution substrate
 
-`shim.py` is a thin entry file; the shim is the package beside it, `tiderace_shim/` (`_shim.py`,
-with `main()` as the argv dispatch — TID-116; `results.py`, `nodes.py` and `config.py` are the
-result frames, the node-id resolver and the project-config loader it builds on — TID-121;
-`protocol.py` is the one transport: frames, the request loop, and the forked children — TID-122;
-`pytest_compat.py` folds both mark dialects once, `isolation.py` is the snapshot / verdict /
-restore behind the no-fork tiers, `plan.py` is what a node's run will execute, decided before anything
-is set up, and `tiers.py` is the isolation ladder's tiers, chosen once, with the response assembled
-from a node's variants — TID-123; `selection.py` is what a run selects — `-k`, `-m`,
-`--strict-markers`, the declared marks — as one `Selection` the engine holds and the daemon's
-per-run patch replaces, and `config.py`'s `RunConfig` is the run itself — root, project, ignores,
-the `--modules` set — loaded once and handed to discovery and the engine, where module globals
-used to carry each piece; `discovery.py`'s `Discovery` is what discovery produced — the registry,
-the conftests and the directory each governs, their options and ini declarations, the collection
-hooks' skips, the directories a conftest skipped or broke — on the engine and `request.config`;
-`ProcessState` (the current node, the nodes run, the xunit setups, the clean room) and `Caches`
-(the per-process memos: watched packages, import closures, file dependencies) are the engine's,
-the node resolver takes the run root as a parameter and its name derivation no longer touches
-`sys.path`; `invoke.py` is calling a test, written once for sync and async — one fixture setup and
-handle, one call with the xunit hooks, one exception ladder — which the sync tier drives without a
-loop, so an async test gets the same isolation measurement as a sync one; `log.py` is the one line
-to stderr — TID-124). The engine launches the entry, `TIDERACE_SHIM` points
-at it, and the wheel stages both into `tiderace/_shim/`. The only logic that runs inside CPython. Imports user code, invokes test bodies, and implements the
-**isolation ladder**: `static_impurity` (AST pre-filter), `_restorable` (can this module be snapshot
-+ restored?), `_restore_shared` (snapshot/undo of module globals + `os.environ`), and `Engine.run`
-(picks bare no-fork / no-fork + restore / `os.fork()`). It also captures coverage via `sys.monitoring`
-and records purity verdicts. Reads `TIDERACE_COVERAGE`, `TIDERACE_RESTORE`, `TIDERACE_FORCE_FORK`.
+`shim.py` is a thin entry file; the shim is the package beside it, `tiderace_shim/` (TID-116), laid out
+top to bottom, nothing importing upward (TID-121..124; `tests/test_layout.py` checks it): `modes.py`
+(what the shim does when launched — the worker loop, alone or as a pool; the sub-interpreter probe
+and pool; `main()`) → `engine.py` (one `Engine` per worker: gate → plan → route → execute → assemble;
+the module child, the clean room) → `plan.py` (a node's cases and ids, decided before anything is
+set up), `tiers.py` (the isolation ladder's tiers, chosen once; the in-process deadline),
+`discovery.py` (the registry and everything the walk learned, as one `Discovery`) → `invoke.py`
+(calling a test, written once for sync and async), `isolation.py` (snapshot / verdict / restore),
+`footprint.py` (coverage, import closures, the process's memos), `fixtures.py` (the fixture model
+and the registry), `selection.py` (`-k`, `-m`, `--strict-markers`), `pytest_compat.py` (both mark
+dialects as one `Mark`) → `config.py` (the project's configuration and the run's `RunConfig`),
+`nodes.py` (what a node id names), `results.py` (the result frames), `protocol.py` (the frames, the
+request loop, the forked children) → `safe.py`, `log.py`. The engine launches the entry, `TIDERACE_SHIM` points at it, and the wheel stages both into
+`tiderace/_shim/`. The only logic that runs inside CPython: it imports user code, invokes test
+bodies, and implements the **isolation ladder** — `footprint.static_impurity` (AST pre-filter),
+`isolation._restorable` (can this module be snapshot + restored?), `Isolation` (snapshot / verdict /
+restore of module globals, `os.environ`, the registries), and `tiers.route` (bare no-fork / no-fork +
+restore / `os.fork()` / the module child, decided once). It also captures coverage via
+`sys.monitoring` and records purity verdicts. Reads `TIDERACE_COVERAGE`, `TIDERACE_RESTORE`,
+`TIDERACE_FORCE_FORK`.
 
 ## `py-tiderace/tiderace` — native authoring & migration
 

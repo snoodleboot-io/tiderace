@@ -7,7 +7,7 @@ raise `RuntimeError: Working outside of request context`; Django's `SimpleLazyOb
 whatever its factory raises; a mock can have a side effect on attribute access.
 
 Plain `hasattr` and `getattr(obj, name, default)` only swallow `AttributeError`, so any of those
-escaped `_discover` and killed the shim before it was ready — which on flask made the default
+escaped `discover` and killed the shim before it was ready — which on flask made the default
 configuration hang forever (see `WellspringPool::launch`). pytest's discovery goes through
 `_pytest.compat.safe_getattr` for precisely this reason; this is the same contract.
 

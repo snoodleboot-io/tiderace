@@ -21,7 +21,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, os.pardir, "py-shim"))
 
-import shim  # noqa: E402
+from tiderace_shim import config as _cfg, discovery as _disc, engine as _eng, modes as _modes  # noqa: E402,F401
 
 N = 60
 # A pure module (tests only read/compute) and an impure one (each test mutates a shared global).
@@ -41,11 +41,11 @@ def main() -> int:
         open(os.path.join(root, "test_pure.py"), "w").write(PURE)
         open(os.path.join(root, "test_impure.py"), "w").write(IMPURE)
         sys.path.insert(0, root)
-        run = shim.RunConfig.load(root)
-        shim._preimport(run)
-        disc = shim._discover(run)
+        run = _cfg.RunConfig.load(root)
+        _disc.preimport(run)
+        disc = _disc.discover(run)
         reg = disc.registry
-        e = shim.Engine(disc, run, no_fork=False, restore=True)
+        e = _eng.Engine(disc, run, no_fork=False, restore=True)
 
         pure_nodes = [f"test_pure.py::test_p{i}" for i in range(N)]
         impure_nodes = [f"test_impure.py::test_m{i}" for i in range(N)]

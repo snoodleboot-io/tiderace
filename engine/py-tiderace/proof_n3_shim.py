@@ -1,7 +1,7 @@
 """N3 proof — tiderace-native providers driven through the REAL engine shim (`engine/py-shim/shim.py`),
 no pytest, no fork. Decisive on type-DI: the provider is named `database`, but tests request it as
 `store: Db` / providers request it as `conn: Db` — **no name matches**, so a pass can only happen if the
-shim resolved by TYPE. Drives `shim.Engine(..., no_fork=True)` over a temp native corpus.
+shim resolved by TYPE. Drives `_eng.Engine(..., no_fork=True)` over a temp native corpus.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)  # the `tiderace` package
 sys.path.insert(0, os.path.join(_HERE, os.pardir, "py-shim"))  # `shim`
 
-import shim  # noqa: E402
+from tiderace_shim import config as _cfg, discovery as _disc, engine as _eng, modes as _modes  # noqa: E402,F401
 
 CORPUS = textwrap.dedent(
     '''
@@ -86,9 +86,9 @@ def main() -> int:
             f.write(CORPUS)
 
         sys.path.insert(0, root)
-        run = shim.RunConfig.load(root)
-        shim._preimport(run)
-        disc = shim._discover(run)
+        run = _cfg.RunConfig.load(root)
+        _disc.preimport(run)
+        disc = _disc.discover(run)
         reg = disc.registry
 
         # The shim discovered native providers and indexed them BY TYPE (not pytest markers).
@@ -99,7 +99,7 @@ def main() -> int:
               f"{{ {', '.join(f'{t.__name__}->{ns}' for t, ns in reg.by_type.items())} }}")
         type_di_ok = reg.by_type.get(Db) == ["database"] and reg.by_type.get(Repo) == ["repo"]
 
-        engine = shim.Engine(disc, run, no_fork=True)
+        engine = _eng.Engine(disc, run, no_fork=True)
         # (node, expected outcome) — type-DI passes + the four native marks.
         expected = {
             "test_by_type": "passed",

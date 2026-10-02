@@ -3,9 +3,10 @@ declared, the ini values — behind one accessor (TID-111).
 
 `pytestconfig`, `pytester` and `caplog` need the project root, the `pytest_addoption` defaults and
 the `addini` declarations the shim recorded. Each used to reach for them with `import shim` and
-`getattr(shim, "_ROOT")` — three copies of the same back-door, working only because the shim
-aliases itself into `sys.modules["shim"]`. This module is the only one that knows how a runner
-hands that context over: the shim calls [`set_context`] once; everything else calls [`context`].
+`getattr(shim, "_ROOT")` — three copies of the same back-door, working only because the shim once
+aliased itself under that name (gone with TID-124). This module is the only one that knows how a
+runner hands that context over: the shim calls [`set_context`] once; everything else calls
+[`context`].
 
 With no runner driving — the package imported directly, a REPL, a unit test of a builtin — the
 context is the [`NullContext`]: the working directory is the root and nothing is declared, which
@@ -14,7 +15,6 @@ is what the three copies each fell back to.
 from __future__ import annotations
 
 import os
-import sys
 from typing import Any, Mapping, Protocol
 
 
@@ -50,29 +50,6 @@ class NullContext:
         return None
 
 
-class ModuleContext:
-    """The context a running shim exposes: its module's `_ROOT`, `_CLI_OPTIONS` and `_ini_value`,
-    read live — the shim sets them after it starts, so they are looked up on each use, never
-    copied."""
-
-    __slots__ = ("_module",)
-
-    def __init__(self, module) -> None:
-        self._module = module
-
-    @property
-    def rootdir(self) -> str:
-        return getattr(self._module, "_ROOT", "") or os.getcwd()
-
-    @property
-    def options(self) -> Mapping[str, Any]:
-        return dict(getattr(self._module, "_CLI_OPTIONS", {}) or {})
-
-    def ini(self, name: str) -> Any:
-        reader = getattr(self._module, "_ini_value", None)
-        return reader(name) if reader is not None else None
-
-
 _NULL = NullContext()
 _CONTEXT: RunContext | None = None
 
@@ -85,11 +62,5 @@ def set_context(ctx: RunContext | None) -> None:
 
 
 def context() -> RunContext:
-    """The current run's context: what the runner installed, else — for a shim too old to install
-    one, found by the alias it still sets — its module, else the null context."""
-    if _CONTEXT is not None:
-        return _CONTEXT
-    legacy = sys.modules.get("shim")
-    if legacy is not None and hasattr(legacy, "_ini_value"):
-        return ModuleContext(legacy)
-    return _NULL
+    """The current run's context: what the runner installed, else the null context."""
+    return _CONTEXT if _CONTEXT is not None else _NULL

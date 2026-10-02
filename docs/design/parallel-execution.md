@@ -188,7 +188,7 @@ shape of each tier's overhead, not what a suite will see, and both halves of the
 Key properties:
 
 - **Sound by construction.** No-fork + restore *contains* mutation rather than predicting it; a
-  non-restorable module always falls back to fork (`shim._restorable()`). Correctness never depends
+  non-restorable module always falls back to fork (`isolation._restorable()`). Correctness never depends
   on the purity verdict — the verdict is only an optimization that lets a known-pure test skip the
   snapshot.
 - **No learning pass.** Restore works on the very first run; the **purity guard** records verdicts as

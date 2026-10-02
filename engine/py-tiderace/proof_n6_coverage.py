@@ -18,7 +18,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, os.pardir, "py-shim"))
 
-import shim  # noqa: E402
+from tiderace_shim import config as _cfg, discovery as _disc, engine as _eng, modes as _modes  # noqa: E402,F401
 
 # Source under test — `used` is exercised, `unused` is not; coverage must tell them apart.
 MYMOD = textwrap.dedent(
@@ -50,15 +50,15 @@ def main() -> int:
             f.write(TEST)
 
         sys.path.insert(0, root)
-        run = shim.RunConfig.load(root)
-        shim._preimport(run)
-        disc = shim._discover(run)
+        run = _cfg.RunConfig.load(root)
+        _disc.preimport(run)
+        disc = _disc.discover(run)
         reg = disc.registry
 
         mech = "sys.monitoring" if getattr(sys, "monitoring", None) else "sys.settrace"
         print(f"[mechanism] {mech} (CPython {sys.version_info.major}.{sys.version_info.minor})")
 
-        engine = shim.Engine(disc, run, no_fork=True, coverage=True)
+        engine = _eng.Engine(disc, run, no_fork=True, coverage=True)
         res = engine.run("test_cov.py::test_uses_used", "function", 5000)
         engine.teardown_all()
 

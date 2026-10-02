@@ -10,11 +10,11 @@ import types
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
-from tiderace_shim import _shim, nodes  # noqa: E402
+from tiderace_shim import footprint, invoke, nodes, tiers  # noqa: E402
 
 
 def test_the_current_node_is_one_object_for_the_whole_test():
-    state = _shim.ProcessState()
+    state = invoke.ProcessState()
     assert state.current_node is None and state.nodes_run == 0 and state.clean_room is None
     node = state.node_for("t.py::test_a")
     assert node.nodeid == "t.py::test_a" and node.function is None
@@ -24,32 +24,32 @@ def test_the_current_node_is_one_object_for_the_whole_test():
 
 
 def test_xunit_bookkeeping_is_per_state():
-    a, b = _shim.ProcessState(), _shim.ProcessState()
+    a, b = invoke.ProcessState(), invoke.ProcessState()
     calls = []
 
     Mod = types.ModuleType("m")
     Mod.setup_module = lambda module: calls.append(("setup", module))
     Mod.teardown_module = lambda module: calls.append(("teardown", module))
-    _shim._xunit_module_setup(a.xunit, Mod)
-    _shim._xunit_module_setup(a.xunit, Mod)  # once per process
+    invoke._xunit_module_setup(a.xunit, Mod)
+    invoke._xunit_module_setup(a.xunit, Mod)  # once per process
     assert calls == [("setup", Mod)] and ("module", "m") in a.xunit.done and not b.xunit.done
     sys.modules["m"] = Mod
     try:
-        _shim._xunit_module_teardown(a.xunit)
+        invoke._xunit_module_teardown(a.xunit)
     finally:
         sys.modules.pop("m", None)
     assert calls[-1] == ("teardown", Mod) and not a.xunit.done
 
 
 def test_the_deadline_carries_its_message():
-    deadline = _shim._in_process_deadline(1500)
+    deadline = tiers._in_process_deadline(1500)
     assert deadline.message.startswith("timeout after 1.5s on the in-process tier")
-    assert str(_shim._InProcessTimeout()) == "timeout on the in-process tier"  # the watchdog's bare class
-    assert str(_shim._InProcessTimeout(deadline.message)) == deadline.message
+    assert str(tiers._InProcessTimeout()) == "timeout on the in-process tier"  # the watchdog's bare class
+    assert str(tiers._InProcessTimeout(deadline.message)) == deadline.message
 
 
 def test_caches_are_fresh_per_engine_and_memoise(tmp_path):
-    caches = _shim.Caches()
+    caches = footprint.Caches()
     assert caches.file_deps_stats == {"hits": 0, "parsed": 0} and caches.resolved == {}
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text("")
@@ -58,10 +58,10 @@ def test_caches_are_fresh_per_engine_and_memoise(tmp_path):
     root = str(tmp_path)
     sys.path.insert(0, root)
     try:
-        closure = _shim._import_closure(caches, "test_c.py", root)
+        closure = footprint._import_closure(caches, "test_c.py", root)
         assert closure == frozenset({"pkg/__init__.py", "pkg/util.py"})
         assert caches.import_closure["test_c.py"] is closure and caches.file_deps_stats["parsed"] >= 1
-        assert _shim._import_closure(_shim.Caches(), "test_c.py", root) == closure  # a fresh memo: recomputed
+        assert footprint._import_closure(footprint.Caches(), "test_c.py", root) == closure  # a fresh memo: recomputed
     finally:
         sys.path.remove(root)
 
