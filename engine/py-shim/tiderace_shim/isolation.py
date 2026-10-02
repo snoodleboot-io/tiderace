@@ -344,7 +344,7 @@ def _state_fingerprint() -> dict:
         "warnings.filters": len(warnings.filters),
         "logging.handlers": tuple(id(h) for h in root.handlers),
         "logging.level": root.level,
-        "threads": threading.active_count(),
+        "threads": _live_threads(),
         # The working directory is process-wide and every relative path in the next test resolves
         # against it, so a test that chdirs without cleaning up silently moves its neighbours'
         # footing. flask's suite does exactly that and nine of its tests then disagreed with pytest —
@@ -353,6 +353,32 @@ def _state_fingerprint() -> dict:
         # a disturbance worth catching rather than a reason to crash the worker.
         "cwd": _safe_cwd(),
     }
+
+
+# Packages whose worker threads are a cache, not a leak (TID-125). anyio and trio keep a thread
+# alive after `to_thread.run_sync` for the next call; `concurrent.futures` pools do the same;
+# asyncio's default executor is one of those pools. A test that used one leaves it idle, exactly
+# as a lazy import leaves a module in `sys.modules` — a warmed cache the next test reuses, not
+# state it reached into. Counting those threads sent every anyio socket, file and thread test
+# through the clean room for a forked re-run and doubled the suite's run time. A thread the test
+# started itself — a server it serves from, a worker it polls — has its home anywhere else and
+# still counts, whatever its target: the server thread's target is `socketserver`'s.
+_POOL_PACKAGES = frozenset({"anyio", "trio", "concurrent", "asyncio"})
+
+
+def _thread_home(thread) -> str:
+    """The top-level package a thread belongs to: its target's module, else its class's."""
+    target = _safe_getattr(thread, "_target", None)
+    origin = _safe_getattr(target, "__module__", None) if target is not None else None
+    if not isinstance(origin, str) or not origin:
+        origin = _safe_getattr(type(thread), "__module__", "") or ""
+    return origin.partition(".")[0]
+
+
+def _live_threads() -> int:
+    """The threads alive besides the main one, less the library pools' idle workers."""
+    return sum(1 for t in threading.enumerate()
+               if t is not threading.main_thread() and _thread_home(t) not in _POOL_PACKAGES)
 
 
 def _safe_cwd() -> str | None:
