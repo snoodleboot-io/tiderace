@@ -107,6 +107,30 @@ Everything that needs a live interpreter is an acceptance suite under `engine/cr
 (above). The proof scripts that once demonstrated the isolation tiers, purity, coverage and type-DI
 are archived under `planning/proofs/` with a note of which suite covers each now.
 
+## Timing: the gate a shim or engine change runs
+
+Correctness has gates — the unit tests, the live suites, the parity harness — and none of them
+times anything. TID-124 step 4 doubled anyio's run time and passed every one (TID-125). So a change
+to the shim or the engine's hot path is timed against its merge base before it merges, with the
+harness under `benchmarks/harness/` (TID-126):
+
+```bash
+# the shim: the branch's shim against main's, one binary, interleaved rounds
+benchmarks/harness/quiet_gate.sh 8 python -m benchmarks.harness.shimab base=origin/main cand=HEAD anyio pirn-core fx_corpus
+# the Rust binary: two builds on the same corpora
+benchmarks/harness/quiet_gate.sh 8 python -m benchmarks.harness.binab ...
+```
+
+`shimab` exits 1 when any arm is more than 10% slower than the first (`THRESHOLD`), and records
+the load every sample ran under. Three corpora cover the paths that differ: anyio is async-heavy,
+pirn-core is the large internal suite, fx_corpus is fixture-dense and runs in a second. A change to
+the isolation ladder also runs `ladder_bench`, which prints the ladder's cost per test, per tier, on
+a sync and an async synthetic suite — the number to keep.
+
+Absolute timings from a shared, loaded machine are not comparable across days (pytest itself moved
+5–24% between two passes a day apart); only the interleaved A/B is. `quiet_gate.sh` waits for the
+load to drop below its argument before starting.
+
 ## Repository layout
 
 ```
