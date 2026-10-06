@@ -7,16 +7,16 @@ vary by machine and, above all, by how fast your Python imports your suite's dep
 
 Eight real suites — four public projects vendored at fixed commits, four internal ones from a
 pinned monorepo snapshot — run by pytest and by tiderace in the same virtualenv, compared **test
-by test** before anything is timed. As of the 29 September pass on main at `ad3481f`:
+by test** before anything is timed. As of the 5 October pass on main at `a178434`:
 
 | | |
 | -- | -- |
-| parity | identical outcomes on seven of eight suites, node id for node id; the eighth (anyio) collects the same 1,479 nodes and differs on ten outcomes, eight of them tests that drive pytest itself |
-| a full run, against serial pytest | 2.0× to 5.0× faster on seven suites |
+| parity | identical outcomes on seven of eight suites, node id for node id; the eighth (anyio) collects the same 1,479 nodes and fails none that pytest passes |
+| a full run, against serial pytest | 2.0× to 4.9× faster on seven suites |
 | a full run, against `pytest -n auto` | 1.5× on the two 5,000-test suites; more on small suites, where xdist's start-up is the whole run |
-| a warm run with nothing edited | 0.16s and 0.13s on the two 5,000-test suites, against pytest's 80s and 106s |
-| one leaf module edited | 1.4s and 1.8s |
-| one test by name through a warm daemon | 0.6s on a 5,600-test suite (5s without the daemon) |
+| a warm run with nothing edited | 0.19s and 0.17s on the two 5,000-test suites, against pytest's 77s and 104s and pytest-testmon's 1.9s and 2.5s |
+| one leaf module edited | 1.9s and 3.4s (testmon: 2.0s and 2.7s); the hub module, 24s and 15s (testmon: 61s and 17s) |
+| one test by name through a warm daemon | 0.3s on a 5,600-test suite (4s without the daemon) |
 
 The published document with the full tables, the method and every caveat is
 [Tiderace on Eight Suites](https://claude.ai/artifact/WNYBgGqwbtQuW9iW14EyBn); the sections below
@@ -59,6 +59,127 @@ The method — pinned inputs, parity before speed, interleaved rounds, load reco
 comparison — is in that directory's README. `second_run.py` is the benchmark the cold numbers above
 do not cover: a warm run with nothing edited, one edit to a leaf module, one to a hub module, and an
 edit that must produce a failure (the stale-pass check). Its numbers are in the section below.
+
+### The eight-suite pass, 5 October 2026
+
+The same pass on main at `a178434`, after the code-structure redesign (TID-116 … TID-124, TID-110)
+and the fix of the one regression it introduced (TID-125): the in-process tier had taken the idle
+worker-thread pools that anyio, trio and asyncio keep alive for leaked threads, and sent 144 of
+anyio's 1,479 nodes to a forked re-run — anyio's full run had gone from 9.6 s to over 20 s. The
+pass that found it (2 October) was run on a loaded machine and is not published; this one waited
+for a quiet one — one-minute load 1–3 at the start of every timed chunk, 1–8 during, recorded with
+every sample. Three interleaved rounds after a discarded warm-up, medians. Since 1 October a
+timing gate runs on every shim or engine change (`shimab`, TID-126), so the next such regression
+is caught in the pull request, not in a monthly pass.
+
+**Parity** is the 1 October result unchanged: eight suites, 0 outcome differences on seven, anyio
+collects the same 1,479 node ids and fails none that pytest passes; its divergence is pytest's own
+(32 errors on pytest's side that are its `pytester` fixtures running under a different plugin
+set).
+
+**Cold timings**, median wall clock in seconds; 1 October in brackets where it moved more than
+the noise.
+
+| suite | pytest | pytest -n auto | tiderace | vs pytest | vs xdist |
+| -- | --: | --: | --: | --: | --: |
+| pirn-core | 75.6 | 37.7 | **25.8** [27.2] | 2.93× | 1.46× |
+| pirn-agents | 104.2 | 45.5 | **31.8** | 3.28× | 1.43× |
+| pirn-data | 32.1 | exit 3 | **15.1** | 2.12× | — |
+| anyio | 48.7 | 14.7 | **9.9** | 4.92× | 1.49× (partial parity) |
+| cachetools | 0.71 | 1.77 | **0.51** | 1.40× | 3.5× |
+| click | 1.66 [1.38] | 2.43 [1.92] | **0.74** | 2.23× | 3.3× |
+| flask | 2.58 [2.09] | 3.04 [2.54] | **1.28** | 2.02× | 2.4× |
+| fx_corpus | 0.93 | 2.36 | 0.95 | 0.98× | 2.5× |
+
+The runners are where they were: every tiderace number is within 5% of 1 October except
+pirn-core's, which is 5% better. click and flask read 20% slower for pytest and xdist alike and
+7% and 5% for tiderace — a change every tool shares is the machine's (these suites run in one or
+two seconds, where a page cache and a scheduler decide), and `bench_diff` is what says so. One
+pirn-agents tiderace round took 62 s against 31.5–31.8 s for the other three; the median
+discards it and the cause was not found — the run passed, so it was a stall, not a failure.
+
+**Memory**, peak proportional set size of each runner's whole process tree in MB, sampled every
+200 ms, the highest of the three rounds.
+
+| suite | pytest | pytest -n auto | tiderace |
+| -- | --: | --: | --: |
+| pirn-data | 812 | 1,606 (exit 3) | 6,300 |
+| pirn-agents | 1,173 | 2,777 | 3,271 |
+| pirn-core | 459 | 2,018 | 2,440 |
+| anyio | 222 | 481 | **596** |
+| flask | 57 | 365 | **179** |
+| click | 41 | 275 | **93** |
+| fx_corpus | 49 | 316 | **57** |
+| cachetools | 39 | 257 | 371 |
+
+The monorepo suites hold where they were (pirn-data's 6.3 GB is still eight Spark JVMs). Two
+things moved. anyio's tiderace peak doubled (292 → 596 MB): 144 nodes that forked a clean room
+and ran there now stay in the pool's workers, which keep what those tests allocate. And on
+pirn-core the first run peaked at 2.4 GB but the next two at 1.4 GB, at the same wall clock
+(25.8 s, 25.5 s); the later runs are the ones with a state file behind them. The small suites'
+peaks are one 200 ms sample wide: cachetools' three rounds read 371, 47 and 142 MB, so its row is
+a transient, not a footprint.
+
+**The second run**, with pytest-testmon as the second comparison. testmon is the closest thing
+pytest has to a second run — coverage recorded on the first `--testmon` run, affected tests
+selected by fingerprint on the next — and it is run here the way its own documentation says to,
+with `--testmon-forceselect` because these suites deselect their slow marks in `addopts`, and
+coverage's C tracer because its default on 3.14 records no contexts. The edit is one appended
+statement, not a comment (a comment is invisible to testmon's fingerprints). Medians of three.
+
+| scenario | pirn-core: pytest · testmon · tiderace | pirn-agents: pytest · testmon · tiderace |
+| -- | -- | -- |
+| cold, full run (the one that records) | 76.7 · 116.5 · **25.9** s | 104.0 · 169.4 · **39.8** s |
+| warm, **nothing edited** | 76.7 · 1.87 · **0.19** s | 104.0 · 2.51 · **0.17** s |
+| one leaf module edited (4 / 1 dependents) | 76.7 · 2.00 (2 ran) · **1.91** (4 ran) s | 104.0 · 2.69 (1 ran) · **3.42** (1 ran) s |
+| the hub module edited (3,958 / 2,428 dependents) | 76.7 · 60.8 (816 ran) · **23.9** (3,793 ran) s | 104.0 · 16.6 (499 ran) · **14.8** (2,316 ran) s |
+| leaf module made to raise on import | reported · reported · **reported** | reported · reported · **reported** |
+
+(On pirn-agents the leaf module is imported while pytest loads the suite's conftest, so testmon's
+run stops there with the traceback and exit 4 — reported, before a test runs.)
+
+The two tools choose differently and pay differently. testmon selects by coverage, down to the
+code block, so on the hub edit it runs 816 tests where tiderace's file-level footprints run
+3,793; then it runs them serially under the tracer, so it takes 2.5× as long on pirn-core and
+12% longer on pirn-agents, and its recording run costs 1.5–1.6× a plain pytest run where
+tiderace's costs a third of one. On a leaf edit and on nothing-edited the two are within a second
+and a half of each other, and either is 30–600× a full run. tiderace's own rows are 1 October's
+within a tenth of a second, the hub edit 2 s faster on pirn-core.
+
+**Warm vs xdist** (`warm_vs_xdist.py`, four interleaved rounds after the priming run): pirn-core
+**xdist 37.4 s, tiderace warm 24.5 s, 1.52×**; pirn-agents **44.8 s against 30.5 s, 1.47×**.
+1 October: 1.55× and 1.46×.
+
+**Worker scaling**, pirn-core cold, median of two: `--workers 1` 83.2 s, `2` 43.9 s, `4` 27.3 s,
+`8` 24.5 s. 1 October: 83.2 / 45.0 / 28.6 / 27.7.
+
+**Suite size**, the synthetic suites again, median of three.
+
+| run | 2,000 tests · 40 modules | 20,000 tests · 400 modules |
+| -- | --: | --: |
+| pytest | 1.85 s | 16.2 s |
+| pytest -n auto | 2.94 s | 18.7 s |
+| tiderace, cold | **0.63 s** | **4.11 s** |
+| tiderace, warm daemon | 0.27 s | 5.26 s |
+| pytest -k one test | 0.66 s | 4.49 s |
+| tiderace -k one test, no daemon | 0.39 s | 1.20 s |
+| tiderace -k one test, warm daemon | **0.09 s** | **0.85 s** |
+
+1 October's table to within 0.1 s on every row.
+
+**The isolation ladder's cost per test** (`ladder_bench.py`, new with TID-126): 1,000 trivial
+tests, sync and `async def`, cold, no daemon, median of three, in microseconds per test.
+
+| tier | sync | async |
+| -- | --: | --: |
+| the ladder (default: in-process with snapshot/restore, 8 workers) | **494** | **638** |
+| `--strategy subprocess` (in-process, no fork anywhere) | 772 | 1,093 |
+| `--no-optimistic` (a fork per test) | 1,319 | 2,102 |
+| the ladder on one worker | 994 | 1,564 |
+
+An async test on the ladder costs 1.3× a sync one — the event loop and the async fixture. Before
+TID-125 it cost 5× (3,219 µs on a loaded machine, 933 after the fix on the same machine); this
+quiet-machine pass is the baseline the gate compares against from here.
 
 ### The eight-suite pass, 1 October 2026
 

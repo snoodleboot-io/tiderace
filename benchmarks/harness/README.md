@@ -21,7 +21,7 @@ anything, checks that tiderace agrees with pytest on them test for test.
 | `bench_diff.py` | two `timing_rr` passes side by side: medians, change, the ratios — read before any table is updated |
 | `ladder_bench.py` | the isolation ladder's cost per test, per tier, on a sync and an async synthetic suite |
 | `analyse_bins.py` | rebuild the scheduler's bins from a report and charge them measured durations |
-| `second_run.py` | the run after an edit: warm no-change, leaf edit, hub edit, injected failure (TID-65) |
+| `second_run.py` | the run after an edit: warm no-change, leaf edit, hub edit, injected failure (TID-65) — pytest and pytest-testmon as the comparisons |
 | `warm_vs_xdist.py` | tiderace on its second run (duration-ordered) against `pytest -n auto` (TID-52) |
 | `timeline.py` | draw a run's schedule from `--report`: one lane per worker, idle, critical path, ideal makespan (TID-78) |
 | `quiet_gate.sh` | wait for the machine to be quiet before a timed pass |
@@ -64,7 +64,13 @@ project's dependency — is installed beside it and reached through `PYTHONPATH`
 
 ```bash
 uv pip install --python $PIRN_SNAPSHOT/.venv/bin/python --target .tiderace-bench-venvs/xdist pytest-xdist
+uv pip install --python $PIRN_SNAPSHOT/.venv/bin/python --target .tiderace-bench-venvs/testmon pytest-testmon
 ```
+
+pytest-testmon is supplied the same way (`TESTMON_PATH`) for `second_run`, which runs it with
+`--testmon-forceselect` (it switches selection off when `-m` is in play, and the monorepo suites
+deselect their slow marks in `addopts`) and `COVERAGE_CORE=ctrace` (on 3.14 coverage's default
+core records no dynamic contexts, and testmon then records nothing).
 
 ## The gate every shim or engine change runs
 
