@@ -21,6 +21,20 @@ pub(crate) enum RunScope {
     Selected,
 }
 
+/// Save the state beside the tree, or say why not and go on. The tests have run and their
+/// results are in hand: an unwritable tree must not turn that answer into an I/O error. What was
+/// not recorded is simply run again next time — repeated work, never a stale verdict — which is
+/// the same contract `tiderace run` has for its durations hint. The one persistence-failure
+/// policy, decided on TID-119.
+pub(crate) fn save_or_warn(state: &PersistedState, path: &std::path::Path) {
+    if let Err(e) = state.save(path) {
+        eprintln!(
+            "tiderace: warning: state not saved to {}: {e} — the next run repeats what this one learned",
+            path.display()
+        );
+    }
+}
+
 impl EngineHandler {
     /// Fold a batch of results into the persisted state (outcome + detail + deps + purity verdict) and
     /// rebaseline the content hashes of every touched file. Shared by the impact-aware + full runs.
