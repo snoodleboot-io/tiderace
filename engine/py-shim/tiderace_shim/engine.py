@@ -440,7 +440,7 @@ class Engine:
                         pytest_marks=_normalise_marks(reversed(_pytest_markers(plan.node))),
                         keywords=lambda nid: _keyword_names(self.config, nid, names))
         if any(r.disturbed for r in results):
-            clean = self._clean_room_handoff(node_id, style, deadline_ms)
+            clean = self._clean_room_handoff(node_id, style, deadline_ms, results)
             if clean is not None:
                 return clean
         return _note_import_history(resp, self.state.nodes_run)
@@ -494,7 +494,8 @@ class Engine:
                 variant_index += 1
         return results
 
-    def _clean_room_handoff(self, node_id: str, style: str, deadline_ms: int) -> dict | None:
+    def _clean_room_handoff(self, node_id: str, style: str, deadline_ms: int,
+                            attempt: "list[VariantResult] | None" = None) -> dict | None:
         """Re-run a node that disturbed interpreter state from the clean room's pristine image,
         and report THAT: its in-process result is not to be trusted, and this process is no longer
         a safe thing to fork (TID-50). `None` when there is nothing better to hand it to — no
@@ -503,7 +504,14 @@ class Engine:
         second deadline, and replace the timeout's own message)."""
         if self.state.clean_room is None or self.options.no_fork or self._timed_out:
             return None
-        _warn(f"re-running {node_id} from a clean image — it disturbed interpreter state")
+        # What the in-process attempt did is in the warning, since the clean run's result replaces
+        # it: the disturbance, how long the attempt took, and how it ended — a deadline-long attempt
+        # that "failed" is a hang the deadline ended, whatever the test turned the interrupt into.
+        took = f"{sum(r.duration_ms for r in attempt)}ms" if attempt else "?"
+        ended = ", ".join(f"{r.outcome}{': ' + r.detail.strip().splitlines()[-1][:100] if r.detail else ''}"
+                          for r in attempt) if attempt else "?"
+        _warn(f"re-running {node_id} from a clean image — it {self._disturbance or 'disturbed interpreter state'}; "
+              f"the in-process attempt took {took} and ended {ended}")
         clean = _clean_room_run(self.state, node_id, style, deadline_ms)
         if clean is None:
             return None

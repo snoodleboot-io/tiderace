@@ -96,7 +96,19 @@ pirn-core's, which is 5% better. click and flask read 20% slower for pytest and 
 7% and 5% for tiderace — a change every tool shares is the machine's (these suites run in one or
 two seconds, where a page cache and a scheduler decide), and `bench_diff` is what says so. One
 pirn-agents tiderace round took 62 s against 31.5–31.8 s for the other three; the median
-discards it and the cause was not found — the run passed, so it was a stall, not a failure.
+discards it. The same stall — one deadline's worth, on a run that otherwise passes — has now been
+seen on anyio too (in about one full run in thirty), and the pass's own data says what it is:
+in the stalled runs one socket test's duration is the deadline and nothing else is slow.
+`test_happy_eyeballs` starts a listener on one address family and connects to `localhost`, which
+on this machine resolves to 127.0.0.1 only, so six of its nine variants fail — under pytest too —
+and leave their `accept()` thread behind, so tiderace re-runs them from the clean image. With
+eight workers running socket tests at once, the connect to the *wrong* family occasionally lands
+on another worker's listener that happens to hold the same ephemeral port, succeeds, and the
+test's own `thread.join()` then waits for an `accept()` that never comes: the deadline ends it.
+Serial pytest never has another listener to hit. A parallel runner's artefact, paid as one
+deadline, not a correctness difference (the outcomes match pytest's); since the pass the
+clean-room warning names the disturbance and how the in-process attempt ended, which is what
+made this traceable (TID-127).
 
 **Memory**, peak proportional set size of each runner's whole process tree in MB, sampled every
 200 ms, the highest of the three rounds.
@@ -113,12 +125,17 @@ discards it and the cause was not found — the run passed, so it was a stall, n
 | cachetools | 39 | 257 | 371 |
 
 The monorepo suites hold where they were (pirn-data's 6.3 GB is still eight Spark JVMs). Two
-things moved. anyio's tiderace peak doubled (292 → 596 MB): 144 nodes that forked a clean room
-and ran there now stay in the pool's workers, which keep what those tests allocate. And on
-pirn-core the first run peaked at 2.4 GB but the next two at 1.4 GB, at the same wall clock
-(25.8 s, 25.5 s); the later runs are the ones with a state file behind them. The small suites'
-peaks are one 200 ms sample wide: cachetools' three rounds read 371, 47 and 142 MB, so its row is
-a transient, not a footprint.
+rows looked like changes and were checked by sampling *who* holds the memory at the peak (the
+pool's eight workers, their clean-room forks, the children tests spawn). anyio's tiderace peak
+read 292 MB on 1 October and 596 here: the eight pool workers hold 235 MB with the 1 October
+shim, 270 after TID-124 step 3 and 320 with the current one — about 10 MB more per worker, which
+is the in-process tier's isolation bookkeeping — and the rest of the 596 is one 200 ms sample
+catching forks and spawned children together (the peak reads 374–462 MB on three more runs).
+pirn-core's three rounds read 2,440, 1,406 and 1,382 MB at the same wall clock: the pool holds
+1.2 GB and the clean-room forks 0.13, so the two-gigabyte samples are the children its tests
+spawn (dispatcher and pool tests) coinciding, not a first-run effect — three further runs from a
+clean state read 1,444, 1,791 and 2,766 MB in that order. The small suites' peaks are one
+sample wide too: cachetools' three rounds read 371, 47 and 142 MB.
 
 **The second run**, with pytest-testmon as the second comparison. testmon is the closest thing
 pytest has to a second run — coverage recorded on the first `--testmon` run, affected tests
