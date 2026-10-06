@@ -14,9 +14,16 @@ the run after an edit — through `tiderace-daemon`, the front end that does imp
               (TID-40 was exactly the stale-pass bug this guards against)
 
 Leaf and hub are chosen from the state file the cold run wrote — dependents per source file — so
-the choice is the corpus's own, not a guess. Each edit is reverted and the tree re-synced before the
-next scenario. pytest is the fixed-cost comparison: it has no warm mode, so its number is the same
+the choice is the corpus's own, not a guess. The edit is one appended statement (a comment would be
+invisible to testmon's fingerprints). Each edit is reverted and the tree re-synced before the next
+scenario. pytest is the fixed-cost comparison: it has no warm mode, so its number is the same
 full run every time, and that is the point.
+
+pytest-testmon is the second comparison, the same scenarios: it is the closest thing pytest has to
+a second run — coverage recorded on the first `--testmon` run, affected tests selected on the next.
+Supplied like xdist, from a `--target` install beside the snapshot (`TESTMON_PATH`, default
+`.tiderace-bench-venvs/testmon`); its `.testmondata` is removed before each cold run and left in
+place for the warm ones. Skipped when the path does not exist.
 
 Load is recorded with every sample; `quiet_gate.sh` this like any other timed pass.
 """
@@ -32,6 +39,10 @@ from .runs import pytest_cmd, pytest_env, tiderace_env_for, timed
 DAEMON = os.environ.get("TIDERACE_DAEMON", os.path.join(R, "engine", "target", "release", "tiderace-daemon"))
 ROUNDS = int(os.environ.get("ROUNDS", 3))
 STATE = ".tiderace-state.json"
+# A statement, not a comment: tiderace hashes bytes, but a fingerprinting selector (testmon) ignores
+# comments, and the edit has to be one both see.
+EDIT = "\n_benchmark_edit = 1\n"
+TESTMON_PATH = os.environ.get("TESTMON_PATH", os.path.join(R, ".tiderace-bench-venvs", "testmon"))
 
 
 def daemon(args, corpus):
@@ -43,6 +54,23 @@ def daemon(args, corpus):
 def pytest_full(corpus):
     t = timed(pytest_cmd(corpus.python, corpus.pytest_target), corpus.cwd, pytest_env(corpus))
     tail = [l for l in t.output.strip().splitlines() if "passed" in l or "failed" in l]
+    return {"secs": round(t.seconds, 3), "rc": t.returncode, "load": load_average(),
+            "summary": (tail[-1] if tail else "").strip()}
+
+
+def testmon(corpus, cold=False):
+    """pytest `--testmon`; `cold` removes `.testmondata` first so the run records coverage afresh."""
+    data = os.path.join(corpus.cwd, ".testmondata")
+    if cold and os.path.exists(data):
+        os.remove(data)
+    # `--testmon-forceselect`: testmon switches selection off when `-m` is in play, and the monorepo
+    # suites deselect their slow marks in `addopts`. `COVERAGE_CORE=ctrace`: on 3.14 coverage picks
+    # the sys.monitoring core, which has no dynamic contexts, and testmon records nothing.
+    env = dict(pytest_env(corpus), PYTHONPATH=TESTMON_PATH, COVERAGE_CORE="ctrace")
+    t = timed(pytest_cmd(corpus.python, corpus.pytest_target, "--testmon", "--testmon-forceselect"),
+              corpus.cwd, env)
+    tail = [l for l in t.output.strip().splitlines()
+            if "passed" in l or "failed" in l or "deselected" in l or "no tests ran" in l]
     return {"secs": round(t.seconds, 3), "rc": t.returncode, "load": load_average(),
             "summary": (tail[-1] if tail else "").strip()}
 
@@ -131,7 +159,7 @@ def main(argv):
         if leaf and hub:
             for label, (rel, n) in (("leaf_edit", leaf), ("hub_edit", hub)):
                 for _ in range(ROUNDS):
-                    s = with_edit(troot, rel, "\n# benchmark edit\n", lambda: daemon(["run", troot], corpus))
+                    s = with_edit(troot, rel, EDIT, lambda: daemon(["run", troot], corpus))
                     s["dependents"] = n
                     rec[label].append(s)
                     print(f"   {label:16s} {s['secs']:8.2f}s  load {s['load']:.1f}  {s['summary']}   ({n} dependents)", flush=True)
@@ -146,6 +174,28 @@ def main(argv):
             print(f"   failure_edit     {s['secs']:8.2f}s  load {s['load']:.1f}  {s['summary']}   "
                   f"({'REPORTED' if s['rc'] != 0 else 'STALE PASS — soundness failure'})", flush=True)
             daemon(["run", troot], corpus)
+
+        if os.path.isdir(TESTMON_PATH):
+            for label, cold in (("testmon_cold", True), ("testmon_no_change", False)):
+                for _ in range(ROUNDS):
+                    s = testmon(corpus, cold=cold)
+                    rec.setdefault(label, []).append(s)
+                    print(f"   {label:16s} {s['secs']:8.2f}s  load {s['load']:.1f}  {s['summary']}", flush=True)
+            if leaf and hub:
+                for label, (rel, n) in (("testmon_leaf_edit", leaf), ("testmon_hub_edit", hub)):
+                    for _ in range(ROUNDS):
+                        s = with_edit(troot, rel, EDIT, lambda: testmon(corpus))
+                        s["dependents"] = n
+                        rec.setdefault(label, []).append(s)
+                        print(f"   {label:16s} {s['secs']:8.2f}s  load {s['load']:.1f}  {s['summary']}   ({n} dependents)", flush=True)
+                        testmon(corpus)  # after the revert: let testmon re-record, unmeasured
+                rel, n = leaf
+                s = with_edit(troot, rel, "\nraise RuntimeError('benchmark: injected import failure')\n",
+                              lambda: testmon(corpus))
+                rec.setdefault("testmon_failure_edit", []).append(s)
+                print(f"   testmon_failure  {s['secs']:8.2f}s  load {s['load']:.1f}  {s['summary']}   "
+                      f"({'REPORTED' if s['rc'] != 0 else 'STALE PASS — soundness failure'})", flush=True)
+                testmon(corpus)
 
         rec["median"] = {k: med(v) for k, v in rec.items() if isinstance(v, list) and v and "secs" in v[0]}
         out[name] = rec
