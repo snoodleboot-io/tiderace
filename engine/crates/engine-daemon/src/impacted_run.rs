@@ -9,7 +9,7 @@ use engine_core::domain::{NodeId, TestResult};
 use engine_core::runner::Learned;
 
 use crate::error::Result;
-use crate::state::fold::{disturbers, recorded_durations, RunScope};
+use crate::state::fold::{disturbers, recorded_durations, save_or_warn, RunScope};
 use crate::state::plan::{changed_files, plan, PersistedState, TestRecord, STATE_FILE};
 use crate::{EngineHandler, ImpactSummary};
 
@@ -122,7 +122,7 @@ impl EngineHandler {
             } else {
                 self.rebaseline_hashes(&mut state); // cache-hit-only: keep file hashes current
             }
-            state.save(&state_path)?;
+            save_or_warn(&state, &state_path);
         }
 
         Ok(ImpactSummary {

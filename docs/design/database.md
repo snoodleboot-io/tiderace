@@ -53,6 +53,10 @@ flowchart LR
 - `plan(state, candidates, changed)` partitions candidates into `to_run` and `cached`: a test runs if
   it was **never seen** or **any** of its recorded `deps` changed; otherwise its cached outcome stands.
 - A missing or unparseable file yields empty state — a clean cold start. To reset, delete the file.
+- A file that cannot be **written** (a full disk, a read-only tree) is a warning, not a failure:
+  the run reports the results it has, and what it could not record runs again next time. The same
+  contract `tiderace run` has for its durations hint — repeated work, never a stale verdict, never
+  a green run turned red by the file system (TID-119).
 
 This file is **machine-local** working state and should not be committed.
 

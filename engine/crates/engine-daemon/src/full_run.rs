@@ -7,7 +7,7 @@ use engine_core::runner::{Learned, PhaseTimer, DEFAULT_DEADLINE_MS};
 
 use crate::error::Result;
 use crate::rpc::method::RpcResult;
-use crate::state::fold::{disturbers, recorded_durations, RunScope};
+use crate::state::fold::{disturbers, recorded_durations, save_or_warn, RunScope};
 use crate::state::keyword_prefilter::keyword_prefilter;
 use crate::state::plan::{changed_files, PersistedState, STATE_FILE};
 use crate::{to_rpc, EngineHandler};
@@ -147,7 +147,7 @@ impl EngineHandler {
         // Saved only when the run changed something (TID-94): a `-k` that selected nothing
         // records nothing, and the state is a few megabytes.
         if self.persist_results(&mut state, &all_candidates, &fresh, scope) {
-            state.save(&state_path)?;
+            save_or_warn(&state, &state_path);
         }
         phase.mark("persist");
         Ok(fresh)
