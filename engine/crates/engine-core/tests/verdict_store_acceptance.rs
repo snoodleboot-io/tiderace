@@ -228,7 +228,7 @@ fn a_missing_or_corrupt_state_file_is_a_cold_start() {
 // TID-62 — durations are recorded by `run`, read back as weights, and are never a verdict.
 
 use engine_core::domain::{NodeId, Outcome, TestResult};
-use engine_core::runner::record_durations;
+use engine_core::runner::record_hints;
 use engine_core::runner::RecordedOutcome;
 
 fn timed(node: &str, ms: u64) -> TestResult {
@@ -239,7 +239,7 @@ fn timed(node: &str, ms: u64) -> TestResult {
 #[test]
 fn durations_round_trip_through_the_state_file() {
     let dir = temp("durations");
-    record_durations(
+    record_hints(
         &dir,
         &[timed("t.py::fast", 3), timed("t.py::slow[case]", 1_200)],
     )
@@ -262,7 +262,7 @@ fn durations_round_trip_through_the_state_file() {
 #[test]
 fn recording_durations_never_creates_a_verdict() {
     let dir = temp("no_verdict");
-    record_durations(&dir, &[timed("t.py::a", 10), timed("t.py::b", 20)]).unwrap();
+    record_hints(&dir, &[timed("t.py::a", 10), timed("t.py::b", 20)]).unwrap();
 
     let state = PersistedState::load(&dir.join(STATE_FILE));
     assert!(
@@ -290,7 +290,7 @@ fn recording_durations_preserves_every_other_field() {
     let before = PersistedState::load(&dir.join(STATE_FILE));
     assert_eq!(before.tests.len(), 1, "seeded");
 
-    record_durations(&dir, &[timed("t.py::a", 7), timed("t.py::new", 9)]).unwrap();
+    record_hints(&dir, &[timed("t.py::a", 7), timed("t.py::new", 9)]).unwrap();
 
     let after = PersistedState::load(&dir.join(STATE_FILE));
     assert_eq!(after.tests.len(), 1, "no record added for the unseen node");
@@ -307,8 +307,8 @@ fn recording_durations_preserves_every_other_field() {
 #[test]
 fn the_latest_duration_replaces_the_earlier_one() {
     let dir = temp("latest");
-    record_durations(&dir, &[timed("t.py::a", 1_000)]).unwrap();
-    record_durations(&dir, &[timed("t.py::a", 5)]).unwrap();
+    record_hints(&dir, &[timed("t.py::a", 1_000)]).unwrap();
+    record_hints(&dir, &[timed("t.py::a", 5)]).unwrap();
     assert_eq!(VerdictStore::load(&dir).durations()["t.py::a"], 5);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -58,6 +58,14 @@ pub struct PersistedState {
     /// is what was measured. The scheduler folds cases back onto the collected item it packs.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub durations: BTreeMap<String, u64>,
+    /// Node ids a one-shot run saw disturb interpreter state (TID-127), so later runs fork them
+    /// from the start instead of rediscovering it — an in-process attempt plus a clean-room re-run,
+    /// both wasted, every run. Kept apart from [`tests`](Self::tests) for the same reason
+    /// [`durations`](Self::durations) is: a `TestRecord` is a verdict the impact planner trusts,
+    /// and this is only ever the removal of an optimisation. Sticky; a stale entry forks a test
+    /// that no longer needs it, which costs a little time and cannot produce a wrong answer.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub forced_fork: BTreeSet<String>,
 }
 
 /// What a record says happened to its test: it ran and this was the outcome, or the project's
@@ -170,14 +178,19 @@ impl TestRecord {
 }
 
 impl PersistedState {
-    /// Remember how long each of `results` took, for the next run's scheduler (TID-62).
+    /// Remember how long each of `results` took, for the next run's scheduler (TID-62), and which
+    /// of them disturbed interpreter state, so the next run forks those from the start (TID-127).
     ///
-    /// Overwrites rather than averages: the most recent measurement is the one most likely to
-    /// describe the next run, and a test that got faster or slower should be re-ranked on the next
-    /// run rather than dragged by history. Nothing else in the state is touched.
-    pub fn record_durations(&mut self, results: &[TestResult]) {
+    /// Durations overwrite rather than average: the most recent measurement is the one most likely
+    /// to describe the next run, and a test that got faster or slower should be re-ranked on the
+    /// next run rather than dragged by history. Disturbers accumulate: the verdict only ever
+    /// removes an optimisation. Nothing else in the state is touched.
+    pub fn record_hints(&mut self, results: &[TestResult]) {
         for r in results {
             self.durations.insert(r.node_id.to_string(), r.duration_ms);
+            if r.must_fork {
+                self.forced_fork.insert(r.node_id.to_string());
+            }
         }
     }
 
@@ -209,20 +222,22 @@ pub fn changed_files(
         .collect()
 }
 
-/// Write **only** the durations of `results` into the state file beside `root` (TID-62).
+/// Write the run's hints into the state file beside `root`: the durations of `results` (TID-62)
+/// and the nodes that disturbed interpreter state (TID-127).
 ///
-/// This is the one thing `tiderace run` writes, and the module doc's "reading only" still holds for
-/// everything that is a verdict: the file is loaded, the durations map is updated, and the file is
+/// These are the things `tiderace run` writes, and the module doc's "reading only" still holds for
+/// everything that is a verdict: the file is loaded, the two hint maps are updated, and the file is
 /// saved with every other field exactly as it was. A `run` on a tree the daemon has never seen
-/// creates the file with nothing but durations in it, which the daemon then reads as an empty
-/// verdict store plus ordering hints — the same thing it would have derived on its own first run.
+/// creates the file with nothing but hints in it, which the daemon then reads as an empty verdict
+/// store plus ordering hints and a fork list — the same thing it would have derived on its own
+/// first run.
 ///
-/// Best-effort by contract: the caller warns and moves on if this fails. Losing the hint must not
+/// Best-effort by contract: the caller warns and moves on if this fails. Losing a hint must not
 /// turn a green run red, and an unwritable tree is a tree that runs cold next time, not a failure.
-pub fn record_durations(root: &Path, results: &[TestResult]) -> std::io::Result<()> {
+pub fn record_hints(root: &Path, results: &[TestResult]) -> std::io::Result<()> {
     let path = root.join(STATE_FILE);
     let mut state = PersistedState::load(&path);
-    state.record_durations(results);
+    state.record_hints(results);
     state.save(&path)
 }
 
@@ -312,7 +327,9 @@ impl VerdictStore {
             .tests
             .iter()
             .filter(|(_, rec)| rec.must_fork)
-            .map(|(node, _)| NodeId::new(node.clone()))
+            .map(|(node, _)| node)
+            .chain(self.state.forced_fork.iter())
+            .map(|node| NodeId::new(node.clone()))
             .collect()
     }
 }

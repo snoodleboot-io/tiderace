@@ -50,13 +50,13 @@ impl EngineHandler {
         // rewrite the whole state — 11 MB on pirn-core, 55 ms of a 300 ms round trip — for a
         // millisecond of jitter. A duration survives to disk with the next real change.
         let mut changed = false;
-        state.record_durations(results); // TID-62: the next run's scheduler weights
-                                         // A candidate that ran and produced nothing is one the project's own `addopts` deselects
-                                         // or ignores: the shim answers it with an empty expansion, so it never had a record, so
-                                         // the planner called it "never seen" on every warm run — 55 phantoms on pirn-core, each a
-                                         // request, together forcing a wellspring launch to run nothing (TID-73). Record what was
-                                         // learned: it is deselected, and that verdict depends on its own module and on the config
-                                         // that deselected it. A candidate that produces results again drops the record.
+        state.record_hints(results); // TID-62: the next run's scheduler weights
+                                     // A candidate that ran and produced nothing is one the project's own `addopts` deselects
+                                     // or ignores: the shim answers it with an empty expansion, so it never had a record, so
+                                     // the planner called it "never seen" on every warm run — 55 phantoms on pirn-core, each a
+                                     // request, together forcing a wellspring launch to run nothing (TID-73). Record what was
+                                     // learned: it is deselected, and that verdict depends on its own module and on the config
+                                     // that deselected it. A candidate that produces results again drops the record.
         let config_deps = self.config_deps();
         let learn_deselection = scope == RunScope::Whole;
         let deselected = if learn_deselection {
