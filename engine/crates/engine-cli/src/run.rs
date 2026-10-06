@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use engine_core::collection::{Collector, RegexCollector};
 use engine_core::domain::RunReport;
-use engine_core::runner::{record_durations, Learned, RunPlan, VerdictStore, WorkerCount};
+use engine_core::runner::{record_hints, Learned, RunPlan, VerdictStore, WorkerCount};
 use engine_daemon::DaemonClient;
 
 use crate::args::{Options, Route};
@@ -154,14 +154,16 @@ pub fn execute(opts: Options) -> ExitCode {
                 }
             };
 
-            // The one thing `run` writes back (TID-62, ADR-E016): how long each node took, so the
-            // next run's scheduler hands out the heaviest module first instead of the one with the
-            // most tests. Not a verdict — the verdict store's "reading only" contract still holds
-            // for everything that can change an answer — and best-effort: a tree that cannot be
-            // written runs cold next time, which is not a failure of this run.
-            if let Err(e) = record_durations(root, &results) {
+            // What `run` writes back: how long each node took (TID-62, ADR-E016), so the next
+            // run's scheduler hands out the heaviest module first instead of the one with the most
+            // tests, and which nodes disturbed interpreter state (TID-127), so the next run forks
+            // them from the start instead of paying an in-process attempt and a clean-room re-run
+            // to find out again. Hints, not verdicts — the verdict store's "reading only" contract
+            // still holds for everything that can change an answer — and best-effort: a tree that
+            // cannot be written runs cold next time, which is not a failure of this run.
+            if let Err(e) = record_hints(root, &results) {
                 eprintln!(
-                    "warning: could not record durations in {}: {e}",
+                    "warning: could not record run hints in {}: {e}",
                     root.display()
                 );
             }

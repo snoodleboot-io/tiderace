@@ -40,6 +40,6 @@ pub use run_plan::{
 };
 pub use scheduler_kind::SchedulerKind;
 pub use verdicts::{
-    changed_files, record_durations, PersistedState, RecordedOutcome, TestRecord, VerdictStore,
+    changed_files, record_hints, PersistedState, RecordedOutcome, TestRecord, VerdictStore,
     STATE_FILE,
 };
