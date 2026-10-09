@@ -122,7 +122,10 @@ pub fn execute(opts: Options) -> ExitCode {
         }
         None => {
             let items = match RegexCollector::new().collect(root) {
-                Ok(items) => items,
+                Ok(items) => {
+                    timing.mark("collect");
+                    items
+                }
                 Err(e) => {
                     eprintln!("error: collection failed: {e}");
                     return ExitCode::FAILURE;
@@ -134,6 +137,7 @@ pub fn execute(opts: Options) -> ExitCode {
             // needs coverage capture turned on — the dependency footprints that keep a purity
             // verdict honest are already recorded, and checking them is a re-hash.
             let (effective, learned) = effective_plan(plan, items.len(), root);
+            timing.mark("effective_plan (state load)");
             eprintln!("tiderace: {}", effective.header_with(&learned));
 
             // `&effective`, not `plan`: the header and the run must describe the same thing. They
@@ -143,6 +147,7 @@ pub fn execute(opts: Options) -> ExitCode {
                 &python, &shim, root, items, &effective, &learned,
             ) {
                 Ok(outcome) => {
+                    timing.mark("run_parallel");
                     for line in &outcome.notes.lines {
                         eprintln!("tiderace: {line}");
                     }
@@ -167,11 +172,13 @@ pub fn execute(opts: Options) -> ExitCode {
                     root.display()
                 );
             }
+            timing.mark("record_hints");
             results
         }
     };
     let report = RunReport::new(results);
     report::print(&report, quiet);
     report::write_json(&report, report_path);
+    timing.mark("report");
     ExitCode::from(report.exit_code() as u8)
 }
