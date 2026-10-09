@@ -18,3 +18,10 @@ path = "../engine-daemon/src/main.rs"
 [dependencies]
 engine-core = { path = "../engine-core" }
 engine-daemon = { path = "../engine-daemon" }
+
+# The wheel builds from this crate, not the workspace, so the workspace's release profile does not
+# reach it: the same whole-program optimisation, repeated here (see engine/Cargo.toml).
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
