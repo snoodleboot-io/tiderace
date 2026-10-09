@@ -1,0 +1,438 @@
+{
+ "pirn-core": {
+  "pytest_full": [
+   {
+    "secs": 76.733,
+    "rc": 0,
+    "load": 1.7490234375,
+    "summary": "5036 passed, 91 skipped, 32 deselected, 31 warnings, 248 subtests passed in 74.53s (0:01:14)"
+   },
+   {
+    "secs": 76.57,
+    "rc": 0,
+    "load": 1.40283203125,
+    "summary": "5036 passed, 91 skipped, 32 deselected, 31 warnings, 248 subtests passed in 74.39s (0:01:14)"
+   },
+   {
+    "secs": 77.106,
+    "rc": 0,
+    "load": 1.30078125,
+    "summary": "5036 passed, 91 skipped, 32 deselected, 31 warnings, 248 subtests passed in 74.92s (0:01:14)"
+   }
+  ],
+  "cold_all": [
+   {
+    "secs": 25.909,
+    "rc": 0,
+    "load": 2.66259765625,
+    "summary": ""
+   },
+   {
+    "secs": 25.852,
+    "rc": 0,
+    "load": 3.54931640625,
+    "summary": ""
+   },
+   {
+    "secs": 26.072,
+    "rc": 0,
+    "load": 5.201171875,
+    "summary": ""
+   }
+  ],
+  "no_change": [
+   {
+    "secs": 0.194,
+    "rc": 0,
+    "load": 5.201171875,
+    "summary": "0 ran, 5602 cached, 5602 total, 0 failing"
+   },
+   {
+    "secs": 0.188,
+    "rc": 0,
+    "load": 5.201171875,
+    "summary": "0 ran, 5602 cached, 5602 total, 0 failing"
+   },
+   {
+    "secs": 0.187,
+    "rc": 0,
+    "load": 5.201171875,
+    "summary": "0 ran, 5602 cached, 5602 total, 0 failing"
+   }
+  ],
+  "targets": {
+   "leaf": [
+    "pirn/connectors/file_formats/bdf_format.py",
+    4
+   ],
+   "hub": [
+    "pirn/core/shape_guard.py",
+    3958
+   ]
+  },
+  "leaf_edit": [
+   {
+    "secs": 1.929,
+    "rc": 0,
+    "load": 4.86474609375,
+    "summary": "4 ran, 5598 cached, 5602 total, 0 failing"
+   },
+   {
+    "secs": 1.875,
+    "rc": 0,
+    "load": 4.86474609375,
+    "summary": "4 ran, 5598 cached, 5602 total, 0 failing"
+   },
+   {
+    "secs": 1.905,
+    "rc": 0,
+    "load": 4.55517578125,
+    "summary": "4 ran, 5598 cached, 5602 total, 0 failing"
+   }
+  ],
+  "failure_edit": [
+   {
+    "secs": 1.665,
+    "rc": 1,
+    "load": 4.27001953125,
+    "summary": "4 ran, 5598 cached, 5602 total, 4 failing"
+   }
+  ],
+  "hub_edit": [
+   {
+    "secs": 23.821,
+    "rc": 0,
+    "load": 4.287109375,
+    "summary": "3793 ran, 1644 cached, 5602 total, 0 failing"
+   },
+   {
+    "secs": 23.992,
+    "rc": 0,
+    "load": 5.4033203125,
+    "summary": "3793 ran, 1644 cached, 5602 total, 0 failing"
+   },
+   {
+    "secs": 23.852,
+    "rc": 0,
+    "load": 6.4580078125,
+    "summary": "3793 ran, 1644 cached, 5602 total, 0 failing"
+   }
+  ],
+  "testmon_cold": [
+   {
+    "secs": 116.398,
+    "rc": 0,
+    "load": 2.119140625,
+    "summary": "5036 passed, 91 skipped, 32 deselected, 48 warnings, 248 subtests passed in 113.67s (0:01:53)"
+   },
+   {
+    "secs": 116.518,
+    "rc": 0,
+    "load": 1.55810546875,
+    "summary": "5036 passed, 91 skipped, 32 deselected, 48 warnings, 248 subtests passed in 113.81s (0:01:53)"
+   },
+   {
+    "secs": 116.766,
+    "rc": 0,
+    "load": 1.357421875,
+    "summary": "5036 passed, 91 skipped, 32 deselected, 48 warnings, 248 subtests passed in 114.05s (0:01:54)"
+   }
+  ],
+  "testmon_no_change": [
+   {
+    "secs": 1.868,
+    "rc": 0,
+    "load": 1.357421875,
+    "summary": ""
+   },
+   {
+    "secs": 1.876,
+    "rc": 0,
+    "load": 1.357421875,
+    "summary": ""
+   },
+   {
+    "secs": 1.85,
+    "rc": 0,
+    "load": 1.32861328125,
+    "summary": ""
+   }
+  ],
+  "testmon_leaf_edit": [
+   {
+    "secs": 1.998,
+    "rc": 0,
+    "load": 1.66552734375,
+    "summary": "2 passed, 47 skipped, 34 deselected in 0.87s"
+   },
+   {
+    "secs": 1.997,
+    "rc": 0,
+    "load": 1.7724609375,
+    "summary": "2 passed, 47 skipped, 34 deselected in 0.88s"
+   },
+   {
+    "secs": 2.0,
+    "rc": 0,
+    "load": 1.71044921875,
+    "summary": "2 passed, 47 skipped, 34 deselected in 0.89s"
+   }
+  ],
+  "testmon_hub_edit": [
+   {
+    "secs": 60.845,
+    "rc": 0,
+    "load": 1.32177734375,
+    "summary": "816 passed, 47 skipped, 884 deselected, 5 warnings, 18 subtests passed in 58.95s"
+   },
+   {
+    "secs": 61.205,
+    "rc": 0,
+    "load": 1.62158203125,
+    "summary": "816 passed, 47 skipped, 884 deselected, 5 warnings, 18 subtests passed in 59.32s"
+   },
+   {
+    "secs": 60.729,
+    "rc": 0,
+    "load": 1.173828125,
+    "summary": "816 passed, 47 skipped, 884 deselected, 5 warnings, 18 subtests passed in 58.81s"
+   }
+  ],
+  "testmon_failure_edit": [
+   {
+    "secs": 1.715,
+    "rc": 2,
+    "load": 1.748046875,
+    "summary": "47 skipped, 32 deselected, 1 error in 0.67s"
+   }
+  ],
+  "median": {
+   "pytest_full": 76.733,
+   "cold_all": 25.909,
+   "no_change": 0.188,
+   "leaf_edit": 1.905,
+   "failure_edit": 1.665,
+   "hub_edit": 23.852,
+   "testmon_cold": 116.518,
+   "testmon_no_change": 1.868,
+   "testmon_leaf_edit": 1.998,
+   "testmon_hub_edit": 60.845,
+   "testmon_failure_edit": 1.715
+  }
+ },
+ "pirn-agents": {
+  "pytest_full": [
+   {
+    "secs": 103.981,
+    "rc": 0,
+    "load": 1.267578125,
+    "summary": "4652 passed, 5 skipped, 41 deselected, 333 subtests passed in 99.83s (0:01:39)"
+   },
+   {
+    "secs": 104.41,
+    "rc": 0,
+    "load": 1.42529296875,
+    "summary": "4652 passed, 5 skipped, 41 deselected, 333 subtests passed in 100.24s (0:01:40)"
+   },
+   {
+    "secs": 103.886,
+    "rc": 0,
+    "load": 2.03369140625,
+    "summary": "4652 passed, 5 skipped, 41 deselected, 333 subtests passed in 99.79s (0:01:39)"
+   }
+  ],
+  "cold_all": [
+   {
+    "secs": 40.054,
+    "rc": 0,
+    "load": 3.56689453125,
+    "summary": ""
+   },
+   {
+    "secs": 39.843,
+    "rc": 0,
+    "load": 4.1875,
+    "summary": ""
+   },
+   {
+    "secs": 39.58,
+    "rc": 0,
+    "load": 4.31591796875,
+    "summary": ""
+   }
+  ],
+  "no_change": [
+   {
+    "secs": 0.163,
+    "rc": 0,
+    "load": 4.31591796875,
+    "summary": "0 ran, 4657 cached, 4657 total, 0 failing"
+   },
+   {
+    "secs": 0.165,
+    "rc": 0,
+    "load": 4.31591796875,
+    "summary": "0 ran, 4657 cached, 4657 total, 0 failing"
+   },
+   {
+    "secs": 0.169,
+    "rc": 0,
+    "load": 4.31591796875,
+    "summary": "0 ran, 4657 cached, 4657 total, 0 failing"
+   }
+  ],
+  "targets": {
+   "leaf": [
+    "pirn_agents/evaluation/ragas_backend.py",
+    1
+   ],
+   "hub": [
+    "pirn_agents/_internal/json_shape.py",
+    2428
+   ]
+  },
+  "leaf_edit": [
+   {
+    "secs": 3.402,
+    "rc": 0,
+    "load": 4.21044921875,
+    "summary": "1 ran, 4656 cached, 4657 total, 0 failing"
+   },
+   {
+    "secs": 3.47,
+    "rc": 0,
+    "load": 4.033203125,
+    "summary": "1 ran, 4656 cached, 4657 total, 0 failing"
+   },
+   {
+    "secs": 3.423,
+    "rc": 0,
+    "load": 3.646484375,
+    "summary": "1 ran, 4656 cached, 4657 total, 0 failing"
+   }
+  ],
+  "failure_edit": [
+   {
+    "secs": 2.67,
+    "rc": 1,
+    "load": 3.43408203125,
+    "summary": "1 ran, 4656 cached, 4657 total, 1 failing"
+   }
+  ],
+  "hub_edit": [
+   {
+    "secs": 14.841,
+    "rc": 0,
+    "load": 4.3076171875,
+    "summary": "2316 ran, 2229 cached, 4657 total, 0 failing"
+   },
+   {
+    "secs": 14.796,
+    "rc": 0,
+    "load": 6.39404296875,
+    "summary": "2316 ran, 2229 cached, 4657 total, 0 failing"
+   },
+   {
+    "secs": 14.851,
+    "rc": 0,
+    "load": 7.8310546875,
+    "summary": "2316 ran, 2229 cached, 4657 total, 0 failing"
+   }
+  ],
+  "testmon_cold": [
+   {
+    "secs": 169.475,
+    "rc": 0,
+    "load": 2.05859375,
+    "summary": "4652 passed, 5 skipped, 41 deselected, 333 subtests passed in 164.94s (0:02:44)"
+   },
+   {
+    "secs": 168.654,
+    "rc": 0,
+    "load": 1.19091796875,
+    "summary": "4652 passed, 5 skipped, 41 deselected, 333 subtests passed in 164.09s (0:02:44)"
+   },
+   {
+    "secs": 169.363,
+    "rc": 0,
+    "load": 2.10791015625,
+    "summary": "4652 passed, 5 skipped, 41 deselected, 333 subtests passed in 164.77s (0:02:44)"
+   }
+  ],
+  "testmon_no_change": [
+   {
+    "secs": 2.516,
+    "rc": 0,
+    "load": 2.01904296875,
+    "summary": "41 deselected in 0.22s"
+   },
+   {
+    "secs": 2.502,
+    "rc": 0,
+    "load": 2.01904296875,
+    "summary": "41 deselected in 0.23s"
+   }
+  ],
+  "testmon_leaf_edit": [
+   {
+    "secs": 2.745,
+    "rc": 0,
+    "load": 1.7177734375,
+    "summary": "1 passed, 41 deselected in 0.44s"
+   },
+   {
+    "secs": 2.691,
+    "rc": 0,
+    "load": 1.82080078125,
+    "summary": "1 passed, 41 deselected in 0.40s"
+   },
+   {
+    "secs": 2.673,
+    "rc": 0,
+    "load": 2.79638671875,
+    "summary": "1 passed, 41 deselected in 0.40s"
+   }
+  ],
+  "testmon_hub_edit": [
+   {
+    "secs": 16.586,
+    "rc": 0,
+    "load": 2.353515625,
+    "summary": "499 passed, 591 deselected, 3 subtests passed in 14.11s"
+   },
+   {
+    "secs": 16.525,
+    "rc": 0,
+    "load": 1.93994140625,
+    "summary": "499 passed, 591 deselected, 3 subtests passed in 14.07s"
+   },
+   {
+    "secs": 16.547,
+    "rc": 0,
+    "load": 1.85986328125,
+    "summary": "499 passed, 591 deselected, 3 subtests passed in 14.03s"
+   }
+  ],
+  "testmon_failure_edit": [
+   {
+    "secs": 1.211,
+    "rc": 4,
+    "load": 1.75537109375,
+    "summary": ""
+   }
+  ],
+  "median": {
+   "pytest_full": 103.981,
+   "cold_all": 39.843,
+   "no_change": 0.165,
+   "leaf_edit": 3.423,
+   "failure_edit": 2.67,
+   "hub_edit": 14.841,
+   "testmon_cold": 169.363,
+   "testmon_no_change": 2.509,
+   "testmon_leaf_edit": 2.691,
+   "testmon_hub_edit": 16.547,
+   "testmon_failure_edit": 1.211
+  }
+ }
+}

@@ -6,7 +6,8 @@
 //! the second run's scheduler weights units by it, and the run header states that it did — a pasted
 //! number is uninterpretable without knowing whether the run was warm.
 //!
-//! What `run` writes is durations and nothing else. It must not leave a `TestRecord` behind: the
+//! What `run` writes is hints — durations, and since TID-127 the disturbers it saw — and never a
+//! verdict. It must not leave a `TestRecord` behind: the
 //! impact planner reads a record with no changed deps as "up to date", so a record written only to
 //! carry a duration would turn the daemon's next impact-aware run into a stale pass.
 
