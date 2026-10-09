@@ -137,13 +137,16 @@ fn run_with(
         .with_trusted_pure(learned.trusted_pure.clone())
         .with_must_fork(learned.must_fork.clone());
     let mut tier = strategy.factory(target, plan, knobs, warm)?;
+    let mut t = crate::runner::PhaseTimer::start("tiderace", "run_with");
 
     let (mut results, rest) = tier.claim(items, &mut notes)?;
+    t.mark("claim");
     if rest.is_empty() {
         return Ok(RunOutcome { results, notes });
     }
     let workers = plan.effective_workers(rest.len());
     let queue = units(&rest, plan, learned, workers);
+    t.mark("units (scheduler)");
     if queue.is_empty() {
         return Ok(RunOutcome { results, notes });
     }
@@ -152,11 +155,15 @@ fn run_with(
     // than from the requested worker count.
     let lanes = workers.min(queue.len());
     let modules = ModulesFile::write(&rest)?;
+    t.mark("modules file");
     let lanes = tier.prepare(lanes, &modules.path, &mut notes)?;
+    t.mark("prepare (spawn)");
     let seeds = (0..lanes)
         .map(|index| tier.lane(index, &modules.path))
         .collect::<Result<Vec<_>>>()?;
+    t.mark("lanes");
     results.extend(lane::drain_all(seeds, queue)?);
+    t.mark("drain");
     // Every lane is joined, so a pool this run owns can exit: the factory drops here, after the
     // workers' connections have closed, rather than on the `?` paths above — which is what keeps
     // a failing run from leaving an orphaned parent behind holding the imported image. A borrowed
