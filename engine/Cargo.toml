@@ -25,3 +25,9 @@ notify = "8.2.0"
 
 [profile.release]
 opt-level = 3
+# Whole-program optimisation for the shipped binaries: 27% smaller (4.1 MB → 3.0 MB for `tiderace`)
+# at ~2.5× the link time of a clean release build. Not a speed measure — the engine's own CPU is
+# 1–2% of a run's wall clock — but the size is what a wheel carries to every install. The
+# packaging crate (`crates/tiderace-dist`) is outside the workspace and repeats this.
+lto = "fat"
+codegen-units = 1
