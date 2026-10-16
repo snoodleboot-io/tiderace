@@ -67,7 +67,7 @@ jobs:
           export TIDERACE_PY_FX_CORPUS="$PY" TIDERACE_PY_CLICK="$PY" TIDERACE_PY_CACHETOOLS="$PY"
           python -m benchmarks.harness.platform_bench ${{ inputs.corpora || 'fx_corpus cachetools' }}
       - name: Keep the numbers
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: platform-timings-${{ matrix.os }}
           path: benchmarks/harness/platform-*.json
