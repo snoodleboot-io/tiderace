@@ -160,6 +160,51 @@ jobs:
       - name: Release build
         run: cargo build --release
 
+  engine-macos:
+    # macOS is a shipped platform (the universal2 wheel) and a fork platform, and until this job
+    # nothing but two small benchmark suites had ever run the engine there: the live acceptance
+    # suites — the fork tier, the clean room, the daemon, watch mode — ran only on Linux. Same
+    # steps as the Linux job, minus the lints (one platform is enough for those), so a green here
+    # means the same thing a green there does: the fx venv is provisioned and a live skip is a
+    # failure.
+    name: engine · macos · build · test
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - name: Cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine/target
+          key: ${{ runner.os }}-engine-cargo-${{ hashFiles('engine/Cargo.lock') }}
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Provision the fx venv (numpy + pytest) at the repo root
+        working-directory: .
+        run: |
+          python -m venv .tiderace-fx-venv
+          .tiderace-fx-venv/bin/pip install --upgrade pip
+          .tiderace-fx-venv/bin/pip install numpy pytest
+      - name: Unit + lib + daemon + live acceptance tests
+        env:
+          TIDERACE_REQUIRE_LIVE: "1"
+          PYTHONPATH: ${{ github.workspace }}/engine/py-tiderace
+        run: cargo test --all
+      - name: The shim's own unit tests
+        working-directory: .
+        run: .tiderace-fx-venv/bin/python -m pytest engine/py-shim/tests -q
+
   engine-coverage:
     name: engine · coverage (line >= 88)
     runs-on: ubuntu-latest
