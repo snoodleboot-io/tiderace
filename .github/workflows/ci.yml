@@ -218,7 +218,7 @@ jobs:
       - name: Install cargo-llvm-cov
         # Same ref-name caveat as rust-toolchain: the `cargo-llvm-cov` branch defaults `tool` to
         # cargo-llvm-cov, but the v2 tag does not. Pinned to v2, so name the tool explicitly.
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-llvm-cov
       - name: Set up Python
@@ -263,7 +263,7 @@ jobs:
           toolchain: stable
       - name: Install cargo-audit
         # Prebuilt binary — `cargo install cargo-audit` compiles for minutes; this is seconds.
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-audit
       - name: Audit Cargo.lock against the RustSec advisory DB
