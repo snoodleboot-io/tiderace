@@ -168,7 +168,7 @@ jobs:
     # means the same thing a green there does: the fx venv is provisioned and a live skip is a
     # failure.
     name: engine · macos · build · test
-    runs-on: macos-14
+    runs-on: macos-15
     defaults:
       run:
         working-directory: engine
@@ -392,7 +392,7 @@ jobs:
           # stamps its own OS version and we repeat the glibc mistake on macOS. 11.0 is the first
           # Apple Silicon release, so it is the floor for a universal2 wheel.
           - name: macos-universal2
-            runs-on: macos-14
+            runs-on: macos-15
             container: ""
             macos-target: "11.0"
             rust-targets: "x86_64-apple-darwin aarch64-apple-darwin"
