@@ -284,6 +284,8 @@ known file, which grow with the suite where TID-102's decision itself stays smal
 
 **Windows and macOS** (TID-13), by the `bench-platforms` workflow on hosted runners: a release
 build, Python 3.14.7, the corpora that need no private snapshot, three rounds after a warm-up.
+(The macOS rows are from the macOS 14 image, which GitHub retired on 2 November 2026; the
+workflow runs on macOS 15 since.)
 
 | platform · suite | pytest | pytest -n auto | tiderace | `--workers 1` | `--strategy subinterp` |
 | -- | --: | --: | --: | --: | --: |
