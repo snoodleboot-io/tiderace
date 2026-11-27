@@ -203,6 +203,9 @@ def _file_deps(caches: Caches, path: str, root: str) -> tuple[str, ...]:
         cached = _file_deps_from_cache(caches, path)
         if cached is None:
             deps: dict[str, None] = {}
+            package = _package_init(path, root)
+            if package:
+                deps[package] = None
             for dotted, level in _imported_names(path):
                 resolved = _resolve_module_file(caches, dotted, level, path, root)
                 if resolved:
@@ -216,6 +219,23 @@ def _file_deps(caches: Caches, path: str, root: str) -> tuple[str, ...]:
                 pass
         caches.file_deps[path] = cached
     return cached
+
+
+def _package_init(path: str, root: str) -> str | None:
+    """The `__init__.py` of the package `path` belongs to, when it is in the tree (TID-128).
+
+    Importing `pkg.sub.mod` runs `pkg/__init__.py` and `pkg/sub/__init__.py` first, and nothing
+    in `mod.py` says so — so a closure built from import statements alone held `pkg/sub/mod.py`
+    and neither package. A package whose `__init__` was made to raise then left every test that
+    imports through it served from cache: the TID-40 defect, one directory up. Each file names the
+    package it is in, the package names the one above it, and the walk covers the chain."""
+    directory = os.path.dirname(os.path.abspath(path))
+    if os.path.basename(path) == "__init__.py":
+        directory = os.path.dirname(directory)
+    init = os.path.join(directory, "__init__.py")
+    if init.startswith(os.path.abspath(root) + os.sep) and os.path.isfile(init):
+        return init
+    return None
 
 
 def _sys_path_key() -> str:
@@ -237,6 +257,11 @@ def _file_deps_from_cache(caches: Caches, path: str):
         return None
     caches.file_deps_stats["hits"] += 1
     return tuple(deps)
+
+
+# What a cached entry means. 2: a file's dependencies include the `__init__.py` of its own package
+# (TID-128); an entry written before that is short by one and is not read.
+_FILE_DEPS_VERSION = 2
 
 
 def _file_deps_cache_dir(root: str) -> str:
@@ -262,7 +287,7 @@ def _load_file_deps_cache(caches: Caches, root: str) -> None:
         try:
             with open(full, encoding="utf-8") as fh:
                 data = json.load(fh)
-            if data.get("v") == 1 and isinstance(data.get("files"), dict):
+            if data.get("v") == _FILE_DEPS_VERSION and isinstance(data.get("files"), dict):
                 merged.update(data["files"])
         except (OSError, ValueError):
             pass
@@ -283,7 +308,7 @@ def _write_file_deps_index(d: str, files: dict) -> None:
     try:
         os.makedirs(d, exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump({"v": 1, "files": files}, fh)
+            json.dump({"v": _FILE_DEPS_VERSION, "files": files}, fh)
         os.replace(tmp, os.path.join(d, "index.json"))
     except OSError:
         try:
@@ -302,7 +327,7 @@ def _save_file_deps_cache(caches: Caches, root: str) -> None:
         os.makedirs(d, exist_ok=True)
         tmp = os.path.join(d, f".w-{os.getpid()}.tmp")
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump({"v": 1, "files": caches.file_deps_new}, fh)
+            json.dump({"v": _FILE_DEPS_VERSION, "files": caches.file_deps_new}, fh)
         os.replace(tmp, os.path.join(d, f"w-{os.getpid()}.json"))
     except OSError:
         pass
@@ -311,8 +336,12 @@ def _save_file_deps_cache(caches: Caches, root: str) -> None:
               f"{caches.file_deps_stats['parsed']} parsed")
 
 
-def _import_closure(caches: Caches, module_key: str, root: str) -> frozenset:
+def _import_closure(caches: Caches, module_key: str, root: str, scope: str | None = None) -> frozenset:
     """Every in-tree file a module transitively imports, plus the conftests above it.
+
+    `scope` is the tree the footprint covers when that is wider than the run root (TID-128): a
+    trace has to name the source a test imports even when the run was started on `tests/` and the
+    source sits beside it. Paths come back relative to it. Absent, it is the run root, as before.
 
     This is the half of a test's dependency footprint that runtime coverage cannot produce (TID-40).
     Coverage sees a module's imports execute exactly once — for whichever test in it ran first — so
@@ -326,25 +355,30 @@ def _import_closure(caches: Caches, module_key: str, root: str) -> frozenset:
     if cached is not None:
         return cached
     root_abs = os.path.abspath(root)
+    scope_abs = os.path.abspath(scope) if scope else root_abs
     start = os.path.join(root_abs, module_key.replace("/", os.sep))
     seen: set[str] = set()
     queue = [start]
-    while queue:
-        current = queue.pop()
-        for resolved in _file_deps(caches, current, root):
-            if resolved not in seen:
-                seen.add(resolved)
-                queue.append(resolved)
-    # Every conftest from the run root down to this module's directory.
+    # Every conftest from the footprint's root down to this module's directory — and, like the
+    # module itself, whatever each one imports (TID-128): a fixture built from a constant in a
+    # helper the conftest imports depends on that helper, and the helper's module body ran before
+    # any test did, so no test's coverage ever names it.
     directory = os.path.dirname(start)
-    while directory.startswith(root_abs):
+    while directory.startswith(scope_abs):
         conftest = os.path.join(directory, "conftest.py")
         if os.path.isfile(conftest):
             seen.add(os.path.abspath(conftest))
-        if directory == root_abs:
+            queue.append(os.path.abspath(conftest))
+        if directory == scope_abs:
             break
         directory = os.path.dirname(directory)
-    closure = frozenset(os.path.relpath(p, root_abs).replace(os.sep, "/") for p in seen)
+    while queue:
+        current = queue.pop()
+        for resolved in _file_deps(caches, current, scope_abs):
+            if resolved not in seen:
+                seen.add(resolved)
+                queue.append(resolved)
+    closure = frozenset(os.path.relpath(p, scope_abs).replace(os.sep, "/") for p in seen)
     caches.import_closure[module_key] = closure
     return closure
 
@@ -365,11 +399,15 @@ class _Coverage:
 
     _TOOL_ID = 5  # sys.monitoring tool slot (0..5 available); 5 avoids coverage.py/profiler clashes
 
-    def __init__(self, root: str | None, enabled: bool, lines: bool = False, caches: Caches | None = None):
+    def __init__(self, root: str | None, enabled: bool, lines: bool = False, caches: Caches | None = None,
+                 scope: str | None = None):
         self.enabled = enabled and root is not None
         self.caches = caches if caches is not None else Caches()
         self.lines = lines
-        self.root = os.path.abspath(root) if root else ""
+        # `root` is what footprint paths are relative to and what `_want` admits: the run root,
+        # or `scope` when the run asked for a footprint over a wider tree (TID-128).
+        self.run_root = os.path.abspath(root) if root else ""
+        self.root = os.path.abspath(scope) if scope and root else self.run_root
         self.touched: dict[str, set] = {}
         self._mon = getattr(sys, "monitoring", None) if self.enabled else None
         self._prev_trace = None
@@ -468,6 +506,6 @@ class _Coverage:
         report = self._report()
         if not self.enabled:
             return report
-        for rel in _import_closure(self.caches, module_key, self.root):
+        for rel in _import_closure(self.caches, module_key, self.run_root, self.root):
             report.setdefault(rel, [])
         return report

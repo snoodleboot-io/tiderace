@@ -78,6 +78,7 @@ nav:
     - Configuration: guides/configuration.md
     - Migrating from pytest: guides/migration.md
     - Continuous Integration: guides/ci.md
+    - Estuary Traces: guides/estuary-traces.md
     - Benchmarks: guides/benchmarks.md
   - How It Works:
     - Overview: design/overview.md

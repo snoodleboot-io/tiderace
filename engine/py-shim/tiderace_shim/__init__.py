@@ -3,7 +3,7 @@
 The only Python the engine ships. The engine launches it through the entry file beside this
 package (`py-shim/shim.py`; `tiderace/_shim/shim.py` once installed), so `TIDERACE_SHIM` and
 `engine_core::default_shim` keep pointing at one file; `main()` in `modes.py` is the argv dispatch
-(`--probe`, `--subinterp`, else serve).
+(`--probe`, `--subinterp`, `--etf-emit`, else serve).
 
 Top to bottom — nothing imports upward, and `tests/test_layout.py` checks it:
 
@@ -13,7 +13,10 @@ Top to bottom — nothing imports upward, and `tests/test_layout.py` checks it:
   assemble; the module child for an opaque module and the clean room for a demoted test.
 - `plan.py` (what a node's run will execute: its cases and ids, decided before anything is set
   up), `tiers.py` (the isolation ladder's tiers, chosen once; the in-process deadline),
-  `discovery.py` (what the suite defines: the registry and everything the walk learned).
+  `discovery.py` (what the suite defines: the registry and everything the walk learned),
+  `etf.py` (a finished run as Estuary Trace Format: each test's reads, factored into shared
+  fragments and written through the optional `estuary_etf` binding — TID-128; imported only by
+  a run that asked for `--etf`).
 - `invoke.py` (calling a test, written once for sync and async), `isolation.py` (what an
   in-process test may have disturbed, measured and put back), `footprint.py` (what a test
   touches: coverage, import closures, the process's memos), `fixtures.py` (the fixture model and

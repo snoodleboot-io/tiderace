@@ -10,6 +10,7 @@ use engine_core::runner::{record_hints, Learned, RunPlan, VerdictStore, WorkerCo
 use engine_daemon::DaemonClient;
 
 use crate::args::{Options, Route};
+use crate::etf::EtfOutput;
 use crate::report;
 
 /// `tiderace collect <path>`.
@@ -80,6 +81,8 @@ pub fn execute(opts: Options) -> ExitCode {
         quiet,
         selection,
         report: report_path,
+        etf: etf_path,
+        etf_root,
         route,
     } = opts;
     let (root, plan, report_path) = (root.as_path(), &plan, report_path.as_deref());
@@ -99,6 +102,30 @@ pub fn execute(opts: Options) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    // `--etf` (TID-128): settle where the trace goes and that it can be written at all before
+    // anything runs, then switch footprint capture on for the workers about to be spawned.
+    // SAFETY (of the environment writes): single-threaded here, as above.
+    let etf = match etf_path {
+        None => None,
+        Some(out) => {
+            let planned = EtfOutput::plan(&out, etf_root.as_deref(), root)
+                .and_then(|etf| etf.preflight(&python, &shim).map(|()| etf));
+            match planned {
+                Ok(etf) => {
+                    for (name, value) in etf.worker_env() {
+                        std::env::set_var(name, value);
+                    }
+                    Some(etf)
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+    timing.mark("etf preflight");
 
     // A daemon serving this root runs it from its warm image (TID-84): the same results, reported
     // here the same way, and the daemon persists durations and verdicts itself. Asked first, so a
@@ -180,5 +207,18 @@ pub fn execute(opts: Options) -> ExitCode {
     report::print(&report, quiet);
     report::write_json(&report, report_path);
     timing.mark("report");
-    ExitCode::from(report.exit_code() as u8)
+    let mut code = report.exit_code() as u8;
+    if let Some(etf) = &etf {
+        match etf.emit(&python, &shim, &report.results) {
+            Ok(summary) => eprintln!("tiderace: etf: {summary} -> {}", etf.out.display()),
+            // The tests' own verdict stands; a trace that was asked for and not written turns a
+            // green run red, never the other way.
+            Err(e) => {
+                eprintln!("error: {e}");
+                code = code.max(1);
+            }
+        }
+        timing.mark("etf emit");
+    }
+    ExitCode::from(code)
 }

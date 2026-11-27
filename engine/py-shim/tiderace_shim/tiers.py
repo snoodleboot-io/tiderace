@@ -32,6 +32,8 @@ class EngineOptions:
     purity_guard: bool = False  # measure shared-state mutation per test (→ pure-test batching)
     coverage: bool = False  # capture the per-test executed-source footprint (ADR-E006)
     coverage_lines: bool = False  # line numbers in the footprint (opt-in, TID-76)
+    # The tree a footprint covers when it is wider than the run root (`--etf`, TID-128); None = the run root
+    footprint_root: str | None = None
 
 
 class Tier(str, enum.Enum):

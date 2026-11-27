@@ -18,6 +18,12 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 
+[project.optional-dependencies]
+# `tiderace run --etf <path>` writes Estuary Trace Format through estuary's own codec binding
+# (TID-128). Optional: the shim imports it only for a run that asks for a trace, and says what to
+# install when it is not there. The wheel is built by the estuary repository (abi3, CPython 3.10+).
+estuary = ["estuary-etf"]
+
 [project.urls]
 Homepage = "https://snoodleboot-io.github.io/tiderace/"
 Repository = "https://github.com/snoodleboot-io/tiderace"

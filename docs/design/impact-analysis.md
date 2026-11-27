@@ -33,6 +33,28 @@ flowchart TB
 5. **Plan.** `plan()` partitions the candidate tests into `to_run` and `cached`; only `to_run`
    executes, through the [isolation ladder](parallel-execution.md).
 
+## What a footprint holds that coverage cannot see
+
+Coverage records the code a test *executed*. A module's `import` lines execute once per process —
+for whichever test runs first, or before any test at all — so three kinds of dependency are in no
+test's coverage and are added to every footprint from the import graph instead
+(`tiderace_shim/footprint.py`, `_import_closure`):
+
+| Dependency | Why coverage misses it | Since |
+|---|---|---|
+| Every file the test module imports, transitively | Twenty tests in a module, one execution of its imports: nineteen footprints without the source under test, nineteen stale passes | TID-40 |
+| The `__init__.py` of each package on the way | `from pkg.sub.mod import f` runs `pkg/__init__.py` and `pkg/sub/__init__.py`, and no import statement names them. Breaking a package's `__init__` left the whole suite cached and green | TID-128 |
+| What each `conftest.py` above the test imports | The conftest was in the footprint; a helper it imports was not, so a fixture built from the helper's constant went stale | TID-128 |
+
+`engine-daemon/tests/impact_closure_acceptance.rs` holds one edit of each kind against
+`tiderace-daemon run`, twenty tests per module — at two per module every test happens to carry
+the dependency and the defect is invisible.
+
+A footprint stops at the run root: `tiderace-daemon run tests/` records nothing about a `src/`
+beside `tests/`, so an edit there re-runs nothing. Run impact-aware modes on the directory that
+holds both. (`tiderace run --etf` does not have this limit — its footprints cover the repository
+whatever the run root; see [Estuary traces](../guides/estuary-traces.md).)
+
 ## Decision rules
 
 For each candidate test (`persist::plan`):

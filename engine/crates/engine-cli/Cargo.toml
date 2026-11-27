@@ -13,7 +13,6 @@ path = "src/main.rs"
 engine-core = { path = "../engine-core" }
 # The daemon client (TID-84): `tiderace run` hands a run to a live daemon, `tiderace daemon` manages one.
 engine-daemon = { path = "../engine-daemon" }
-
-[dev-dependencies]
-# Only the integration tests read the `--report` file back.
+# The manifest `--etf` hands the shim's emitter (TID-128).
 serde_json = { workspace = true }
+

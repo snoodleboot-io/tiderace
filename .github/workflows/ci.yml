@@ -107,6 +107,23 @@ jobs:
         working-directory: .
         run: .tiderace-fx-venv/bin/python -m pytest engine/py-shim/tests -q
 
+      - name: ETF scenarios that decode — run, or say they did not
+        # `tiderace run --etf` writes through the optional `estuary_etf` binding (TID-128). Its
+        # wheel is built by the estuary repository, which is private, and is on no package index,
+        # so this job cannot install it: the scenarios that decode a written file skipped above
+        # (`SKIPPED (etf)`), and the two in `test_etf.py` likewise. What did run without it: what
+        # a trace holds (`test_etf.py`), the flag and the manifest (engine-cli's unit tests), and
+        # the clear error when the binding is absent. This step makes the skip visible instead of
+        # leaving it to be inferred from a green tick; when a wheel becomes installable here,
+        # install it into the fx venv before the test step and set TIDERACE_REQUIRE_ETF=1.
+        working-directory: .
+        run: |
+          if .tiderace-fx-venv/bin/python -c "import estuary_etf" 2>/dev/null; then
+            echo "::notice title=ETF::estuary_etf is installed: the decode scenarios ran."
+          else
+            echo "::notice title=ETF decode scenarios skipped::estuary_etf is not installable in this job (private repository, no package index). The scenarios that decode --etf output did not run here; they run where the wheel is installed, under TIDERACE_REQUIRE_ETF=1."
+          fi
+
       - name: Type-check the excluded engine-inproc crate
         # `engine-inproc` (the PyO3 ② side-bet) is excluded from the workspace, so `--workspace` never
         # touches it, and it has no tests of its own. It silently bit-rotted: TID-1 added

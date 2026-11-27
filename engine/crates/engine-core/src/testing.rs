@@ -125,6 +125,8 @@ pub enum PythonNeeds {
     SubInterpreters,
     /// The fx venv itself, and nothing else: scenarios pinned to its exact package set.
     FxVenv,
+    /// `import estuary_etf` works: the optional binding `--etf` writes through (TID-128).
+    EstuaryEtf,
 }
 
 impl PythonNeeds {
@@ -135,6 +137,7 @@ impl PythonNeeds {
             PythonNeeds::Tiderace => "import tiderace.builtins",
             PythonNeeds::PytestAndTiderace => "import pytest, tiderace.builtins",
             PythonNeeds::SubInterpreters => "import pytest, concurrent.interpreters",
+            PythonNeeds::EstuaryEtf => "import estuary_etf",
         }
     }
 
@@ -149,6 +152,7 @@ impl PythonNeeds {
                 "an interpreter with pytest and concurrent.interpreters (3.14+)"
             }
             PythonNeeds::FxVenv => "`.tiderace-fx-venv` (CPython 3.14)",
+            PythonNeeds::EstuaryEtf => "an interpreter with the estuary-etf binding",
         }
     }
 }
@@ -181,6 +185,72 @@ pub fn require_python(needs: PythonNeeds) -> Option<String> {
         skip_live(&format!("no interpreter found: needs {}", needs.describe()));
     }
     found
+}
+
+/// The env var that turns a missing `estuary_etf` binding into a hard failure (TID-128).
+pub const REQUIRE_ETF: &str = "TIDERACE_REQUIRE_ETF";
+
+/// Report that a scenario which decodes ETF cannot run because no interpreter has the binding.
+///
+/// Its own switch rather than [`REQUIRE_LIVE`]'s: the binding is an *optional* dependency, built
+/// in another repository and on no package index, so an environment can owe the live paths and
+/// not owe this one. Where the wheel is installed, `TIDERACE_REQUIRE_ETF=1` makes its absence a
+/// failure exactly as `TIDERACE_REQUIRE_LIVE=1` does for the interpreter.
+pub fn skip_etf(reason: &str) {
+    if std::env::var(REQUIRE_ETF).is_ok_and(|v| v == "1") {
+        panic!(
+            "ETF scenario unavailable: {reason}\n\
+             {REQUIRE_ETF}=1 is set, so this is a failure rather than a skip. Install the \
+             estuary-etf wheel into the interpreter, or unset {REQUIRE_ETF}."
+        );
+    }
+    eprintln!(
+        "SKIPPED (etf): {reason} — this scenario did NOT run. \
+         Set {REQUIRE_ETF}=1 to make this a failure."
+    );
+}
+
+/// An interpreter that can `import estuary_etf`, or `None` after the [`skip_etf`] call.
+pub fn require_etf_python() -> Option<String> {
+    let found = python(PythonNeeds::EstuaryEtf);
+    if found.is_none() {
+        skip_etf("no interpreter can import estuary_etf (the optional estuary-etf wheel)");
+    }
+    found
+}
+
+/// The TID-40 corpus: `modules` source modules, each imported by one test module holding
+/// `tests_per_module` tests, under a root conftest — `src/mod_<m>.py` with `f(x) = x + m`, and
+/// `tests/test_mod_<m>.py` asserting it `tests_per_module` times.
+///
+/// **Many tests per module on purpose.** A module's imports execute once, for whichever test
+/// runs first; at two tests per module every test happens to carry the source dependency and a
+/// footprint defect is invisible, which is how TID-40 survived. Returns the corpus root.
+pub fn many_tests_corpus(tag: &str, modules: usize, tests_per_module: usize) -> PathBuf {
+    let dir = scratch(tag);
+    std::fs::create_dir_all(dir.join("src")).expect("src dir");
+    std::fs::create_dir_all(dir.join("tests")).expect("tests dir");
+    let write = |rel: &str, body: String| std::fs::write(dir.join(rel), body).expect("corpus file");
+    write(
+        "conftest.py",
+        "import os, sys\nsys.path.insert(0, os.path.dirname(__file__))\n".into(),
+    );
+    write("src/__init__.py", String::new());
+    for m in 0..modules {
+        write(
+            &format!("src/mod_{m}.py"),
+            format!("def f(x):\n    return x + {m}\n"),
+        );
+        let mut body = format!("from src.mod_{m} import f\n\n\n");
+        for t in 0..tests_per_module {
+            body.push_str(&format!(
+                "def test_case_{t}():\n    assert f({t}) == {}\n\n\n",
+                t + m
+            ));
+        }
+        write(&format!("tests/test_mod_{m}.py"), body);
+    }
+    dir
 }
 
 /// A fresh, empty directory under the system temp dir, unique per call within and across test
@@ -337,6 +407,33 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn an_etf_skip_is_a_failure_only_where_the_binding_is_owed() {
+        // One test for both halves: they share an environment variable.
+        let prev = std::env::var(REQUIRE_ETF).ok();
+        std::env::remove_var(REQUIRE_ETF);
+        skip_etf("not installed"); // a notice, not a panic
+        std::env::set_var(REQUIRE_ETF, "1");
+        let strict = std::panic::catch_unwind(|| skip_etf("not installed"));
+        match prev {
+            Some(v) => std::env::set_var(REQUIRE_ETF, v),
+            None => std::env::remove_var(REQUIRE_ETF),
+        }
+        assert!(strict.is_err(), "{REQUIRE_ETF}=1 makes the skip a failure");
+        assert_eq!(PythonNeeds::EstuaryEtf.probe(), "import estuary_etf");
+        assert!(PythonNeeds::EstuaryEtf.describe().contains("estuary-etf"));
+    }
+
+    #[test]
+    fn the_many_tests_corpus_is_modules_times_tests() {
+        let dir = many_tests_corpus("corpus_shape", 3, 20);
+        let body = std::fs::read_to_string(dir.join("tests/test_mod_1.py")).unwrap();
+        assert_eq!(body.matches("def test_case_").count(), 20);
+        assert!(body.starts_with("from src.mod_1 import f"));
+        assert!(dir.join("src/mod_2.py").exists() && dir.join("conftest.py").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

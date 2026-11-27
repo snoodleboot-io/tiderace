@@ -862,7 +862,8 @@ class Engine:
         test gets the same isolation measurement, the same module guard and the same
         `request.node` as a sync one."""
         module_key = _module_key(node_id)
-        cov = _Coverage(self.config.root, self.options.coverage, self.options.coverage_lines, self.caches)
+        cov = _Coverage(self.config.root, self.options.coverage, self.options.coverage_lines, self.caches,
+                        self.options.footprint_root)
         cov.start()  # capture the per-test footprint: fixture setup + body, this test only (ADR-E006)
         # Named as pytest names it, parametrize id included: a fixture keying a resource off
         # `request.node.name` needs `test_x[case]`, not `test_x`, or every case collides (TID-51).
@@ -1045,7 +1046,8 @@ class Engine:
                                      _own_markers(module, owner, func), self._pytest_config, self.discovery)
 
     def teardown_all(self) -> None:
-        _save_file_deps_cache(self.caches, self.config.root)  # what this worker parsed (TID-82)
+        if not self.options.footprint_root:  # a wider footprint's entries are not the run root's (TID-128)
+            _save_file_deps_cache(self.caches, self.config.root)  # what this worker parsed (TID-82)
         self._module_child_close()  # its module's tests are done: its fixtures, hooks and exit (TID-80)
         while self.active:
             self.active.pop().handle.close()

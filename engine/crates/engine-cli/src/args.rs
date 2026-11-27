@@ -50,6 +50,14 @@ Options for `run`:
       --report <PATH>     also write a machine-readable JSON run report to PATH: one record per
                           node with its id, outcome, duration and flags. Compare runs by node id;
                           tallies hide two errors that cancel
+      --etf <PATH>        also write the run's per-test traces to PATH in the Estuary Trace
+                          Format: one record per node with everything it read — its conftest
+                          chain, the config sections, its module's import closure, the files it
+                          executed code in — as file keys relative to the repository root. Needs
+                          the optional estuary-etf package (pip install 'tiderace[estuary]');
+                          turns footprint capture on and runs in this process, not a daemon
+      --etf-root <DIR>    the directory --etf keys are relative to (default: the nearest
+                          directory at or above <path> holding .git, else <path>)
       --strict-markers    error on a mark nothing declared — in the config, by a plugin, or
                           with tiderace.mark.register() in a conftest
   -q, --quiet             suppress the per-test lines; print only the tally
@@ -175,6 +183,10 @@ pub struct Options {
     pub selection: Selection,
     /// `--report PATH`: where to write the per-node JSON report, if asked for.
     pub report: Option<PathBuf>,
+    /// `--etf PATH`: where to write the run's traces in the Estuary Trace Format, if asked for
+    /// (TID-128), and `--etf-root DIR`, the tree its keys are relative to.
+    pub etf: Option<PathBuf>,
+    pub etf_root: Option<PathBuf>,
     pub route: Route,
 }
 
@@ -204,6 +216,8 @@ impl Options {
         let mut keyword_expr: Option<String> = None;
         let mut strict_markers = false;
         let mut report: Option<PathBuf> = None;
+        let mut etf: Option<PathBuf> = None;
+        let mut etf_root: Option<PathBuf> = None;
         let mut root: Option<PathBuf> = None;
         let mut strategy_set = false;
 
@@ -282,6 +296,8 @@ impl Options {
                 "-k" | "--keyword" => keyword_expr = Some(value("--keyword")?),
                 "--strict-markers" => strict_markers = true,
                 "--report" => report = Some(PathBuf::from(value("--report")?)),
+                "--etf" => etf = Some(PathBuf::from(value("--etf")?)),
+                "--etf-root" => etf_root = Some(PathBuf::from(value("--etf-root")?)),
                 "-q" | "--quiet" => quiet = true,
                 other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
                 _ => {
@@ -302,6 +318,13 @@ impl Options {
             ));
         }
 
+        if etf_root.is_some() && etf.is_none() {
+            return Err("--etf-root does nothing without --etf".into());
+        }
+        // A trace is built from the footprints this process collects; a run a daemon serves
+        // carries none back (TID-128).
+        let local = etf.is_some() || std::env::var_os("TIDERACE_NO_DAEMON").is_some();
+
         Ok(Self {
             root: root.ok_or("missing <path>")?,
             plan,
@@ -312,11 +335,9 @@ impl Options {
                 strict_markers,
             },
             report,
-            route: if std::env::var_os("TIDERACE_NO_DAEMON").is_some() {
-                Route::Local
-            } else {
-                Route::Daemon
-            },
+            etf,
+            etf_root,
+            route: if local { Route::Local } else { Route::Daemon },
         })
     }
 }
@@ -368,6 +389,34 @@ mod tests {
                 .unwrap()
                 .selection
                 .strict_markers
+        );
+    }
+
+    /// TID-128: `--etf` is off unless asked for, and asking for it keeps the run in this process.
+    #[test]
+    fn the_etf_path_parses_is_off_by_default_and_keeps_the_run_local() {
+        let plain = parse(&["tests"]).unwrap();
+        assert!(plain.etf.is_none() && plain.etf_root.is_none());
+
+        for args in [
+            vec!["--etf", "/tmp/run.etf", "tests"],
+            vec!["--etf=/tmp/run.etf", "tests"],
+        ] {
+            let o = parse(&args).expect("--etf parses");
+            assert_eq!(o.etf.as_deref(), Some(std::path::Path::new("/tmp/run.etf")));
+            assert!(
+                matches!(o.route, super::Route::Local),
+                "a run a daemon serves brings no footprints back"
+            );
+        }
+        let o = parse(&["--etf", "x.etf", "--etf-root", "..", "tests"]).unwrap();
+        assert_eq!(o.etf_root.as_deref(), Some(std::path::Path::new("..")));
+        assert!(parse(&["--etf", "tests"]).is_err(), "--etf without a path");
+        assert!(
+            parse(&["--etf-root", "..", "tests"])
+                .unwrap_err()
+                .contains("without --etf"),
+            "a root for a trace nobody asked for is a mistake worth naming"
         );
     }
 

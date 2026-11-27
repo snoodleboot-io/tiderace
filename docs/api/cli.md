@@ -85,6 +85,13 @@ report and exit code, but the workers fork from an image that already imported t
 fork (TID-90), so running one test by name pays neither start-up nor imports. A run with
 `TIDERACE_NO_DAEMON` set stays in this process.
 
+`--etf <path>` also writes the run's per-test traces in the Estuary Trace Format — one record per
+node with everything it read, for a store that reuses results across snapshots; see
+[Estuary traces](../guides/estuary-traces.md). It needs the optional `estuary-etf` package
+(`pip install 'tiderace[estuary]'`), turns footprint capture on, and keeps the run in this process.
+`--etf-root <dir>` names the directory the keys are relative to when it is not the nearest one
+holding `.git`.
+
 ```bash
 TIDERACE_SHIM=py-shim/shim.py tiderace run tests/
 ```

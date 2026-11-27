@@ -19,7 +19,7 @@ MODULES = sorted(f[:-3] for f in os.listdir(PKG) if f.endswith(".py") and not f.
 LEVEL = {
     "modes": 6,
     "engine": 5,
-    "plan": 4, "tiers": 4, "discovery": 4,
+    "plan": 4, "tiers": 4, "discovery": 4, "etf": 4,
     "invoke": 3, "isolation": 3, "footprint": 3, "fixtures": 3, "selection": 3,
     "pytest_compat": 2,
     "config": 1, "nodes": 1, "results": 1, "protocol": 1,

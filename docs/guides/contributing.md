@@ -103,6 +103,20 @@ suite, the invoke path, the isolation object, the package layout. They run with 
 .tiderace-fx-venv/bin/python -m pytest engine/py-shim/tests -q
 ```
 
+`test_etf.py` covers what a trace holds on any interpreter; its two tests that write and decode a
+file need the optional `estuary_etf` binding and skip without it. The same goes for the scenarios in
+`engine/crates/engine-cli/tests/etf_output_acceptance.rs` that decode what `tiderace run --etf`
+wrote: they print `SKIPPED (etf)` where no interpreter has the binding, and fail there under
+`TIDERACE_REQUIRE_ETF=1`. The wheel is built by the estuary repository
+(`uv build --package estuary-etf --wheel` there, one abi3 wheel for CPython 3.10+) and is on no
+package index, so CI does not have it — its ETF step says so — and installing it into the fx venv
+is what makes those scenarios run:
+
+```bash
+uv pip install --python .tiderace-fx-venv path/to/estuary_etf-*.whl
+cd engine && TIDERACE_REQUIRE_ETF=1 cargo test -p engine-cli --test etf_output_acceptance
+```
+
 Everything that needs a live interpreter is an acceptance suite under `engine/crates/*/tests/`
 (above). The proof scripts that once demonstrated the isolation tiers, purity, coverage and type-DI
 are archived under `planning/proofs/` with a note of which suite covers each now.

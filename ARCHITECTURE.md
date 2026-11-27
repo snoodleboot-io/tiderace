@@ -321,6 +321,14 @@ Two complementary layers:
   computed is served without re-running, even when this machine's local impact state is stale. Only
   *pure* outcomes are cached (the purity gate keeps it sound).
 
+**Traces for estuary (`tiderace run --etf`, TID-128).** The same footprints, written out for a
+consumer that reuses results *across snapshots*: one record per node in the Estuary Trace Format,
+its reads factored into shared fragments — toolchain, config sections, the conftest chain, the test
+module's import closure — and written by the shim's `--etf-emit` mode through the optional
+`estuary_etf` binding (`py-shim/tiderace_shim/etf.py`; `engine-cli/src/etf.rs` arranges the run and
+hands the results over). Off unless asked for. See `docs/guides/estuary-traces.md` for what a
+trace holds and what it does not hold yet.
+
 ---
 
 ## 9. The warm daemon lifecycle
@@ -404,6 +412,7 @@ The authoritative rationale lives in `planning/current/pure-rust-test-engine/des
 | The isolation ladder | `py-shim/tiderace_shim/` — `isolation._restorable` / `Isolation`, `tiers.route`, `engine.py` |
 | Impact-skip | `engine-daemon/src/state/plan.rs`, `impacted_run.rs` |
 | The cache | `engine-core/src/cache/` (`cache_key.rs`, `tiered_cache.rs`, `purity.rs`) |
+| ETF output (`--etf`) | `engine-cli/src/etf.rs`, `py-shim/tiderace_shim/etf.py` |
 | Parallel pool | `engine-core/src/runner/run.rs`, `exec/tier.rs`, `exec/tiers/` |
 | Daemon modes | `engine-daemon/src/main.rs`, `rpc/server.rs`, `watch.rs` |
 | Authoring / migration | `py-tiderace/tiderace/` (`builtins`, `_resolve.py`, `migrate.py`) |

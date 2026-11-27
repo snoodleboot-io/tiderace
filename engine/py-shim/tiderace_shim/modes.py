@@ -5,12 +5,13 @@ below it, nothing imports it.
 """
 from __future__ import annotations
 
+import json
 import os
 import socket
 import sys
 import threading
 
-from .config import _env_flag, option as _argv_option, RunConfig
+from .config import _env, _env_flag, option as _argv_option, RunConfig
 from .discovery import (discover, _insert_run_root, _load_ancestor_conftests, _PhaseTimer,
                         preimport, Discovery)
 from .engine import _start_clean_room, Engine
@@ -286,7 +287,12 @@ def serve() -> int:
     restore = "--restore" in sys.argv[2:] or _env_flag("TIDERACE_RESTORE")
     _insert_run_root(root)
     caches = Caches()
-    _load_file_deps_cache(caches, root)  # earlier runs' closures, before anything computes one (TID-82)
+    # `--etf` on a run root below the repository's (TID-128): footprints cover the whole tree, and
+    # the dependency lists that produces are not the ones a plain run caches, so neither is read
+    # or written.
+    footprint_root = _env("TIDERACE_FOOTPRINT_ROOT") or None
+    if not footprint_root:
+        _load_file_deps_cache(caches, root)  # earlier runs' closures, before anything computes one (TID-82)
     # Ancestor conftests before `preimport` (TID-19): a root conftest exists to set things up that
     # must already be true when test modules import — env defaults, warning filters, `sys.path`. pytest
     # loads conftests first for the same reason. `discover` reads the memoised result back.
@@ -308,9 +314,10 @@ def serve() -> int:
     _phase.mark("discover (conftests, fixtures, hooks, marks)")
     if _phase.on and _phase.unselected:
         _warn(f"start-up: {_phase.unselected} test modules not imported (unselected)")
+    _record_import_roots()  # for `--etf`: the emitter resolves imports as this process does
     engine_args = dict(discovery=disc, config=run, caches=caches, options=EngineOptions(
         no_fork=no_fork, restore=restore, purity_guard=purity, coverage=coverage,
-        coverage_lines=coverage_lines))
+        coverage_lines=coverage_lines, footprint_root=footprint_root))
     # Pool mode (TID-4): fork the workers from this one imported image instead of importing per
     # worker. Every worker below is created *after* the fork, so its fixture state is its own and
     # the semantics match N separate wellsprings exactly.
@@ -328,6 +335,23 @@ def serve() -> int:
         engine.teardown_all()
 
 
+def _record_import_roots() -> None:
+    """Write this process's `sys.path` where `TIDERACE_ETF_SYSPATH` says (TID-128). The trace
+    emitter runs after the workers are gone and rebuilds the import graph they resolved; the
+    conftests have put their own entries on the path by now, and it has to resolve against the
+    same ones. Unset — every run without `--etf` — this is one environment lookup."""
+    path = _env("TIDERACE_ETF_SYSPATH")
+    if not path:
+        return
+    try:
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"v": 1, "sys_path": [p for p in sys.path if p]}, fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        _warn(f"could not record the import roots for --etf: {exc}")
+
+
 def _run_handler(engine: "Engine"):
     """The worker's request: one node, run with the engine's knobs — what `serve` and every pool
     worker answer."""
@@ -337,11 +361,15 @@ def _run_handler(engine: "Engine"):
 
 
 def main() -> int:
-    """The shim's modes, dispatched on argv: `<root> --probe`, `<root> --subinterp`, else serve.
+    """The shim's modes, dispatched on argv: `<root> --probe`, `<root> --subinterp`,
+    `<root> --etf-emit <manifest>` / `--etf-check` (TID-128), else serve.
     Run through the entry file (`py-shim/shim.py`, staged as `tiderace/_shim/shim.py` in the
     wheel) or as `python -m tiderace_shim`."""
     if "--probe" in sys.argv[2:]:
         return probe()
     if "--subinterp" in sys.argv[2:]:
         return subinterp()
+    if "--etf-check" in sys.argv[2:] or "--etf-emit" in sys.argv[2:]:
+        from . import etf  # only a run that asked for a trace imports the emitter
+        return etf.main(sys.argv[2:])
     return serve()

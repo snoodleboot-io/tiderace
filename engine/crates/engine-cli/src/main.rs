@@ -12,6 +12,7 @@
 
 mod args;
 mod daemon_cmd;
+mod etf;
 mod report;
 mod run;
 
