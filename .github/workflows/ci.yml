@@ -109,7 +109,7 @@ jobs:
 
       - name: ETF scenarios that decode — run, or say they did not
         # `tiderace run --etf` writes through the optional `estuary_etf` binding (TID-128). Its
-        # wheel is built by the estuary repository, which is private, and is on no package index,
+        # wheel is built by the estuary repository and is on no package index this job can reach,
         # so this job cannot install it: the scenarios that decode a written file skipped above
         # (`SKIPPED (etf)`), and the two in `test_etf.py` likewise. What did run without it: what
         # a trace holds (`test_etf.py`), the flag and the manifest (engine-cli's unit tests), and
@@ -121,7 +121,7 @@ jobs:
           if .tiderace-fx-venv/bin/python -c "import estuary_etf" 2>/dev/null; then
             echo "::notice title=ETF::estuary_etf is installed: the decode scenarios ran."
           else
-            echo "::notice title=ETF decode scenarios skipped::estuary_etf is not installable in this job (private repository, no package index). The scenarios that decode --etf output did not run here; they run where the wheel is installed, under TIDERACE_REQUIRE_ETF=1."
+            echo "::notice title=ETF decode scenarios skipped::estuary_etf is not installable in this job (it is on no package index). The scenarios that decode --etf output did not run here; they run where the wheel is installed, under TIDERACE_REQUIRE_ETF=1."
           fi
 
       - name: Type-check the excluded engine-inproc crate

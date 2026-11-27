@@ -7,7 +7,7 @@ tiderace run --etf run.etf tests/
 
 `--etf <path>` writes, beside the usual report, one file in the **Estuary Trace Format** (ETF v0):
 a record per test node, each with its outcome and a *trace* — every `(key, value)` the test read.
-[estuary](https://github.com/snoodleboot-io/estuary) reuses a test's result on any snapshot where
+estuary reuses a test's result on any snapshot where
 every key in its trace still has the same value, so the trace has to be complete: a read it misses
 is a stale pass waiting for the edit that exposes it.
 
