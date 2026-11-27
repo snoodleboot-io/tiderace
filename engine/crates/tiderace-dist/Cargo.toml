@@ -18,6 +18,9 @@ path = "../engine-daemon/src/main.rs"
 [dependencies]
 engine-core = { path = "../engine-core" }
 engine-daemon = { path = "../engine-daemon" }
+# What engine-cli's own sources use directly: this crate compiles them, so it needs what they need
+# (the manifest `tiderace run --etf` hands the shim, TID-128). Same version as the workspace's.
+serde_json = "1"
 
 # The wheel builds from this crate, not the workspace, so the workspace's release profile does not
 # reach it: the same whole-program optimisation, repeated here (see engine/Cargo.toml).

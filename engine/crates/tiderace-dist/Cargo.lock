@@ -285,6 +285,7 @@ version = "0.0.1"
 dependencies = [
  "engine-core",
  "engine-daemon",
+ "serde_json",
 ]
 
 [[package]]
