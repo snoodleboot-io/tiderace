@@ -67,17 +67,14 @@ impl EtfOutput {
     }
 
     /// The environment the workers read, as `(name, value)`: footprint capture on, where to
-    /// leave their import roots, and — only when the trace covers more than the run root — the
-    /// tree footprints are taken over.
+    /// leave their import roots, and the tree footprints are taken over — the trace root, which
+    /// may be above the run root, minus any virtualenv inside it.
     pub fn worker_env(&self) -> Vec<(&'static str, PathBuf)> {
-        let mut env = vec![
+        vec![
             ("TIDERACE_COVERAGE", PathBuf::from("1")),
             ("TIDERACE_ETF_SYSPATH", self.sys_path_file.clone()),
-        ];
-        if self.trace_root != self.run_root {
-            env.push(("TIDERACE_FOOTPRINT_ROOT", self.trace_root.clone()));
-        }
-        env
+            ("TIDERACE_FOOTPRINT_ROOT", self.trace_root.clone()),
+        ]
     }
 
     /// Whether `python` can import the binding. `Err` carries the shim's own message, which
@@ -228,13 +225,9 @@ mod tests {
             "the emitter runs elsewhere: {:?}",
             plain.out
         );
-        assert!(
-            !plain
-                .worker_env()
-                .iter()
-                .any(|(k, _)| *k == "TIDERACE_FOOTPRINT_ROOT"),
-            "same tree as the run root: the workers are told nothing new"
-        );
+        assert!(plain
+            .worker_env()
+            .contains(&("TIDERACE_FOOTPRINT_ROOT", tests.clone())));
 
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         let found = EtfOutput::plan(Path::new("out.etf"), None, &tests.join("../tests/.")).unwrap();

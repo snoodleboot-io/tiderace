@@ -138,6 +138,7 @@ See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full design with diagrams.
 - [Execution model](https://snoodleboot-io.github.io/tiderace/design/parallel-execution/)
 - [Impact Analysis](https://snoodleboot-io.github.io/tiderace/design/impact-analysis/)
 - [CLI Reference](https://snoodleboot-io.github.io/tiderace/api/cli/)
+- [Estuary traces (`--etf`)](https://snoodleboot-io.github.io/tiderace/guides/estuary-traces/)
 - [Design decisions (ADRs)](planning/current/pure-rust-test-engine/design/adr/)
 
 ## License

@@ -40,6 +40,10 @@ class Caches:
     file_deps_new: dict = dataclasses.field(default_factory=dict)  # this process's, written at teardown
     file_deps_stats: dict = dataclasses.field(default_factory=lambda: {"hits": 0, "parsed": 0})
     resolved: dict = dataclasses.field(default_factory=dict)  # (dotted, level, importing dir) -> file
+    # Directory prefixes (each ending in the separator) inside the tree that are the toolchain's,
+    # not the project's: a virtualenv kept in the checkout. Set only for a trace run (TID-128),
+    # whose footprint covers the repository and would otherwise take in all of site-packages.
+    toolchain: tuple = ()
 
 
 def _watched_packages(caches: Caches, root: str, module_key: str) -> tuple:
@@ -167,8 +171,26 @@ def _resolve_module_file(caches: Caches, dotted: str, level: int, from_file: str
     key = (dotted, level, os.path.dirname(from_file) if level else "")
     if key in caches.resolved:
         return caches.resolved[key]
-    resolved = caches.resolved[key] = _resolve_module_file_uncached(dotted, level, from_file, root)
+    resolved = _resolve_module_file_uncached(dotted, level, from_file, root)
+    if resolved and caches.toolchain and resolved.startswith(caches.toolchain):
+        resolved = None  # installed, not written here: the trace's `tool:pyenv` covers it
+    caches.resolved[key] = resolved
     return resolved
+
+
+def toolchain_dirs(root: str) -> tuple:
+    """This interpreter's prefix and site directories where they sit inside `root`, each with a
+    trailing separator: what a footprint over the whole repository must not walk into."""
+    import site
+
+    candidates = {sys.prefix, sys.exec_prefix, *site.getsitepackages()}
+    try:
+        candidates.add(site.getusersitepackages())
+    except Exception:  # noqa: BLE001 — no user site on this build
+        pass
+    root = os.path.abspath(root) + os.sep
+    dirs = {os.path.abspath(c) + os.sep for c in candidates if c}
+    return tuple(sorted(d for d in dirs if d.startswith(root)))
 
 
 def _resolve_module_file_uncached(dotted: str, level: int, from_file: str, root: str) -> str | None:
@@ -414,7 +436,12 @@ class _Coverage:
         self._stopped = False  # makes stop() idempotent (called once for the report, once in finally)
 
     def _want(self, path: str | None) -> bool:
-        return bool(path) and path.endswith(".py") and os.path.abspath(path).startswith(self.root)
+        if not path or not path.endswith(".py"):
+            return False
+        path = os.path.abspath(path)
+        if not path.startswith(self.root):
+            return False
+        return not (self.caches.toolchain and path.startswith(self.caches.toolchain))
 
     def start(self) -> None:
         if not self.enabled:

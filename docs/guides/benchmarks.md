@@ -528,6 +528,30 @@ Read with the same care as the cold numbers:
   order-dependent test the cold benchmark names, plus one more under the daemon's scheduling. A
   cached verdict is served until its dependencies change, which is the contract.
 
+## The cost of `--etf`
+
+`tiderace run --etf` (TID-128) pays for three things a plain run does not: footprint capture in the
+workers (the capture `tiderace-daemon run` always has on), one interpreter start before the run to
+ask whether the binding is installed, and after the run one more to build the import graph, hash
+each file once and write the file. Measured 27 November 2026 on the development laptop, a **debug**
+build, interleaved rounds, first round discarded, medians:
+
+| suite | tests | plain | capture on (`TIDERACE_COVERAGE=1`) | `--etf` | of which preflight · emit |
+|---|---:|---:|---:|---:|---:|
+| fx_corpus | 511 | 0.71 s | 0.90 s | 1.22 s | 0.08 s · 0.15 s |
+| prompticorn (a copy, CPython 3.14) | 1,629 | 7.1–7.6 s | 6.6–6.9 s | 7.5 s | 0.08 s · 0.49 s |
+
+On fx_corpus the half second is most of a run that takes under one. On prompticorn the machine
+was loaded (samples of one arm ranged 5.4–8.1 s) and the arms are not distinguishable; the
+preflight and emit phases, timed inside the run with `TIDERACE_TIMING=1`, are the part that does
+not depend on the weather. The file written is 96 kB for 1,629 records — 59 bytes a record, against
+3.4 kB a record if every trace were written out flat.
+
+Off, `--etf` costs nothing: the timing gate on the shim against `origin/main` (below) is within
+its threshold on fx_corpus — base 0.70 s, candidate 0.75 s, ranges overlapping — and with capture
+on the two shims are level (0.90 s and 0.91 s), which is the path the wider import closure of
+this change could have slowed.
+
 ## Reproduce
 
 ```bash

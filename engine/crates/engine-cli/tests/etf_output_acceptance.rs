@@ -223,11 +223,27 @@ fn the_tid40_fixture_every_test_of_a_module_carries_the_source_its_module_import
     let again = dir.join("again.etf");
     run_with_etf(&python, &dir, &again, &[]);
     run_with_etf(&python, &dir.join("tests"), &below, &[]);
+    let (from_root, from_below) = (decode(&python, &again), decode(&python, &below));
     assert_eq!(
-        decode(&python, &below).digests(),
-        decode(&python, &again).digests(),
-        "`run tests/` and `run .` write the same traces"
+        from_below.checks(),
+        from_root.checks(),
+        "`run tests/` and `run .` name the same checks"
     );
+    // The one thing that differs is true of the runs themselves: started on tests/, the config
+    // loader looks there first, so those four probes are reads of that run and not of the other.
+    let probes: BTreeSet<String> = ["pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"]
+        .iter()
+        .map(|name| format!("file:tests/{name}=absent"))
+        .collect();
+    for check in from_root.checks() {
+        let mut expected = from_root.keys(&check);
+        expected.extend(probes.iter().cloned());
+        assert_eq!(
+            from_below.keys(&check),
+            expected,
+            "{check}: the same keys from either root, source files included"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

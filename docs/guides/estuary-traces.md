@@ -35,7 +35,7 @@ root(test) ── toolchain          tool:python · tool:pyenv · tool:tiderace
 | Fragment | Keys | Shared by |
 |---|---|---|
 | **Toolchain** | `tool:python` (implementation, version, platform), `tool:pyenv` (every installed distribution, `name==version`), `tool:tiderace` (the harness version). Its id is in the file header. | every record of the run |
-| **Config** | One `derived:cfg/<file>#<section>` per section tiderace reads — `[pytest]`, `[tool:pytest]`, `[tool.pytest.ini_options]`, `[tool.pytest]`, `[tool.tiderace]` — valued by the section's canonical JSON. `pytest.ini`, `pyproject.toml`, `tox.ini`, `setup.cfg` that could exist in the rootdir and do not are `file:` keys with no value. | every record of the run |
+| **Config** | One `derived:cfg/<file>#<section>` per section tiderace reads — `[pytest]`, `[tool:pytest]`, `[tool.pytest.ini_options]`, `[tool.pytest]`, `[tool.tiderace]` — valued by the section's canonical JSON. A pytest section that is not there is valued as `null`: its presence is what makes a directory the rootdir. Every directory the loader looked in is keyed — the run path, then upward to the one whose config carries a pytest section — and a `pytest.ini`, `pyproject.toml`, `tox.ini` or `setup.cfg` that could exist there and does not is a `file:` key with no value. | every record of the run |
 | **Conftest chain** | For each directory from the repository root down to the test's: its `conftest.py` and everything that conftest imports, or the key with no value where there is none. Each directory's fragment includes its parent's. | every test under the directory |
 | **Import closure** | The test module, every file in the repository it imports, transitively, and the `__init__.py` of each package on the way. One fragment per file (per import cycle, where there is one), including the fragments of what it imports — so two test modules that import one package share that package's fragments. | every test whose module imports the file |
 | **Own pairs** | Files the test ran code in (`sys.monitoring`, the same capture impact analysis uses) that none of the above names: a module imported inside the test, a plugin reached through a registry. | one record |
@@ -57,8 +57,9 @@ all twenty tests of a twenty-test module carry it. A virtualenv inside the check
 ## Check ids, outcomes, header
 
 - **Check id** — the node id, repository-relative: `tests/test_rates.py::test_prorate[feb-leap]`.
-  `tiderace run tests/` and `tiderace run .` write the same ids and the same keys; parametrized
-  cases and inherited methods carry the ids the report shows.
+  `tiderace run tests/` and `tiderace run .` write the same ids over the same source keys (the
+  config keys follow where the loader actually looked, which starts at the run path);
+  parametrized cases and inherited methods carry the ids the report shows.
 - **Outcome** — `passed → pass`, `failed → fail`, `error → error`, `skipped → skip`. `xfail` and a
   non-strict `xpass` are `pass`: the run went the way the suite says is fine, as the exit code
   already treats them.
@@ -82,17 +83,19 @@ of key in a test's reads (`tiderace_shim/etf.py`, `SOURCES`):
 | Environment variables read | A changed variable does not invalidate | TID-129 |
 | Files read as data (`open`, `importlib.resources`, fixtures loading JSON) and directory listings | A changed data file does not invalidate unless Python code in it ran | TID-129 |
 | Unit keys (`unit:<path>#<qualname>`) | Any edit to a file invalidates every test that reads the file, not only those that ran the edited function | TID-130 |
-| The carry-over chain for tests run in one process (estuary design 03, D-306) | A value an earlier test cached in the process is not attributed to the later test that used it | — |
-| Dynamic imports made *outside* the test — `importlib.import_module` at another module's import time, plugin entry points | Seen only when the imported file's code runs inside the test | — |
+| The carry-over chain for tests run in one process (estuary design 03, D-306) | A value an earlier test cached in the process is not attributed to the later test that used it | TID-154 |
+| Dynamic imports made *outside* the test — `importlib.import_module` at another module's import time, plugin entry points | Seen only when the imported file's code runs inside the test | TID-154 |
 | Reads by subprocesses, C extensions and other threads' frames | Not seen | — |
-| Determinism pins (`PYTHONHASHSEED`, seeds, `TZ`, locale) | tiderace applies none; `seed` is 0 and no pin keys are written | — |
+| Determinism pins (`PYTHONHASHSEED`, seeds, `TZ`, locale) | tiderace applies none; `seed` is 0 and no pin keys are written | TID-154 |
 
 Under `estuary-runner` the file-level reads in that table are covered from outside the process by
 the filesystem floor, and the runner — not the harness — computes every value. Standalone, the
 file is what tiderace alone can see: use it for measurement and development, not as a gate.
 
 Values are hashed when the file is written, after the run. A file a test rewrote during the run is
-recorded with its final content.
+recorded with its final content. Records are written for the nodes this run executed: `--etf` is
+an option of `tiderace run`; the impact-aware `tiderace-daemon run`, and a run a daemon serves,
+write none.
 
 ## Reading a file back
 

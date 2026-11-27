@@ -51,8 +51,8 @@ test's coverage and are added to every footprint from the import graph instead
 the dependency and the defect is invisible.
 
 A footprint stops at the run root: `tiderace-daemon run tests/` records nothing about a `src/`
-beside `tests/`, so an edit there re-runs nothing. Run impact-aware modes on the directory that
-holds both. (`tiderace run --etf` does not have this limit — its footprints cover the repository
+beside `tests/`, so an edit there re-runs nothing and the cached results are served (TID-153).
+Until that is fixed, run impact-aware modes on the directory that holds both. (`tiderace run --etf` does not have this limit — its footprints cover the repository
 whatever the run root; see [Estuary traces](../guides/estuary-traces.md).)
 
 ## Decision rules

@@ -27,8 +27,10 @@ def _tree(tmp_path, files: dict) -> str:
     return str(tmp_path)
 
 
-def _run(root: str, run_root: str | None = None, **kw) -> etf.Run:
-    return etf.Run(os.path.abspath(run_root or root), os.path.abspath(root), "1.2.3", **kw)
+def _run(root: str, run_root: str | None = None, toolchain=()) -> etf.Run:
+    dirs = tuple(os.path.abspath(d) + os.sep for d in toolchain)
+    return etf.Run(os.path.abspath(run_root or root), os.path.abspath(root), "1.2.3",
+                   footprint.Caches(toolchain=dirs))
 
 
 def _test(check: str, files=(), outcome: str = "passed") -> etf.Test:
@@ -121,7 +123,28 @@ def test_config_is_one_key_per_section_the_run_reads(project):
     assert "pyproject.toml" not in _files(keys), "its sections are the keys, not the file"
     assert plan.inputs[("derived", "cfg/pytest.ini#pytest")] == b'{"addopts":"-q"}'
     assert plan.inputs[("derived", "cfg/pyproject.toml#tool.tiderace")] == b'{"x":1}'
-    assert plan.inputs[("derived", "cfg/pyproject.toml#tool.pytest")] == b"{}"
+    assert plan.inputs[("derived", "cfg/pyproject.toml#tool.pytest")] == b"null", "no such table"
+
+
+def test_every_directory_the_config_loader_looked_in_is_keyed(tmp_path):
+    """The loader walks up from the run root until a config carries a pytest section. A file it
+    passed over on the way decided something too: give it the section and the rootdir moves."""
+    root = _tree(tmp_path, {"pyproject.toml": "[project]\nname = 'p'\n", "tests/test_a.py": "",
+                            "tests/setup.cfg": "[metadata]\nname = p\n"})
+    plan = etf.build(_run(root, run_root=os.path.join(root, "tests")), [_test("tests/test_a.py::t")])
+    keys = plan.trace(plan.records[0])
+    assert {"tests/pytest.ini", "tests/pyproject.toml", "tests/tox.ini", "pytest.ini", "tox.ini",
+            "setup.cfg"} <= _files(keys), "nothing carries a section: looked in tests/ and above"
+    assert plan.inputs[("derived", "cfg/tests/setup.cfg#tool:pytest")] == b"null"
+    assert plan.inputs[("derived", "cfg/pyproject.toml#tool.pytest.ini_options")] == b"null"
+    assert plan.inputs[("derived", "cfg/pyproject.toml#tool.tiderace")] == b"{}"
+
+    (tmp_path / "tests" / "pytest.ini").write_text("[pytest]\n")  # an empty section still counts
+    plan = etf.build(_run(root, run_root=os.path.join(root, "tests")), [_test("tests/test_a.py::t")])
+    keys = plan.trace(plan.records[0])
+    assert plan.inputs[("derived", "cfg/tests/pytest.ini#pytest")] == b"{}"
+    assert not any(name.startswith("cfg/pyproject.toml") for kind, name in keys if kind == "derived"), \
+        "found in tests/: nothing above it was read"
 
 
 def test_the_toolchain_is_one_fragment_under_every_root(project):
@@ -158,8 +181,7 @@ def test_ids_and_keys_are_repository_relative_wherever_the_run_started(project):
     manifest = {"tests": [{"id": "unit/test_a.py::t[1-2]", "outcome": "passed", "duration_ms": 1,
                            "reads": {"file": ["tests/unit/test_a.py", "../outside.py", "/abs.py", "a//b.py",
                                               "venv/lib/x.py"]}}]}
-    run = _run(project, run_root=os.path.join(project, "tests"),
-               toolchain_dirs=(os.path.join(project, "venv"),))
+    run = _run(project, run_root=os.path.join(project, "tests"), toolchain=[os.path.join(project, "venv")])
     (test,) = etf.tests_from(manifest, run)
     assert test.check == "tests/unit/test_a.py::t[1-2]" and test.module == "tests/unit/test_a.py"
     assert test.reads == {"file": ["tests/unit/test_a.py"]}, "canonical repository paths only"
@@ -175,12 +197,16 @@ def test_a_virtualenv_in_the_checkout_is_the_toolchains_not_a_set_of_file_keys(p
     sys.path.insert(0, str(site.parent))
     try:
         keyed = etf.build(_run(project), [_test("tests/other/test_c.py::t")])
-        skipped = etf.build(_run(project, toolchain_dirs=(str(tmp_path / "venv"),)),
-                            [_test("tests/other/test_c.py::t")])
+        skipped = etf.build(_run(project, toolchain=[tmp_path / "venv"]), [_test("tests/other/test_c.py::t")])
+        cov = footprint._Coverage(project, True, caches=footprint.Caches(toolchain=(str(tmp_path / "venv") + os.sep,)))
     finally:
         sys.path.remove(str(site.parent))
     assert "venv/lib/site-packages/dep/__init__.py" in _files(keyed.trace(keyed.records[0]))
     assert not any(n.startswith("venv/") for n in _files(skipped.trace(skipped.records[0])))
+    # The workers leave it out of the footprint to begin with: no event, no parse, no entry.
+    assert not cov._want(str(site / "__init__.py")) and cov._want(str(tmp_path / "helper.py"))
+    assert footprint.toolchain_dirs(str(tmp_path)) == ()  # this interpreter is not installed under it
+    assert all(d.endswith(os.sep) for d in footprint.toolchain_dirs(os.path.dirname(sys.prefix)))
 
 
 # ------------------------------------------------------------------------------ the closure fixes

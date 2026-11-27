@@ -16,7 +16,7 @@ from .discovery import (discover, _insert_run_root, _load_ancestor_conftests, _P
                         preimport, Discovery)
 from .engine import _start_clean_room, Engine
 from .fixtures import Registry
-from .footprint import _load_file_deps_cache, Caches
+from .footprint import _load_file_deps_cache, toolchain_dirs, Caches
 from .log import warn as _warn
 from .nodes import module_name as _module_name
 from .protocol import reap, spawn, Transport
@@ -287,11 +287,13 @@ def serve() -> int:
     restore = "--restore" in sys.argv[2:] or _env_flag("TIDERACE_RESTORE")
     _insert_run_root(root)
     caches = Caches()
-    # `--etf` on a run root below the repository's (TID-128): footprints cover the whole tree, and
-    # the dependency lists that produces are not the ones a plain run caches, so neither is read
-    # or written.
+    # `--etf` (TID-128): footprints cover the repository, not the run root, and leave out a
+    # virtualenv kept inside it. The dependency lists that produces are not the ones a plain run
+    # caches, so that cache is neither read nor written.
     footprint_root = _env("TIDERACE_FOOTPRINT_ROOT") or None
-    if not footprint_root:
+    if footprint_root:
+        caches.toolchain = toolchain_dirs(footprint_root)
+    else:
         _load_file_deps_cache(caches, root)  # earlier runs' closures, before anything computes one (TID-82)
     # Ancestor conftests before `preimport` (TID-19): a root conftest exists to set things up that
     # must already be true when test modules import — env defaults, warning filters, `sys.path`. pytest

@@ -28,7 +28,7 @@ the root fragment's own pairs:
 Keys are file-granular (`file:<repo-relative path>`). Not here yet, each one more source or one
 more kind in a test's `reads`: negative import probes, environment reads and data-file reads
 (TID-129), unit keys (TID-130), and the carry-over chain for tests that ran in one process
-(estuary design 03, D-306).
+(estuary design 03, D-306; TID-154).
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ import sys
 import time
 
 from .config import CONFIG_FILES, _read as _read_config, load_project_config
-from .footprint import Caches, _file_deps
+from .footprint import Caches, _file_deps, toolchain_dirs
 from .log import warn as _warn
 
 MANIFEST_VERSION = 1
@@ -155,9 +155,12 @@ class Run:
     trace_root: str
     harness_version: str
     caches: Caches = dataclasses.field(default_factory=Caches)
-    # Directories inside the tree that belong to the toolchain, not the repository: a virtualenv
-    # kept in the checkout. `tool:pyenv` covers what is installed there.
-    toolchain_dirs: tuple = ()
+
+    @property
+    def toolchain_dirs(self) -> tuple:
+        """Directories inside the tree that belong to the toolchain, not the repository — a
+        virtualenv kept in the checkout (`caches.toolchain`). `tool:pyenv` covers what is there."""
+        return self.caches.toolchain
 
     def rel(self, path: str) -> str | None:
         """`path` as a key name — relative to the trace root, `/`-separated — or None when it is
@@ -165,7 +168,7 @@ class Run:
         path = os.path.abspath(path)
         if path != self.trace_root and not path.startswith(self.trace_root + os.sep):
             return None
-        if any(path.startswith(d + os.sep) for d in self.toolchain_dirs):
+        if self.toolchain_dirs and path.startswith(self.toolchain_dirs):
             return None
         return os.path.relpath(path, self.trace_root).replace(os.sep, "/")
 
@@ -174,19 +177,6 @@ class Run:
         if not name or name.startswith("/") or any(part in ("", ".", "..") for part in name.split("/")):
             return False
         return self.rel(os.path.join(self.trace_root, name.replace("/", os.sep))) is not None
-
-
-def _installed_under(trace_root: str) -> tuple:
-    """This interpreter's prefix and site directories, where they sit inside the tree."""
-    import site
-
-    candidates = {sys.prefix, sys.exec_prefix, *site.getsitepackages()}
-    try:
-        candidates.add(site.getusersitepackages())
-    except Exception:  # noqa: BLE001 — no user site on this build
-        pass
-    dirs = {os.path.abspath(c) for c in candidates if c}
-    return tuple(sorted(d for d in dirs if d.startswith(trace_root + os.sep)))
 
 
 # ------------------------------------------------------------------------------ the sources
@@ -224,28 +214,48 @@ def config(run: Run, plan: Plan, test: Test) -> int | None:
     """The configuration the run reads (TID-132), section by section: an edit to `[project]` in
     `pyproject.toml` is not an edit to `[tool.pytest.ini_options]`, and only the second can change
     an outcome. Each section the shim's loader reads is one `derived:cfg/<file>#<section>` key
-    whose value is the hash of the section's canonical JSON; a config file that could be there
-    and is not is a `file:` key with nothing behind it, so adding one invalidates."""
+    whose value is the hash of the section's canonical JSON — `null` for a pytest section that is
+    not there, since its presence is what makes a directory the rootdir. A config file that could
+    exist and does not is a `file:` key with nothing behind it, so adding one invalidates.
+
+    The loader looks in the run root and then in each directory above it until one carries a
+    pytest section, so every directory it looked in is keyed, not only the one it settled on."""
     if "config" in plan.memo:
         return plan.memo["config"]
     keys: list = []
-    rootdir = load_project_config(run.run_root).dir
-    for name in CONFIG_FILES:
-        path = os.path.join(rootdir, name)
-        rel = run.rel(path)
-        if rel is None:  # the config is above the tree the trace covers: nothing to name
-            continue
-        sections = _read_config(path, name) if os.path.isfile(path) else None
-        if sections is None:  # absent, or unreadable: the file itself, whatever it holds
-            keys.append(("file", rel))
-            continue
-        for label, section in zip(_section_names(name), sections[1]):
-            key = ("derived", f"cfg/{rel}#{label}")
-            plan.inputs[key] = json.dumps(section, sort_keys=True, separators=(",", ":"),
-                                          default=str).encode()
-            keys.append(key)
+    for directory in _config_dirs(run):
+        for name in CONFIG_FILES:
+            path = os.path.join(directory, name)
+            rel = run.rel(path)
+            if rel is None:  # above the tree the trace covers: nothing to name
+                continue
+            read = _read_config(path, name) if os.path.isfile(path) else None
+            if read is None:  # absent, or unreadable: the file itself, whatever it holds
+                keys.append(("file", rel))
+                continue
+            carries, sections = read
+            for label, section in zip(_section_names(name), sections):
+                absent = not carries and label != "tool.tiderace"
+                key = ("derived", f"cfg/{rel}#{label}")
+                plan.inputs[key] = json.dumps(None if absent else section, sort_keys=True,
+                                              separators=(",", ":"), default=str).encode()
+                keys.append(key)
     plan.memo["config"] = index = plan.fragment(keys) if keys else None
     return index
+
+
+def _config_dirs(run: Run) -> list:
+    """The directories the config loader read: the run root, then upward to the one whose config
+    carries a pytest section — or, when none does, as far up as the trace covers."""
+    project = load_project_config(run.run_root)
+    stop = project.dir if project.source else None
+    dirs, directory = [], run.run_root
+    while True:
+        dirs.append(directory)
+        parent = os.path.dirname(directory)
+        if directory in (stop, run.trace_root) or parent == directory or run.rel(parent) is None:
+            return dirs
+        directory = parent
 
 
 def _section_names(name: str) -> tuple:
@@ -463,7 +473,7 @@ def emit(manifest: dict) -> str:
     trace_root = os.path.abspath(manifest["trace_root"])
     run = Run(os.path.abspath(manifest["run_root"]), trace_root,
               harness_version(manifest.get("engine_version", "0.0.0")),
-              toolchain_dirs=_installed_under(trace_root))
+              Caches(toolchain=toolchain_dirs(trace_root)))
     plan = build(run, tests_from(manifest, run))
     tree = bytes.fromhex(manifest["tree"]) if manifest.get("tree") else None
     data = write(plan, run, created_at_ms=int(manifest.get("created_at_ms") or time.time() * 1000),
